@@ -4,66 +4,113 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <hypervisor.h>
+#include <types.h>
+#include <errno.h>
+#include <bits.h>
+#include <atomic.h>
+#include <irq.h>
+#include <cpu.h>
+#include <per_cpu.h>
+#include <lapic.h>
 
-static struct dev_handler_node *notification_node;
+static uint32_t notification_irq = IRQ_INVALID;
+
+static uint64_t smp_call_mask = 0UL;
 
 /* run in interrupt context */
-static int kick_notification(__unused int irq, __unused void *data)
+static void kick_notification(__unused uint32_t irq, __unused void *data)
 {
-	/* Notification vector does not require handling here, it's just used
-	 * to kick taget cpu out of non-root mode.
+	/* Notification vector is used to kick taget cpu out of non-root mode.
+	 * And it also serves for smp call.
 	 */
-	return 0;
+	uint16_t pcpu_id = get_pcpu_id();
+
+	if (bitmap_test(pcpu_id, &smp_call_mask)) {
+		struct smp_call_info_data *smp_call =
+			&per_cpu(smp_call_info, pcpu_id);
+
+		if (smp_call->func != NULL) {
+			smp_call->func(smp_call->data);
+		}
+		bitmap_clear_lock(pcpu_id, &smp_call_mask);
+	}
 }
 
-static int request_notification_irq(dev_handler_t func, void *data,
-				const char *name)
+void smp_call_function(uint64_t mask, smp_call_func_t func, void *data)
 {
-	uint32_t irq = IRQ_INVALID; /* system allocate */
-	struct dev_handler_node *node = NULL;
+	uint16_t pcpu_id;
+	struct smp_call_info_data *smp_call;
 
-	if (notification_node != NULL) {
-		pr_info("%s, Notification vector already allocated on this CPU",
-				__func__);
-		return -EBUSY;
+	/* wait for previous smp call complete, which may run on other cpus */
+	while (atomic_cmpxchg64(&smp_call_mask, 0UL, mask & INVALID_BIT_INDEX) != 0UL);
+	pcpu_id = ffs64(mask);
+	while (pcpu_id < CONFIG_MAX_PCPU_NUM) {
+		bitmap_clear_nolock(pcpu_id, &mask);
+		if (is_pcpu_active(pcpu_id)) {
+			smp_call = &per_cpu(smp_call_info, pcpu_id);
+			smp_call->func = func;
+			smp_call->data = data;
+		} else {
+			/* pcpu is not in active, print error */
+			pr_err("pcpu_id %d not in active!", pcpu_id);
+			bitmap_clear_nolock(pcpu_id, &smp_call_mask);
+		}
+		pcpu_id = ffs64(mask);
 	}
-
-	/* all cpu register the same notification vector */
-	node = pri_register_handler(irq, VECTOR_NOTIFY_VCPU, func, data, name);
-	if (node == NULL) {
-		pr_err("Failed to add notify isr");
-		return -1;
-	}
-	update_irq_handler(dev_to_irq(node), quick_handler_nolock);
-	notification_node = node;
-	return 0;
+	send_dest_ipi_mask((uint32_t)smp_call_mask, VECTOR_NOTIFY_VCPU);
+	/* wait for current smp call complete */
+	wait_sync_change(&smp_call_mask, 0UL);
 }
 
+static int32_t request_notification_irq(irq_action_t func, void *data)
+{
+	int32_t retval;
+
+	if (notification_irq != IRQ_INVALID) {
+		pr_info("%s, Notification vector already allocated on this CPU", __func__);
+		retval = -EBUSY;
+	} else {
+		/* all cpu register the same notification vector */
+		retval = request_irq(NOTIFY_IRQ, func, data, IRQF_NONE);
+		if (retval < 0) {
+			pr_err("Failed to add notify isr");
+			retval = -ENODEV;
+		} else {
+			notification_irq = (uint32_t)retval;
+		}
+	}
+
+	return retval;
+}
+
+/*
+ * @pre be called only by BSP initialization process
+ */
 void setup_notification(void)
 {
-	uint16_t cpu;
-	char name[32] = {0};
-
-	cpu = get_cpu_id();
-	if (cpu > 0U)
-		return;
-
-	/* support IPI notification, VM0 will register all CPU */
-	snprintf(name, 32, "NOTIFY_ISR%d", cpu);
-	if (request_notification_irq(kick_notification, NULL, name) < 0) {
+	/* support IPI notification, SOS_VM will register all CPU */
+	if (request_notification_irq(kick_notification, NULL) < 0) {
 		pr_err("Failed to setup notification");
-		return;
 	}
 
 	dev_dbg(ACRN_DBG_PTIRQ, "NOTIFY: irq[%d] setup vector %x",
-		dev_to_irq(notification_node),
-		dev_to_vector(notification_node));
+		notification_irq, irq_to_vector(notification_irq));
 }
 
-void cleanup_notification(void)
+static void posted_intr_notification(__unused uint32_t irq, __unused void *data)
 {
-	if (notification_node != NULL)
-		unregister_handler_common(notification_node);
-	notification_node = NULL;
+	/* Dummy IRQ handler for case that Posted-Interrupt Notification
+	 * is sent to vCPU in root mode(isn't running),interrupt will be
+	 * picked up in next vmentry,do nothine here.
+	 */
+}
+
+/*pre-conditon: be called only by BSP initialization proccess*/
+void setup_posted_intr_notification(void)
+{
+	if (request_irq(POSTED_INTR_NOTIFY_IRQ,
+			posted_intr_notification,
+			NULL, IRQF_NONE) < 0) {
+		pr_err("Failed to setup posted-intr notification");
+	}
 }

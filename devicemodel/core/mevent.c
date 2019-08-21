@@ -30,12 +30,11 @@
  * Micro event library for FreeBSD, designed for a single i/o thread
  * using EPOLL, and having events be persistent by default.
  */
-
-#include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sys/queue.h>
@@ -57,18 +56,23 @@ static int mevent_pipefd[2];
 static pthread_mutex_t mevent_lmutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct mevent {
-	void	(*me_func)(int, enum ev_type, void *);
-	int	me_fd;
-	enum ev_type me_type;
-	void *me_param;
-	int	me_cq;
-	int	me_state;
-	int	me_closefd;
+	void			(*run)(int, enum ev_type, void *);
+	void			*run_param;
+	void			(*teardown)(void *);
+	void			*teardown_param;
 
-	LIST_ENTRY(mevent) me_list;
+	int			me_fd;
+	enum			ev_type me_type;
+	int			me_cq;
+	int			me_state;
+
+	int			closefd;
+	LIST_ENTRY(mevent)	me_list;
 };
 
 static LIST_HEAD(listhead, mevent) global_head;
+/* List holds the mevent node which is requested to deleted */
+static LIST_HEAD(del_listhead, mevent) del_head;
 
 static void
 mevent_qlock(void)
@@ -82,11 +86,17 @@ mevent_qunlock(void)
 	pthread_mutex_unlock(&mevent_lmutex);
 }
 
+static bool
+is_dispatch_thread(void)
+{
+	return (pthread_self() == mevent_tid);
+}
+
 static void
 mevent_pipe_read(int fd, enum ev_type type, void *param)
 {
 	char buf[MEVENT_MAX];
-	int status;
+	ssize_t status;
 
 	/*
 	 * Drain the pipe read side. The fd is non-blocking so this is
@@ -97,7 +107,7 @@ mevent_pipe_read(int fd, enum ev_type type, void *param)
 	} while (status == MEVENT_MAX);
 }
 
-/*On error, -1 is returned, else return zero*/
+/* On error, -1 is returned, else return zero */
 int
 mevent_notify(void)
 {
@@ -107,7 +117,7 @@ mevent_notify(void)
 	 * If calling from outside the i/o thread, write a byte on the
 	 * pipe to force the i/o thread to exit the blocking epoll call.
 	 */
-	if (mevent_pipefd[1] != 0 && pthread_self() != mevent_tid)
+	if (mevent_pipefd[1] != 0 && !is_dispatch_thread())
 		if (write(mevent_pipefd[1], &c, 1) <= 0)
 			return -1;
 	return 0;
@@ -123,33 +133,59 @@ mevent_kq_filter(struct mevent *mevp)
 	if (mevp->me_type == EVF_READ)
 		retval = EPOLLIN;
 
+	if (mevp->me_type == EVF_READ_ET)
+		retval = EPOLLIN | EPOLLET;
+
 	if (mevp->me_type == EVF_WRITE)
 		retval = EPOLLOUT;
+
+	if (mevp->me_type == EVF_WRITE_ET)
+		retval = EPOLLOUT | EPOLLET;
+
 	return retval;
 }
 
 static void
-mevent_destroy()
+mevent_destroy(void)
 {
 	struct mevent *mevp, *tmpp;
-	struct epoll_event ee;
 
 	mevent_qlock();
-
 	list_foreach_safe(mevp, &global_head, me_list, tmpp) {
 		LIST_REMOVE(mevp, me_list);
-		ee.events = mevent_kq_filter(mevp);
-		ee.data.ptr = mevp;
-		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, mevp->me_fd, &ee);
+		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, mevp->me_fd, NULL);
 
-		if ((mevp->me_type == EVF_READ ||
-			mevp->me_type == EVF_WRITE)
-			&& mevp->me_fd != STDIN_FILENO)
-			close(mevp->me_fd);
+               if ((mevp->me_type == EVF_READ ||
+                    mevp->me_type == EVF_READ_ET ||
+                    mevp->me_type == EVF_WRITE ||
+                    mevp->me_type == EVF_WRITE_ET) &&
+                    mevp->me_fd != STDIN_FILENO)
+                       close(mevp->me_fd);
+
+		if (mevp->teardown)
+			mevp->teardown(mevp->teardown_param);
 
 		free(mevp);
 	}
 
+	/* the mevp in del_head was removed from epoll when add it
+	 * to del_head already.
+	 */
+	list_foreach_safe(mevp, &del_head, me_list, tmpp) {
+		LIST_REMOVE(mevp, me_list);
+
+               if ((mevp->me_type == EVF_READ ||
+                    mevp->me_type == EVF_READ_ET ||
+                    mevp->me_type == EVF_WRITE ||
+                    mevp->me_type == EVF_WRITE_ET) &&
+                    mevp->me_fd != STDIN_FILENO)
+                       close(mevp->me_fd);
+
+		if (mevp->teardown)
+			mevp->teardown(mevp->teardown_param);
+
+		free(mevp);
+	}
 	mevent_qunlock();
 }
 
@@ -161,21 +197,22 @@ mevent_handle(struct epoll_event *kev, int numev)
 
 	for (i = 0; i < numev; i++) {
 		mevp = kev[i].data.ptr;
-		/* XXX check for EV_ERROR ? */
 
-		(*mevp->me_func)(mevp->me_fd, mevp->me_type, mevp->me_param);
+		if (mevp->me_state)
+			(*mevp->run)(mevp->me_fd, mevp->me_type, mevp->run_param);
 	}
 }
 
 struct mevent *
 mevent_add(int tfd, enum ev_type type,
-	   void (*func)(int, enum ev_type, void *), void *param)
+	   void (*run)(int, enum ev_type, void *), void *run_param,
+	   void (*teardown)(void *), void *teardown_param)
 {
 	int ret;
 	struct epoll_event ee;
 	struct mevent *lp, *mevp;
 
-	if (tfd < 0 || func == NULL)
+	if (tfd < 0 || run == NULL)
 		return NULL;
 
 	if (type == EVF_TIMER)
@@ -200,12 +237,17 @@ mevent_add(int tfd, enum ev_type type,
 
 	mevp->me_fd = tfd;
 	mevp->me_type = type;
-	mevp->me_func = func;
-	mevp->me_param = param;
+	mevp->me_state = 1;
+
+	mevp->run = run;
+	mevp->run_param = run_param;
+	mevp->teardown = teardown;
+	mevp->teardown_param = teardown_param;
 
 	ee.events = mevent_kq_filter(mevp);
 	ee.data.ptr = mevp;
 	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, mevp->me_fd, &ee);
+
 	if (ret == 0) {
 		mevent_qlock();
 		LIST_INSERT_HEAD(&global_head, mevp, me_list);
@@ -221,32 +263,94 @@ mevent_add(int tfd, enum ev_type type,
 int
 mevent_enable(struct mevent *evp)
 {
-	return 0;
+	int ret;
+	struct epoll_event ee;
+	struct mevent *lp, *mevp = NULL;
+
+	mevent_qlock();
+	/* Verify that the fd/type tuple is not present in the list */
+	LIST_FOREACH(lp, &global_head, me_list) {
+		if (lp == evp) {
+			mevp = lp;
+			break;
+		}
+	}
+	mevent_qunlock();
+
+	if (!mevp)
+		return -1;
+
+	ee.events = mevent_kq_filter(mevp);
+	ee.data.ptr = mevp;
+	ret = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, mevp->me_fd, &ee);
+	if (ret < 0 && errno == EEXIST)
+		ret = 0;
+
+	return ret;
 }
 
 int
 mevent_disable(struct mevent *evp)
 {
-	return 0;
+	int ret;
+
+	ret = epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evp->me_fd, NULL);
+	if (ret < 0 && errno == ENOENT)
+		ret = 0;
+
+	return ret;
+}
+
+static void
+mevent_add_to_del_list(struct mevent *evp, int closefd)
+{
+	mevent_qlock();
+	LIST_INSERT_HEAD(&del_head, evp, me_list);
+	mevent_qunlock();
+
+	mevent_notify();
+}
+
+static void
+mevent_drain_del_list(void)
+{
+	struct mevent *evp, *tmpp;
+
+	mevent_qlock();
+	list_foreach_safe(evp, &del_head, me_list, tmpp) {
+		LIST_REMOVE(evp, me_list);
+		if (evp->closefd) {
+			close(evp->me_fd);
+		}
+
+		if (evp->teardown)
+			evp->teardown(evp->teardown_param);
+		free(evp);
+	}
+	mevent_qunlock();
 }
 
 static int
 mevent_delete_event(struct mevent *evp, int closefd)
 {
-	struct epoll_event ee;
-
 	mevent_qlock();
 	LIST_REMOVE(evp, me_list);
 	mevent_qunlock();
+	evp->me_state = 0;
+	evp->closefd = closefd;
 
-	ee.events = mevent_kq_filter(evp);
-	ee.data.ptr = evp;
-	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evp->me_fd, &ee);
+	epoll_ctl(epoll_fd, EPOLL_CTL_DEL, evp->me_fd, NULL);
+	if (!is_dispatch_thread() && evp->teardown != NULL) {
+		mevent_add_to_del_list(evp, closefd);
+	} else {
+		if (evp->closefd) {
+			close(evp->me_fd);
+		}
 
-	if (closefd)
-		close(evp->me_fd);
-
-	free(evp);
+		if (evp->teardown)
+			evp->teardown(evp->teardown_param);
+		free(evp);
+	}
 	return 0;
 }
 
@@ -272,7 +376,6 @@ int
 mevent_init(void)
 {
 	epoll_fd = epoll_create1(0);
-	assert(epoll_fd >= 0);
 
 	if (epoll_fd >= 0)
 		return 0;
@@ -285,6 +388,8 @@ mevent_deinit(void)
 {
 	mevent_destroy();
 	close(epoll_fd);
+	if (mevent_pipefd[1] != 0)
+		close(mevent_pipefd[1]);
 }
 
 void
@@ -303,7 +408,7 @@ mevent_dispatch(void)
 	 * the blocking kqueue call to exit by writing to it. Set the
 	 * descriptor to non-blocking.
 	 */
-	ret = pipe(mevent_pipefd);
+	ret = pipe2(mevent_pipefd, O_NONBLOCK);
 	if (ret < 0) {
 		perror("pipe");
 		exit(0);
@@ -312,14 +417,20 @@ mevent_dispatch(void)
 	/*
 	 * Add internal event handler for the pipe write fd
 	 */
-	pipev = mevent_add(mevent_pipefd[0], EVF_READ, mevent_pipe_read, NULL);
-	assert(pipev != NULL);
+	pipev = mevent_add(mevent_pipefd[0], EVF_READ, mevent_pipe_read, NULL, NULL, NULL);
+	if (!pipev) {
+		fprintf(stderr, "pipefd mevent_add failed\n");
+		exit(0);
+	}
 
 	for (;;) {
+		int suspend_mode;
+
 		/*
 		 * Block awaiting events
 		 */
 		ret = epoll_wait(epoll_fd, eventlist, MEVENT_MAX, -1);
+
 		if (ret == -1 && errno != EINTR)
 			perror("Error return from epoll_wait");
 
@@ -327,8 +438,12 @@ mevent_dispatch(void)
 		 * Handle reported events
 		 */
 		mevent_handle(eventlist, ret);
+		mevent_drain_del_list();
 
-		if (vm_get_suspend_mode() != VM_SUSPEND_NONE)
+		suspend_mode = vm_get_suspend_mode();
+		if ((suspend_mode != VM_SUSPEND_NONE) &&
+		    (suspend_mode != VM_SUSPEND_SYSTEM_RESET) &&
+		    (suspend_mode != VM_SUSPEND_SUSPEND))
 			break;
 	}
 }

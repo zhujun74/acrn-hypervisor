@@ -53,7 +53,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pty.h>
@@ -65,6 +64,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "dm.h"
 #include "ioc.h"
 #include "vmmapi.h"
 #include "monitor.h"
@@ -89,7 +89,7 @@ do { if (ioc_debug && dbg_file) { fprintf(dbg_file, format, arg);\
  * For debugging only, to generate lifecycle, signal and oem-raw data
  * from PTY devices instead of native CBC cdevs.
  */
-/* #define IOC_DUMMY */
+static bool ioc_debug_enable;
 
 /*
  * Type definition for thread function.
@@ -100,7 +100,7 @@ typedef void* (*ioc_work)(void *arg);
  * IOC mediator and virtual UART communication channel path,
  * comes from DM command line parameters.
  */
-static char virtual_uart_path[32];
+static char virtual_uart_path[32 + MAX_VMNAME_LEN];
 
 /*
  * To activate CBC signal channel(/dev/cbc-signals).
@@ -121,11 +121,9 @@ static uint32_t ioc_boot_reason;
  * Dummy pty slave fd is to maintain the pty active,
  * to avoid EIO error when close the slave pty.
  */
-#ifdef IOC_DUMMY
 static int dummy0_sfd = -1;
 static int dummy1_sfd = -1;
 static int dummy2_sfd = -1;
-#endif
 
 /*
  * VM Manager interfaces description.
@@ -236,12 +234,10 @@ static struct ioc_ch_info ioc_ch_tbl[] = {
 	{IOC_INIT_FD, IOC_NP_RAW10, IOC_NATIVE_RAW10,	IOC_CH_ON},
 	{IOC_INIT_FD, IOC_NP_RAW11, IOC_NATIVE_RAW11,	IOC_CH_ON},
 	{IOC_INIT_FD, IOC_DP_NONE,  IOC_VIRTUAL_UART,	IOC_CH_ON},
-	{IOC_INIT_FD, IOC_DP_NONE,  IOC_LOCAL_EVENT,	IOC_CH_ON}
-#ifdef IOC_DUMMY
+	{IOC_INIT_FD, IOC_DP_NONE,  IOC_LOCAL_EVENT,	IOC_CH_ON},
 	{IOC_INIT_FD, IOC_NP_FLF,   IOC_NATIVE_DUMMY0,	IOC_CH_ON},
 	{IOC_INIT_FD, IOC_NP_FSIG,  IOC_NATIVE_DUMMY1,	IOC_CH_ON},
 	{IOC_INIT_FD, IOC_NP_FRAW,  IOC_NATIVE_DUMMY2,	IOC_CH_ON}
-#endif
 };
 
 static struct cbc_signal cbc_tx_signal_table[] = {
@@ -270,6 +266,7 @@ static struct cbc_signal cbc_tx_signal_table[] = {
 	{(uint16_t)CBC_SIG_ID_SWSCB,	3,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_SWPLB,	3,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_SWPCB,	3,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_SWPSB,    3, 	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_SWHB,	3,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_SWEB,	3,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_SWECB,	3,	CBC_ACTIVE},
@@ -464,6 +461,44 @@ static struct cbc_signal cbc_tx_signal_table[] = {
 	{(uint16_t)CBC_SIG_ID_GYROZ,	16,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_IAVMN,	8,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_RTST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_PKBK,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_PKBKST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_PKBKAT,	32,     CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_PKBKAS,	32,     CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFSPD,	32,     CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFSST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFDIR,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFDSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVACA,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVASTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HAMAX,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVMST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HAUTO,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HATSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVDEF,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDEFSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDFMAX,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDMXSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDUAL,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSMR,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSMST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSWL,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSWST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HPOWR,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HPWSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRECC,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRECST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTEMCB,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTCSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTMPST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTSSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTMPU,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTUSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVTST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVSSTT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRCAT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRASTT,	32,	CBC_ACTIVE},
 };
 
 static struct cbc_signal cbc_rx_signal_table[] = {
@@ -476,7 +511,27 @@ static struct cbc_signal cbc_rx_signal_table[] = {
 	{(uint16_t)CBC_SIG_ID_RIVS,	1,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_RRMS,	8,	CBC_ACTIVE},
 	{(uint16_t)CBC_SIG_ID_MTAM,	1,	CBC_ACTIVE},
-	{(uint16_t)CBC_SIG_ID_VICL,	8,	CBC_ACTIVE}
+	{(uint16_t)CBC_SIG_ID_PBST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_PBAT,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFSS,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HFDST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVAST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HAMS,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HATST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDEFST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDMXST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HDST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSMS,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HHSWS,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HPWST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRCST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTCST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTSST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HTUST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HVSST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_HRAST,	32,	CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_USBVBUS,  1,      CBC_ACTIVE},
+	{(uint16_t)CBC_SIG_ID_VICL,	8,	CBC_ACTIVE},
 };
 
 static struct cbc_group cbc_rx_group_table[] = {
@@ -495,9 +550,33 @@ static struct cbc_group cbc_tx_group_table[] = {
 };
 
 static struct wlist_signal wlist_rx_signal_table[] = {
+	{(uint16_t)CBC_SIG_ID_HRASTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PBST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PBAT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFSS,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFDST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVAST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HAMS,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HATST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDEFST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDMXST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSMS,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSWS,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HPWST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRCST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTCST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTSST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTUST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVSST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRAST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_USBVBUS,  DEFAULT_WLIST_NODE},
 };
 
 static struct wlist_signal wlist_tx_signal_table[] = {
+	{(uint16_t)CBC_SIG_ID_TSA,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_VSPD,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_VESP,	DEFAULT_WLIST_NODE},
 	{(uint16_t)CBC_SIG_ID_ATEMP,	DEFAULT_WLIST_NODE},
 	{(uint16_t)CBC_SIG_ID_VSPD,	DEFAULT_WLIST_NODE},
 	{(uint16_t)CBC_SIG_ID_VESP,	DEFAULT_WLIST_NODE},
@@ -506,7 +585,51 @@ static struct wlist_signal wlist_tx_signal_table[] = {
 	{(uint16_t)CBC_SIG_ID_VGP,	DEFAULT_WLIST_NODE},
 	{(uint16_t)CBC_SIG_ID_VAG,	DEFAULT_WLIST_NODE},
 	{(uint16_t)CBC_SIG_ID_VFS,	DEFAULT_WLIST_NODE},
-	{(uint16_t)CBC_SIG_ID_ALTI,	DEFAULT_WLIST_NODE}
+	{(uint16_t)CBC_SIG_ID_SWUB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_SWSCB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_SWPCB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_SWAMB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_SWDB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_ALTI,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PKBK,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PKBKST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PKBKAT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_PKBKAS,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFSPD,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFSST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFDIR,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HFDSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVACA,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVASTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HAMAX,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVMST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HAUTO,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HATSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVDEF,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDEFSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDFMAX,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDMXSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDUAL,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HDSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSMR,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSMST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSWL,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HHSWST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HPOWR,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HPWSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRECC,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRECST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTEMCB,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTCSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTMPST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTSSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTMPU,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HTUSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVTST,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HVSSTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRCAT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_HRASTT,	DEFAULT_WLIST_NODE},
+	{(uint16_t)CBC_SIG_ID_VSWA,	DEFAULT_WLIST_NODE},
 };
 
 static struct wlist_group wlist_rx_group_table[] = {
@@ -695,24 +818,33 @@ ioc_ch_init(struct ioc_dev *ioc)
 				DPRINTF("%s", "ioc open event fd failed\r\n");
 			}
 			break;
-#ifdef IOC_DUMMY
 		/*
 		 * TODO: check open if success for dummy fd
 		 */
 		case IOC_NATIVE_DUMMY0:
-			fd = ioc_open_virtual_uart(chl->name);
-			dummy0_sfd = open(chl->name, O_RDWR | O_NOCTTY |
-					O_NONBLOCK);
-		case IOC_NATIVE_DUMMY1:
-			fd = ioc_open_virtual_uart(chl->name);
-			dummy1_sfd = open(chl->name, O_RDWR | O_NOCTTY |
-					O_NONBLOCK);
-		case IOC_NATIVE_DUMMY2:
-			fd = ioc_open_virtual_uart(chl->name);
-			dummy2_sfd = open(chl->name, O_RDWR | O_NOCTTY |
-					O_NONBLOCK);
+			if (ioc_debug_enable) {
+				fd = ioc_open_virtual_uart(chl->name);
+				dummy0_sfd = open(chl->name, O_RDWR | O_NOCTTY |
+						O_NONBLOCK);
+			} else
+				fd = -1;
 			break;
-#endif
+		case IOC_NATIVE_DUMMY1:
+			if (ioc_debug_enable) {
+				fd = ioc_open_virtual_uart(chl->name);
+				dummy1_sfd = open(chl->name, O_RDWR | O_NOCTTY |
+						O_NONBLOCK);
+			} else
+				fd = -1;
+			break;
+		case IOC_NATIVE_DUMMY2:
+			if (ioc_debug_enable) {
+				fd = ioc_open_virtual_uart(chl->name);
+				dummy2_sfd = open(chl->name, O_RDWR | O_NOCTTY |
+						O_NONBLOCK);
+			} else
+				fd = -1;
+			break;
 		default:
 			fd = -1;
 			break;
@@ -753,11 +885,18 @@ ioc_ch_deinit(void)
 		chl->fd = IOC_INIT_FD;
 	}
 
-#ifdef IOC_DUMMY
-	close(dummy0_sfd);
-	close(dummy1_sfd);
-	close(dummy2_sfd);
-#endif
+	if (dummy0_sfd > 0) {
+		close(dummy0_sfd);
+		dummy0_sfd = -1;
+	}
+	if (dummy1_sfd > 0) {
+		close(dummy1_sfd);
+		dummy1_sfd = -1;
+	}
+	if (dummy2_sfd > 0) {
+		close(dummy2_sfd);
+		dummy2_sfd = -1;
+	}
 }
 
 /*
@@ -955,6 +1094,16 @@ process_resume_event(struct ioc_dev *ioc)
 			break;
 		}
 	}
+
+	/*
+	 * The signal channel is inactive after SOS resumed, need to send
+	 * open channel command again to activate the signal channel.
+	 * And it would not impact to UOS itself enter/exit S3.
+	 */
+	if (ioc_ch_xmit(IOC_NATIVE_SIGNAL, cbc_open_channel_command,
+				sizeof(cbc_open_channel_command)) <= 0)
+		DPRINTF("%s", "ioc reopen signal channel failed\r\n");
+
 	return 0;
 }
 
@@ -972,6 +1121,10 @@ ioc_process_events(struct ioc_dev *ioc, enum ioc_ch_id id)
 		DPRINTF("%s", "ioc state gets event failed\r\n");
 		return;
 	}
+
+	/* IOC_E_KNOCK event is only used to wakeup core thread */
+	if (evt == IOC_E_KNOCK)
+		return;
 
 	for (i = 0; i < ARRAY_SIZE(ioc_state_tbl); i++) {
 		if (evt == ioc_state_tbl[i].evt &&
@@ -1025,6 +1178,7 @@ ioc_build_request(struct ioc_dev *ioc, int32_t link_len, int32_t srv_len)
 	}
 	req->srv_len = srv_len;
 	req->link_len = link_len;
+	req->rtype = CBC_REQ_T_PROT;
 	cbc_request_enqueue(ioc, req, CBC_QUEUE_T_RX, false);
 }
 
@@ -1079,7 +1233,6 @@ ioc_process_tx(struct ioc_dev *ioc, enum ioc_ch_id id)
 	req->srv_len = count;
 	req->link_len = 0;
 	req->rtype = CBC_REQ_T_PROT;
-#ifdef IOC_DUMMY
 	if (id == IOC_NATIVE_DUMMY0)
 		req->id = IOC_NATIVE_LFCC;
 	else if (id == IOC_NATIVE_DUMMY1)
@@ -1088,9 +1241,7 @@ ioc_process_tx(struct ioc_dev *ioc, enum ioc_ch_id id)
 		req->id = IOC_NATIVE_RAW11;
 	else
 		req->id = id;
-#else
-	req->id = id;
-#endif
+
 	cbc_request_enqueue(ioc, req, CBC_QUEUE_T_TX, false);
 	return 0;
 }
@@ -1106,11 +1257,9 @@ ioc_dispatch(struct ioc_dev *ioc, struct ioc_ch_info *chl)
 	case IOC_NATIVE_LFCC:
 	case IOC_NATIVE_SIGNAL:
 	case IOC_NATIVE_RAW0 ... IOC_NATIVE_RAW11:
-#ifdef IOC_DUMMY
 	case IOC_NATIVE_DUMMY0:
 	case IOC_NATIVE_DUMMY1:
 	case IOC_NATIVE_DUMMY2:
-#endif
 		ioc_process_tx(ioc, chl->id);
 		break;
 	case IOC_VIRTUAL_UART:
@@ -1154,7 +1303,7 @@ ioc_core_thread(void *arg)
 	}
 
 	/* Start to epoll wait loop */
-	for (;;) {
+	while (!ioc->closing) {
 		n = epoll_wait(ioc->epfd, eventlist, IOC_MAX_EVENTS, -1);
 		if (n < 0 && errno != EINTR) {
 			DPRINTF("ioc epoll wait error:%s, exit ioc core\r\n",
@@ -1179,7 +1328,6 @@ ioc_rx_thread(void *arg)
 	struct ioc_dev *ioc = (struct ioc_dev *) arg;
 	struct cbc_request *req = NULL;
 	struct cbc_pkt packet;
-	int err;
 
 	memset(&packet, 0, sizeof(packet));
 	packet.cfg = &ioc->rx_config;
@@ -1188,8 +1336,7 @@ ioc_rx_thread(void *arg)
 	for (;;) {
 		pthread_mutex_lock(&ioc->rx_mtx);
 		while (SIMPLEQ_EMPTY(&ioc->rx_qhead)) {
-			err = pthread_cond_wait(&ioc->rx_cond, &ioc->rx_mtx);
-			assert(err == 0);
+			pthread_cond_wait(&ioc->rx_cond, &ioc->rx_mtx);
 			if (ioc->closing)
 				goto exit;
 		}
@@ -1232,7 +1379,6 @@ ioc_tx_thread(void *arg)
 	struct ioc_dev *ioc = (struct ioc_dev *) arg;
 	struct cbc_request *req = NULL;
 	struct cbc_pkt packet;
-	int err;
 
 	memset(&packet, 0, sizeof(packet));
 	packet.cfg = &ioc->tx_config;
@@ -1241,8 +1387,7 @@ ioc_tx_thread(void *arg)
 	for (;;) {
 		pthread_mutex_lock(&ioc->tx_mtx);
 		while (SIMPLEQ_EMPTY(&ioc->tx_qhead)) {
-			err =  pthread_cond_wait(&ioc->tx_cond, &ioc->tx_mtx);
-			assert(err == 0);
+			pthread_cond_wait(&ioc->tx_cond, &ioc->tx_mtx);
 			if (ioc->closing)
 				goto exit;
 		}
@@ -1284,6 +1429,7 @@ ioc_kill_workers(struct ioc_dev *ioc)
 	ioc->closing = 1;
 
 	/* Stop IOC core thread */
+	ioc_update_event(ioc->evt_fd, IOC_E_KNOCK);
 	close(ioc->epfd);
 	ioc->epfd = IOC_INIT_FD;
 	pthread_join(ioc->tid, NULL);
@@ -1407,23 +1553,44 @@ vm_resume_handler(void *arg)
 int
 ioc_parse(const char *opts)
 {
-	char *tmp;
-	char *param = strdup(opts);
+	char *tmp, *str, *cpy;
+	int rc;
 
-	tmp = strtok(param, ",");
-	snprintf(virtual_uart_path, sizeof(virtual_uart_path), "%s", param);
-	if (tmp != NULL) {
-		tmp = strtok(NULL, ",");
-		if (tmp != NULL) {
-			ioc_boot_reason = strtoul(tmp, 0, 0);
+	cpy = str = strdup(opts);
+	if (!cpy)
+		return -ENOMEM;
 
-			/*
-			 * Mask invalid bits of wakeup reason for IOC mediator
-			 */
-			ioc_boot_reason &= CBC_WK_RSN_ALL;
-		}
-	}
-	free(param);
+	/*
+	 * IOC mediator parameters format as below:
+	 * <virtual_uart_path>[,<wakeup_reason>]
+	 * For e.g. "/run/acrn/ioc_vm1,0x20"
+	 */
+	tmp = strsep(&str, ",");
+	if (!tmp)
+		goto exit;
+
+	rc = snprintf(virtual_uart_path, sizeof(virtual_uart_path), "%s", tmp);
+	if (rc < 0 || rc >= sizeof(virtual_uart_path))
+		WPRINTF("ioc gets incomplete virtual uart path:%s\r\n",
+				virtual_uart_path);
+
+	if (!str)
+		goto exit;
+
+	ioc_boot_reason = strtoul(str, 0, 0);
+
+	/*
+	 * According to the CBC protocol, the wakeup reason only occupies 0-23
+	 * bits, so 24-31 bits are used for customized functions, and bit 24 is
+	 * used to check whether to enable the ioc mediator debug function.
+	 */
+	ioc_debug_enable = ioc_boot_reason & CBC_WK_RSN_DGB ? true : false;
+
+	/* Mask invalid bits of wakeup reason for IOC mediator */
+	ioc_boot_reason &= CBC_WK_RSN_ALL;
+
+exit:
+	free(cpy);
 	return 0;
 }
 
@@ -1434,6 +1601,7 @@ int
 ioc_init(struct vmctx *ctx)
 {
 	int i;
+	int rc;
 	struct ioc_dev *ioc;
 
 	IOC_LOG_INIT;
@@ -1527,7 +1695,10 @@ ioc_init(struct vmctx *ctx)
 			ARRAY_SIZE(wlist_tx_group_table));
 
 	/* Setup IOC rx members */
-	snprintf(ioc->rx_name, sizeof(ioc->rx_name), "ioc_rx");
+	rc = snprintf(ioc->rx_name, sizeof(ioc->rx_name), "ioc_rx");
+	if (rc < 0)
+		WPRINTF("%s", "ioc fails to set ioc_rx thread name\r\n");
+
 	ioc->ioc_dev_rx = cbc_rx_handler;
 	pthread_cond_init(&ioc->rx_cond, NULL);
 	pthread_mutex_init(&ioc->rx_mtx, NULL);
@@ -1542,7 +1713,10 @@ ioc_init(struct vmctx *ctx)
 	ioc->rx_config.wlist_grp_tbl = wlist_rx_group_table;
 
 	/* Setup IOC tx members */
-	snprintf(ioc->tx_name, sizeof(ioc->tx_name), "ioc_tx");
+	rc = snprintf(ioc->tx_name, sizeof(ioc->tx_name), "ioc_tx");
+	if (rc < 0)
+		WPRINTF("%s", "ioc fails to set ioc_tx thread name\r\n");
+
 	ioc->ioc_dev_tx = cbc_tx_handler;
 	pthread_cond_init(&ioc->tx_cond, NULL);
 	pthread_mutex_init(&ioc->tx_mtx, NULL);
@@ -1569,7 +1743,10 @@ ioc_init(struct vmctx *ctx)
 	if (ioc_create_thread(ioc->tx_name, &ioc->tx_tid, ioc_tx_thread,
 			(void *)ioc) < 0)
 		goto work_err;
-	snprintf(ioc->name, sizeof(ioc->name), "ioc_core");
+	rc = snprintf(ioc->name, sizeof(ioc->name), "ioc_core");
+	if (rc < 0)
+		WPRINTF("%s", "ioc fails to set ioc_core thread name\r\n");
+
 	if (ioc_create_thread(ioc->name, &ioc->tid, ioc_core_thread,
 			(void *)ioc) < 0)
 		goto work_err;

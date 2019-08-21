@@ -29,24 +29,43 @@
 #ifndef	_DM_H_
 #define	_DM_H_
 
-#define	VMEXIT_CONTINUE		(0)
-#define	VMEXIT_ABORT		(-1)
 #include <stdbool.h>
 #include "types.h"
 #include "vmm.h"
+#include "dm_string.h"
+
+#define MAX_VMNAME_LEN	128U
 
 struct vmctx;
 extern int guest_ncpus;
 extern char *guest_uuid_str;
 extern uint8_t trusty_enabled;
 extern char *vsbl_file_name;
+extern char *ovmf_file_name;
+extern char *kernel_file_name;
+extern char *elf_file_name;
 extern char *vmname;
 extern bool stdio_in_use;
+extern char *mac_seed;
+extern bool lapic_pt;
+extern bool is_rtvm;
 
 int vmexit_task_switch(struct vmctx *ctx, struct vhm_request *vhm_req,
 		       int *vcpu);
-void *paddr_guest2host(struct vmctx *ctx, uintptr_t addr, size_t len);
-void *dm_gpa2hva(uint64_t gpa, size_t size);
+
+/**
+ * @brief Convert guest physical address to host virtual address
+ *
+ * @param ctx Pointer to to struct vmctx representing VM context.
+ * @param gaddr Guest physical address base.
+ * @param len Guest physical address length.
+ *
+ * @return NULL on convert failed and host virtual address on successful.
+ */
+void *paddr_guest2host(struct vmctx *ctx, uintptr_t gaddr, size_t len);
 int  virtio_uses_msix(void);
+size_t high_bios_size(void);
 void ptdev_no_reset(bool enable);
+void init_debugexit(void);
+void deinit_debugexit(void);
 #endif

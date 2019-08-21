@@ -6,6 +6,7 @@
 
 #ifndef LOGMSG_H
 #define LOGMSG_H
+#include <cpu.h>
 
 /* Logging severity levels */
 #define LOG_FATAL		1U
@@ -19,37 +20,61 @@
 /* Logging flags */
 #define LOG_FLAG_STDOUT		0x00000001U
 #define LOG_FLAG_MEMORY		0x00000002U
-#define LOG_ENTRY_SIZE	80
+#define LOG_FLAG_NPK		0x00000004U
+#define LOG_ENTRY_SIZE	80U
 /* Size of buffer used to store a message being logged,
  * should align to LOG_ENTRY_SIZE.
  */
-#define LOG_MESSAGE_MAX_SIZE	(4 * LOG_ENTRY_SIZE)
+#define LOG_MESSAGE_MAX_SIZE	(4U * LOG_ENTRY_SIZE)
 
+#define ACRN_DBG_LAPICPT	5U
 #if defined(HV_DEBUG)
 
-extern uint32_t console_loglevel;
-extern uint32_t mem_loglevel;
-void init_logmsg(uint32_t mem_size, uint32_t flags);
-void print_logmsg_buffer(uint16_t pcpu_id);
-void do_logmsg(uint32_t severity, const char *fmt, ...);
+extern uint16_t console_loglevel;
+extern uint16_t mem_loglevel;
+extern uint16_t npk_loglevel;
+
+void asm_assert(int32_t line, const char *file, const char *txt);
+
+#define ASSERT(x, ...) \
+	do { \
+		if (!(x)) {\
+			asm_assert(__LINE__, __FILE__, "fatal error");\
+		} \
+	} while (0)
 
 #else /* HV_DEBUG */
 
-static inline void init_logmsg(__unused uint32_t mem_size,
-			__unused uint32_t flags)
-{
-}
-
-static inline void do_logmsg(__unused uint32_t severity,
-			__unused const char *fmt, ...)
-{
-}
-
-static inline void print_logmsg_buffer(__unused uint16_t pcpu_id)
-{
-}
+#define ASSERT(x, ...)	do { } while (0)
 
 #endif /* HV_DEBUG */
+
+void init_logmsg(uint32_t flags);
+void do_logmsg(uint32_t severity, const char *fmt, ...);
+
+/** The well known printf() function.
+ *
+ *  Formats a string and writes it to the console output.
+ *
+ *  @param fmt A pointer to the NUL terminated format string.
+ *
+ *  @return The number of characters actually written or a negative
+ *          number if an error occurred.
+ */
+
+void printf(const char *fmt, ...);
+
+/** The well known vprintf() function.
+ *
+ *  Formats a string and writes it to the console output.
+ *
+ *  @param fmt A pointer to the NUL terminated format string.
+ *  @param args The variable long argument list as va_list.
+ *  @return The number of characters actually written or a negative
+ *          number if an error occurred.
+ */
+
+void vprintf(const char *fmt, va_list args);
 
 #ifndef pr_prefix
 #define pr_prefix
@@ -87,12 +112,12 @@ static inline void print_logmsg_buffer(__unused uint16_t pcpu_id)
 
 #define dev_dbg(lvl, ...)					\
 	do {							\
-		do_logmsg(lvl, pr_prefix __VA_ARGS__);	\
+		do_logmsg((lvl), pr_prefix __VA_ARGS__);	\
 	} while (0)
 
 #define panic(...) 							\
 	do { pr_fatal("PANIC: %s line: %d\n", __func__, __LINE__);	\
 		pr_fatal(__VA_ARGS__); 					\
-		while (1) { asm volatile ("pause" ::: "memory"); }; } while (0)
+		while (1) { asm_pause(); }; } while (0)
 
 #endif /* LOGMSG_H */

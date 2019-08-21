@@ -28,7 +28,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 
 #include "usb.h"
 #include "usbdi.h"
@@ -59,6 +58,7 @@ enum {
 	UMSTR_MAX
 };
 
+#define UMOUSE_DESC_MAX_LEN	32
 static const char *const umouse_desc_strings[] = {
 	"\x04\x09",
 	"ACRN-DM",
@@ -327,8 +327,6 @@ umouse_request(void *scarg, struct usb_data_xfer *xfer)
 	data = NULL;
 	udata = NULL;
 
-	assert(xfer != NULL && xfer->head >= 0);
-
 	idx = xfer->head;
 	for (i = 0; i < xfer->ndata; i++) {
 		xfer->data[idx].bdone = 0;
@@ -337,7 +335,7 @@ umouse_request(void *scarg, struct usb_data_xfer *xfer)
 			udata = data->buf;
 		}
 
-		xfer->data[idx].processed = 1;
+		xfer->data[idx].processed = USB_XFER_BLK_HANDLED;
 		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
 	}
 
@@ -437,7 +435,7 @@ umouse_request(void *scarg, struct usb_data_xfer *xfer)
 				goto done;
 			}
 
-			slen = 2 + strlen(str) * 2;
+			slen = 2 + strnlen(str, UMOUSE_DESC_MAX_LEN) * 2;
 			udata[0] = slen;
 			udata[1] = UDESC_STRING;
 
@@ -701,8 +699,6 @@ umouse_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 	int len, i, idx;
 	int err;
 
-	assert(xfer != NULL && xfer->head >= 0);
-
 	UPRINTF(LDBG, "handle data - DIR=%s|EP=%d, blen %d\r\n",
 		dir ? "IN" : "OUT", epctx, xfer->data[0].blen);
 
@@ -718,7 +714,7 @@ umouse_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		if (data->buf != NULL && data->blen != 0)
 			break;
 
-		data->processed = 1;
+		data->processed = USB_XFER_BLK_HANDLED;
 		data = NULL;
 		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
 	}
@@ -758,7 +754,7 @@ umouse_data_handler(void *scarg, struct usb_data_xfer *xfer, int dir,
 		if (len > 0) {
 			dev->newdata = 0;
 
-			data->processed = 1;
+			data->processed = USB_XFER_BLK_HANDLED;
 			data->bdone += 6;
 			memcpy(udata, &dev->um_report, 6);
 			data->blen = len - 6;

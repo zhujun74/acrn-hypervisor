@@ -28,32 +28,51 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
-#include <assert.h>
+#include <openssl/rand.h>
 
 #include "types.h"
 #include "vrpmb.h"
+
+#define DRNG_MAX_RETRIES 5U
 
 struct key_material {
 	uint8_t key[RPMB_KEY_LEN];
 	bool initialized;
 };
 
-static struct key_material vrkey = { .initialized = false };
+static struct key_material vrkey = {
+	.key = {0},
+	.initialized = false
+};
 
 int get_vrpmb_key(uint8_t *out, size_t size)
 {
+	int ret;
+	int i;
+
 	if (!out) {
 		fprintf(stderr, "%s: Invalid output pointer\n", __func__);
 		return 0;
 	}
 
-	assert(size == RPMB_KEY_LEN);
+	if (size != RPMB_KEY_LEN) {
+		fprintf(stderr, "%s: Invalid input key size\n", __func__);
+		return 0;
+	}
 
 	if ( vrkey.initialized == false ) {
-		/* FIXME: Currently the transport path is not ready, so
-		 * use fixed key(all 0) for temporary solution.
-		 */
-		memset(vrkey.key, 0, RPMB_KEY_LEN);
+		for (i = 0; i < DRNG_MAX_RETRIES; i++) {
+			ret = RAND_bytes(vrkey.key, RPMB_KEY_LEN);
+			if (ret == 1) {
+				vrkey.initialized = true;
+				break;
+			}
+		}
+
+		if (vrkey.initialized != true) {
+			fprintf(stderr, "%s: unable to generate random key!\n", __func__);
+			return 0;
+		}
 	}
 
 	memcpy(out, vrkey.key, size);

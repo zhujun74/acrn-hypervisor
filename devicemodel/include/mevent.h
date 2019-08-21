@@ -32,16 +32,17 @@
 enum ev_type {
 	EVF_READ,
 	EVF_WRITE,
+	EVF_READ_ET,
+	EVF_WRITE_ET,
 	EVF_TIMER,		/* Not supported yet */
 	EVF_SIGNAL		/* Not supported yet */
 };
 
-char *vmname;
 struct mevent;
 
 struct mevent *mevent_add(int fd, enum ev_type type,
-			  void (*func)(int, enum ev_type, void *),
-			  void *param);
+			  void (*run)(int, enum ev_type, void *), void *param,
+			  void (*teardown)(void *), void *teardown_param);
 int	mevent_enable(struct mevent *evp);
 int	mevent_disable(struct mevent *evp);
 int	mevent_delete(struct mevent *evp);

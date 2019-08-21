@@ -1,24 +1,55 @@
 T := $(CURDIR)
+OUT_DIR ?= $(shell mkdir -p $(T)/build;cd $(T)/build;pwd)
+RELEASE ?= 0
 
-.PHONY: all cbc_lifecycle cbc_attach
-all: cbc_lifecycle cbc_attach
+.PHONY: all acrn-crashlog acrnlog acrn-manager acrntrace acrnbridge
+ifeq ($(RELEASE),0)
+all: acrn-crashlog acrnlog acrn-manager acrntrace acrnbridge
+else
+all: acrn-manager acrnbridge
+endif
 
-cbc_lifecycle:
-	make -C $(T)/cbc_lifecycle OUT_DIR=$(OUT_DIR)
-cbc_attach:
-	make -C $(T)/cbc_attach OUT_DIR=$(OUT_DIR)
+acrn-crashlog:
+	$(MAKE) -C $(T)/tools/acrn-crashlog OUT_DIR=$(OUT_DIR) RELEASE=$(RELEASE)
+
+acrnlog:
+	$(MAKE) -C $(T)/tools/acrnlog OUT_DIR=$(OUT_DIR)
+
+acrn-manager:
+	$(MAKE) -C $(T)/acrn-manager OUT_DIR=$(OUT_DIR) RELEASE=$(RELEASE)
+
+acrntrace:
+	$(MAKE) -C $(T)/tools/acrntrace OUT_DIR=$(OUT_DIR)
+
+acrnbridge:
+	$(MAKE) -C $(T)/acrnbridge OUT_DIR=$(OUT_DIR)
 
 .PHONY: clean
 clean:
-	make -C $(T)/cbc_lifecycle clean
-	make -C $(T)/cbc_attach clean
+	$(MAKE) -C $(T)/tools/acrn-crashlog OUT_DIR=$(OUT_DIR) clean
+	$(MAKE) -C $(T)/acrn-manager OUT_DIR=$(OUT_DIR) clean
+	$(MAKE) -C $(T)/tools/acrntrace OUT_DIR=$(OUT_DIR) clean
+	$(MAKE) -C $(T)/tools/acrnlog OUT_DIR=$(OUT_DIR) clean
 	rm -rf $(OUT_DIR)
 
 .PHONY: install
-install: cbc_lifecycle-install cbc_attach-install
+ifeq ($(RELEASE),0)
+install: acrn-crashlog-install acrnlog-install acrn-manager-install acrntrace-install acrnbridge-install
+else
+install: acrn-manager-install acrnbridge-install
+endif
 
-cbc_lifecycle-install:
-	make -C $(T)/cbc_lifecycle OUT_DIR=$(OUT_DIR) install
+acrn-crashlog-install:
+	$(MAKE) -C $(T)/tools/acrn-crashlog OUT_DIR=$(OUT_DIR) install
 
-cbc_attach-install:
-	make -C $(T)/cbc_attach OUT_DIR=$(OUT_DIR) install
+acrnlog-install:
+	$(MAKE) -C $(T)/tools/acrnlog OUT_DIR=$(OUT_DIR) install
+
+acrn-manager-install:
+	$(MAKE) -C $(T)/acrn-manager OUT_DIR=$(OUT_DIR) install
+
+acrntrace-install:
+	$(MAKE) -C $(T)/tools/acrntrace OUT_DIR=$(OUT_DIR) install
+
+acrnbridge-install:
+	$(MAKE) -C $(T)/acrnbridge OUT_DIR=$(OUT_DIR) install

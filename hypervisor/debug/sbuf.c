@@ -9,96 +9,19 @@
  *
  */
 
-#include <hypervisor.h>
+#include <types.h>
+#include <rtl.h>
+#include <errno.h>
+#include <cpu.h>
+#include <per_cpu.h>
 
-static inline bool sbuf_is_empty(struct shared_buf *sbuf)
-{
-	return (sbuf->head == sbuf->tail);
-}
-
-static inline uint32_t sbuf_next_ptr(uint32_t pos,
+uint32_t sbuf_next_ptr(uint32_t pos_arg,
 		uint32_t span, uint32_t scope)
 {
+	uint32_t pos = pos_arg;
 	pos += span;
 	pos = (pos >= scope) ? (pos - scope) : pos;
 	return pos;
-}
-
-static inline uint32_t sbuf_calculate_allocate_size(uint32_t ele_num,
-						uint32_t ele_size)
-{
-	uint64_t sbuf_allocate_size;
-
-	sbuf_allocate_size = ele_num * ele_size;
-	sbuf_allocate_size +=  SBUF_HEAD_SIZE;
-	if (sbuf_allocate_size > SBUF_MAX_SIZE) {
-		pr_err("%s, num=0x%x, size=0x%x exceed 0x%x",
-			__func__, ele_num, ele_size, SBUF_MAX_SIZE);
-		return 0;
-	}
-
-	return (uint32_t) sbuf_allocate_size;
-}
-
-struct shared_buf *sbuf_allocate(uint32_t ele_num, uint32_t ele_size)
-{
-	struct shared_buf *sbuf;
-	uint32_t sbuf_allocate_size;
-
-	if (ele_num == 0U || ele_size == 0U) {
-		pr_err("%s invalid parameter!", __func__);
-		return NULL;
-	}
-
-	sbuf_allocate_size = sbuf_calculate_allocate_size(ele_num, ele_size);
-	if (sbuf_allocate_size == 0U)
-		return NULL;
-
-	sbuf = calloc(1, sbuf_allocate_size);
-	if (sbuf == NULL) {
-		pr_err("%s no memory!", __func__);
-		return NULL;
-	}
-
-	sbuf->ele_num = ele_num;
-	sbuf->ele_size = ele_size;
-	sbuf->size = ele_num * ele_size;
-	sbuf->magic = SBUF_MAGIC;
-	pr_info("%s ele_num=0x%x, ele_size=0x%x allocated",
-			__func__, ele_num, ele_size);
-	return sbuf;
-}
-
-void sbuf_free(struct shared_buf *sbuf)
-{
-	if ((sbuf == NULL) || sbuf->magic != SBUF_MAGIC) {
-		pr_err("%s invalid parameter!", __func__);
-		return;
-	}
-
-	sbuf->magic = 0UL;
-	free(sbuf);
-}
-
-int sbuf_get(struct shared_buf *sbuf, uint8_t *data)
-{
-	const void *from;
-
-	if ((sbuf == NULL) || (data == NULL))
-		return -EINVAL;
-
-	if (sbuf_is_empty(sbuf)) {
-		/* no data available */
-		return 0;
-	}
-
-	from = (void *)sbuf + SBUF_HEAD_SIZE + sbuf->head;
-
-	memcpy_s((void *)data, sbuf->ele_size, from, sbuf->ele_size);
-
-	sbuf->head = sbuf_next_ptr(sbuf->head, sbuf->ele_size, sbuf->size);
-
-	return sbuf->ele_size;
 }
 
 /**
@@ -119,15 +42,14 @@ int sbuf_get(struct shared_buf *sbuf, uint8_t *data)
  * negative:	failed.
  */
 
-int sbuf_put(struct shared_buf *sbuf, uint8_t *data)
+uint32_t sbuf_put(struct shared_buf *sbuf, uint8_t *data)
 {
 	void *to;
 	uint32_t next_tail;
+	uint32_t ele_size;
 	bool trigger_overwrite = false;
 
-	if ((sbuf == NULL) || (data == NULL))
-		return -EINVAL;
-
+	stac();
 	next_tail = sbuf_next_ptr(sbuf->tail, sbuf->ele_size, sbuf->size);
 	/* if this write would trigger overrun */
 	if (next_tail == sbuf->head) {
@@ -135,6 +57,7 @@ int sbuf_put(struct shared_buf *sbuf, uint8_t *data)
 		sbuf->overrun_cnt += sbuf->flags & OVERRUN_CNT_EN;
 		if ((sbuf->flags & OVERWRITE_EN) == 0U) {
 			/* if not enable over write, return here. */
+			clac();
 			return 0;
 		}
 		trigger_overwrite = true;
@@ -142,7 +65,7 @@ int sbuf_put(struct shared_buf *sbuf, uint8_t *data)
 
 	to = (void *)sbuf + SBUF_HEAD_SIZE + sbuf->tail;
 
-	memcpy_s(to, sbuf->ele_size, data, sbuf->ele_size);
+	(void)memcpy_s(to, sbuf->ele_size, data, sbuf->ele_size);
 
 	if (trigger_overwrite) {
 		sbuf->head = sbuf_next_ptr(sbuf->head,
@@ -150,18 +73,32 @@ int sbuf_put(struct shared_buf *sbuf, uint8_t *data)
 	}
 	sbuf->tail = next_tail;
 
-	return sbuf->ele_size;
+	ele_size = sbuf->ele_size;
+	clac();
+
+	return ele_size;
 }
 
-int sbuf_share_setup(uint16_t pcpu_id, uint32_t sbuf_id, uint64_t *hva)
+int32_t sbuf_share_setup(uint16_t pcpu_id, uint32_t sbuf_id, uint64_t *hva)
 {
-	if (pcpu_id >= phys_cpu_num ||
-			sbuf_id >= ACRN_SBUF_ID_MAX)
+	if ((pcpu_id >= get_pcpu_nums()) || (sbuf_id >= ACRN_SBUF_ID_MAX)) {
 		return -EINVAL;
+	}
 
-	per_cpu(sbuf, pcpu_id)[sbuf_id] = hva;
+	per_cpu(sbuf, pcpu_id)[sbuf_id] = (struct shared_buf *) hva;
 	pr_info("%s share sbuf for pCPU[%u] with sbuf_id[%u] setup successfully",
 			__func__, pcpu_id, sbuf_id);
 
 	return 0;
+}
+
+void sbuf_reset(void)
+{
+	uint16_t pcpu_id, sbuf_id;
+
+	for (pcpu_id = 0U; pcpu_id < get_pcpu_nums(); pcpu_id++) {
+		for (sbuf_id = 0U; sbuf_id < ACRN_SBUF_ID_MAX; sbuf_id++) {
+			per_cpu(sbuf, pcpu_id)[sbuf_id] = 0U;
+		}
+	}
 }

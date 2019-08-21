@@ -26,7 +26,6 @@
  */
 
 #include <stdint.h>
-#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -42,13 +41,15 @@
 #include "ps2kbd.h"
 #include "ps2mouse.h"
 #include "vmmapi.h"
+#include "mevent.h"
+#include "log.h"
 
 static void
 atkbdc_assert_kbd_intr(struct atkbdc_base *base)
 {
 	if ((base->ram[0] & KBD_ENABLE_KBD_INT) != 0) {
 		base->kbd.irq_active = true;
-		vm_isa_pulse_irq(base->ctx, base->kbd.irq, base->kbd.irq);
+		vm_set_gsi_irq(base->ctx, base->kbd.irq, GSI_RAISING_PULSE);
 	}
 }
 
@@ -57,7 +58,7 @@ atkbdc_assert_aux_intr(struct atkbdc_base *base)
 {
 	if ((base->ram[0] & KBD_ENABLE_AUX_INT) != 0) {
 		base->aux.irq_active = true;
-		vm_isa_pulse_irq(base->ctx, base->aux.irq, base->aux.irq);
+		vm_set_gsi_irq(base->ctx, base->aux.irq, GSI_RAISING_PULSE);
 	}
 }
 
@@ -290,7 +291,7 @@ atkbdc_sts_ctl_handler(struct vmctx *ctx, int vcpu, int in, int port,
 		       int bytes, uint32_t *eax, void *arg)
 {
 	struct atkbdc_base *base;
-	int	error, retval;
+	int retval;
 
 	if (bytes != 1)
 		return -1;
@@ -359,9 +360,9 @@ atkbdc_sts_ctl_handler(struct vmctx *ctx, int vcpu, int in, int port,
 			base->status |= KBDS_AUX_BUFFER_FULL |
 					KBDS_KBD_BUFFER_FULL;
 		break;
-	case KBDC_RESET:		/* Pulse "reset" line */
-		error = vm_suspend(ctx, VM_SUSPEND_RESET);
-		assert(error == 0 || errno == EALREADY);
+	case KBDC_RESET:		/* Pulse "cold reset" line */
+		vm_suspend(ctx, VM_SUSPEND_FULL_RESET);
+		mevent_notify();
 		break;
 	default:
 		if (*eax >= 0x21 && *eax <= 0x3f) {
@@ -413,8 +414,10 @@ atkbdc_init(struct vmctx *ctx)
 	int error;
 
 	base = calloc(1, sizeof(struct atkbdc_base));
-
-	assert(base != NULL);
+	if (!base) {
+		pr_err("%s: alloc memory fail!\n", __func__);
+		return;
+	}
 
 	base->ctx = ctx;
 	ctx->atkbdc_base = base;
@@ -430,7 +433,8 @@ atkbdc_init(struct vmctx *ctx)
 	iop.arg = base;
 
 	error = register_inout(&iop);
-	assert(error == 0);
+	if (error < 0)
+		goto fail;
 
 	bzero(&iop, sizeof(struct inout_port));
 	iop.name = "atkdbc";
@@ -441,7 +445,8 @@ atkbdc_init(struct vmctx *ctx)
 	iop.arg = base;
 
 	error = register_inout(&iop);
-	assert(error == 0);
+	if (error < 0)
+		goto fail;
 
 	pci_irq_reserve(KBD_DEV_IRQ);
 	base->kbd.irq = KBD_DEV_IRQ;
@@ -451,6 +456,11 @@ atkbdc_init(struct vmctx *ctx)
 
 	base->ps2kbd = ps2kbd_init(base);
 	base->ps2mouse = ps2mouse_init(base);
+
+	return;
+fail:
+	pr_err("%s: fail to init!\n", __func__);
+	free(base);
 }
 
 void

@@ -122,8 +122,7 @@ devicemodel, and doc folders) use::
 
     git clone https://github.com/projectacrn/acrn-hypervisor
 
-The project ACRN directory structure is described in the :ref:`primer`
-document. In addition to the ACRN hypervisor and device model itself,
+In addition to the ACRN hypervisor and device model itself,
 you'll also find the sources for technical documentation available from
 the `ACRN documentation site`_.  All of these are available for
 developers to contribute to and enhance.
@@ -171,11 +170,19 @@ The name in the commit message ``Signed-off-by:`` line and your email must
 match the change authorship information. Make sure your :file:`.gitconfig`
 is set up correctly by using:
 
-.. code-block:: console
+.. code-block:: none
 
    git config --global user.name "David Developer"
    git config --global user.email "david.developer@company.com"
 
+Tracked-On
+==========
+
+All commits must be mapped to a GitHub issue for a feature or bug. Add a
+Tracked-On: #issue-number line to your commit message together with the
+issue number, for example::
+
+   Tracked-On: #1420
 
 Coding Style
 ************
@@ -190,13 +197,22 @@ In general, follow the `Linux kernel coding style`_, with the
 following exceptions:
 
 * Add braces to every ``if`` and ``else`` body, even for single-line code
-  blocks. Use the ``--ignore BRACES`` flag to make *checkpatch* stop
-  complaining.
+  blocks.
 * Use spaces instead of tabs to align comments after declarations, as needed.
 * Use C89-style single line comments, ``/*  */``. The C99-style single line
   comment, ``//``, is not allowed.
 * Use ``/**  */`` for doxygen comments that need to appear in the documentation.
+* The line limit is 120 columns instead of 80 columns. Note that tabs are
+  8-column wide.
 
+You can use *checkpatch* from Linux kernel to check the compliance. ACRN
+maintains a `checkpatch conf`_ which customizes the script to stop warning on
+the exceptions above. Invoke *checkpatch* with the root of ``acrn-hypervisor``
+repository as the current working directory to make the configurations
+effective.
+
+.. _checkpatch conf:
+   https://github.com/projectacrn/acrn-hypervisor/blob/master/.checkpatch.conf
 
 .. _Contribution workflow:
 
@@ -274,6 +290,12 @@ source files for the hypervisor, devicemodel, and documentation:
    message.  Your commit will be rejected without this line that indicates your
    agreement with the `DCO`_.  See the `Commit Guidelines`_ section
    below for specific guidelines for writing your commit messages.
+
+   All commits must be mapped to a GitHub issue for a feature or bug. Add a
+   ``Tracked-On: #issue-number`` line to your commit message together
+   with the issue number, for example::
+
+      Tracked-On: #1420
 
 #. Push your topic branch with your changes to your fork in your personal
    GitHub account::
@@ -367,9 +389,10 @@ Changes are submitted as Git commits. Each commit message must contain:
 * A Signed-off-by line, ``Signed-off-by: <name> <email>`` typically added
   automatically by using ``git commit -s``
 
-* If the change addresses an issue, include a line of the form::
+* For traceability, all changes must include reference to a GitHub
+  issue. Include a line of the form::
 
-      Fixes #<brief description about the reported issue>.
+      Tracked-On: #issue-number
 
 
 All changes and topics sent to GitHub must be well-formed, as described above.

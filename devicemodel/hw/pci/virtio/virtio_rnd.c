@@ -27,8 +27,6 @@
 
 /*
  * virtio entropy device emulation.
- * Randomness is sourced from /dev/random which does not block
- * once it has been seeded at bootup.
  */
 
 #include <fcntl.h>
@@ -36,8 +34,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <assert.h>
 #include <pthread.h>
+#include <errno.h>
 
 #include "dm.h"
 #include "pci_core.h"
@@ -57,6 +55,10 @@ struct virtio_rnd {
 	pthread_mutex_t mtx;
 	uint64_t cfg;
 	int fd;
+	int in_progress;
+	pthread_t rx_tid;
+	pthread_mutex_t	rx_mtx;
+	pthread_cond_t rx_cond;
 	/* VBS-K variables */
 	struct {
 		enum VBS_K_STATUS status;
@@ -97,7 +99,6 @@ static struct virtio_ops virtio_rnd_ops = {
 	NULL,			/* write virtio config */
 	NULL,			/* apply negotiated features */
 	NULL,			/* called on guest set status */
-	0,			/* our capabilities */
 };
 
 /* VBS-K virtio_ops */
@@ -113,7 +114,6 @@ static struct virtio_ops virtio_rnd_ops_k = {
 	NULL,			/* write virtio config */
 	NULL,			/* apply negotiated features */
 	virtio_rnd_k_set_status,/* called on guest set status */
-	0,			/* our capabilities */
 };
 
 /* VBS-K interface function implementations */
@@ -141,7 +141,7 @@ virtio_rnd_k_set_status(void *base, uint64_t status)
 	nvq = rnd->base.vops->nvq;
 
 	if (rnd->vbs_k.status == VIRTIO_DEV_INIT_SUCCESS &&
-	    (status & VIRTIO_CR_STATUS_DRIVER_OK)) {
+	    (status & VIRTIO_CONFIG_S_DRIVER_OK)) {
 		/* time to kickoff VBS-K side */
 		/* init vdev first */
 		rc = virtio_rnd_kernel_dev_set(&rnd->vbs_k.dev,
@@ -193,7 +193,6 @@ virtio_rnd_k_set_status(void *base, uint64_t status)
 static int
 virtio_rnd_kernel_init(struct virtio_rnd *rnd)
 {
-	assert(rnd->vbs_k.fd == 0);
 
 	rnd->vbs_k.fd = open("/dev/vbs_rng", O_RDWR);
 	if (rnd->vbs_k.fd < 0) {
@@ -217,6 +216,7 @@ virtio_rnd_kernel_dev_set(struct vbs_dev_info *kdev, const char *name,
 
 	/* init kdev */
 	strncpy(kdev->name, name, VBS_NAME_LEN);
+	kdev->name[VBS_NAME_LEN - 1] = '\0';
 	kdev->vmid = vmid;
 	kdev->nvq = nvq;
 	kdev->negotiated_features = feature;
@@ -293,41 +293,70 @@ virtio_rnd_reset(void *base)
 		DPRINTF(("virtio_rnd: VBS-K reset requested!\n"));
 		virtio_rnd_kernel_stop(rnd);
 		virtio_rnd_kernel_reset(rnd);
-		rnd->vbs_k.status = VIRTIO_DEV_INITIAL;
+		rnd->vbs_k.status = VIRTIO_DEV_INIT_SUCCESS;
+	}
+}
+
+static void *
+virtio_rnd_get_entropy(void *param)
+{
+	struct virtio_rnd *rnd = param;
+	struct virtio_vq_info *vq = &rnd->vq;
+	struct iovec iov;
+	uint16_t idx;
+	ssize_t len;
+
+	for (;;) {
+		pthread_mutex_lock(&rnd->rx_mtx);
+		rnd->in_progress = 0;
+
+		/*
+		 * Checking the avail ring here serves two purposes:
+		 *  - avoid vring processing due to spurious wakeups
+		 *  - catch missing notifications before acquiring rx_mtx
+		 */
+		while (!vq_has_descs(vq))
+			pthread_cond_wait(&rnd->rx_cond, &rnd->rx_mtx);
+
+		rnd->in_progress = 1;
+		pthread_mutex_unlock(&rnd->rx_mtx);
+
+		do {
+			vq_getchain(vq, &idx, &iov, 1, NULL);
+			len = read(rnd->fd, iov.iov_base, iov.iov_len);
+			if (len <= 0) {
+				vq_retchain(vq);
+				vq_endchains(vq, 0);
+
+				/* no data available */
+				if (len == -1 && errno == EAGAIN)
+					return NULL;
+				break;
+			}
+
+			/* release this chain and handle more */
+			vq_relchain(vq, idx, len);
+		} while (vq_has_descs(vq));
+
+		/* at least one avail ring element has been processed */
+		vq_endchains(vq, 1);
 	}
 }
 
 static void
 virtio_rnd_notify(void *base, struct virtio_vq_info *vq)
 {
-	struct iovec iov;
-	struct virtio_rnd *rnd;
-	int len;
-	uint16_t idx;
+	struct virtio_rnd *rnd = base;
 
-	rnd = base;
-
-	if (rnd->fd < 0) {
-		vq_endchains(vq, 0);
+	/* Any ring entries to process */
+	if (!vq_has_descs(vq))
 		return;
-	}
 
-	while (vq_has_descs(vq)) {
-		vq_getchain(vq, &idx, &iov, 1, NULL);
-
-		len = read(rnd->fd, iov.iov_base, iov.iov_len);
-
-		DPRINTF(("%s: %d\r\n", __func__, len));
-
-		/* Catastrophe if unable to read from /dev/random */
-		assert(len > 0);
-
-		/*
-		 * Release this chain and handle more
-		 */
-		vq_relchain(vq, idx, len);
-	}
-	vq_endchains(vq, 1);	/* Generate interrupt if appropriate. */
+	/* Signal the thread for processing */
+	pthread_mutex_lock(&rnd->rx_mtx);
+	if (rnd->in_progress == 0)
+		pthread_cond_signal(&rnd->rx_cond);
+	pthread_mutex_unlock(&rnd->rx_mtx);
 }
 
 static int
@@ -335,13 +364,12 @@ virtio_rnd_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
 	struct virtio_rnd *rnd = NULL;
 	int fd;
-	int len;
-	uint8_t v;
 	pthread_mutexattr_t attr;
 	int rc;
 	char *opt;
 	char *vbs_k_opt = NULL;
 	enum VBS_K_STATUS kstat = VIRTIO_DEV_INITIAL;
+	char tname[MAXCOMLEN + 1];
 
 	while ((opt = strsep(&opts, ",")) != NULL) {
 		/* vbs_k_opt should be kernel=on */
@@ -357,17 +385,10 @@ virtio_rnd_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	/*
 	 * Should always be able to open /dev/random.
 	 */
-	fd = open("/dev/random", O_RDONLY | O_NONBLOCK);
-
-	assert(fd >= 0);
-
-	/*
-	 * Check that device is seeded and non-blocking.
-	 */
-	len = read(fd, &v, sizeof(v));
-	if (len <= 0) {
-		WPRINTF(("virtio_rnd: /dev/random not ready, read(): %d", len));
-		goto fail;
+	fd = open("/dev/random", O_RDONLY);
+	if (fd < 0) {
+		WPRINTF(("virtio_rnd: open failed: /dev/random \n"));
+		return -1;
 	}
 
 	rnd = calloc(1, sizeof(struct virtio_rnd));
@@ -400,7 +421,7 @@ virtio_rnd_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	if (rnd->vbs_k.status == VIRTIO_DEV_PRE_INIT) {
 		DPRINTF(("%s: VBS-K option detected!\n", __func__));
 		virtio_linkup(&rnd->base, &virtio_rnd_ops_k,
-			      rnd, dev, &rnd->vq);
+			      rnd, dev, &rnd->vq, BACKEND_VBSK);
 		rc = virtio_rnd_kernel_init(rnd);
 		if (rc < 0) {
 			WPRINTF(("virtio_rnd: VBS-K init failed,error %d!\n",
@@ -413,7 +434,7 @@ virtio_rnd_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	if (rnd->vbs_k.status == VIRTIO_DEV_INITIAL ||
 	    rnd->vbs_k.status != VIRTIO_DEV_INIT_SUCCESS) {
 		DPRINTF(("%s: fallback to VBS-U...\n", __func__));
-		virtio_linkup(&rnd->base, &virtio_rnd_ops, rnd, dev, &rnd->vq);
+		virtio_linkup(&rnd->base, &virtio_rnd_ops, rnd, dev, &rnd->vq, BACKEND_VBSU);
 	}
 
 	rnd->base.mtx = &rnd->mtx;
@@ -436,6 +457,15 @@ virtio_rnd_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 
 	virtio_set_io_bar(&rnd->base, 0);
 
+	rnd->in_progress = 0;
+	pthread_mutex_init(&rnd->rx_mtx, NULL);
+	pthread_cond_init(&rnd->rx_cond, NULL);
+	pthread_create(&rnd->rx_tid, NULL, virtio_rnd_get_entropy,
+		       (void *)rnd);
+	snprintf(tname, sizeof(tname), "vtrnd-%d:%d tx", dev->slot,
+		 dev->func);
+	pthread_setname_np(rnd->rx_tid, tname);
+
 	return 0;
 
 fail:
@@ -454,6 +484,7 @@ static void
 virtio_rnd_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
 	struct virtio_rnd *rnd;
+	void *jval;
 
 	rnd = dev->arg;
 	if (rnd == NULL) {
@@ -461,18 +492,24 @@ virtio_rnd_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		return;
 	}
 
+	pthread_cancel(rnd->rx_tid);
+	pthread_join(rnd->rx_tid, &jval);
+
 	if (rnd->vbs_k.status == VIRTIO_DEV_STARTED) {
 		DPRINTF(("%s: deinit virtio_rnd_k!\n", __func__));
 		virtio_rnd_kernel_stop(rnd);
 		virtio_rnd_kernel_reset(rnd);
 		rnd->vbs_k.status = VIRTIO_DEV_INITIAL;
-		assert(rnd->vbs_k.fd >= 0);
-		close(rnd->vbs_k.fd);
-		rnd->vbs_k.fd = -1;
+		if (rnd->vbs_k.fd >= 0) {
+			close(rnd->vbs_k.fd);
+			rnd->vbs_k.fd = -1;
+		}
 	}
 
-	assert(rnd->fd >= 0);
-	close(rnd->fd);
+	if (rnd->fd >= 0) {
+		close(rnd->fd);
+		rnd->fd = -1;
+	}
 	DPRINTF(("%s: free struct virtio_rnd!\n", __func__));
 	free(rnd);
 }

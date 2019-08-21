@@ -12,11 +12,11 @@ address. You need ``root`` privileges to make these changes to the system.
 ACRN Network Setup
 ******************
 
-The ACRN Service OS is based on `Clear Linux`_ and it uses `systemd-networkd`_
+The ACRN Service OS is based on `Clear Linux OS`_ and it uses `systemd-networkd`_
 to set up the Service OS networking. A few files are responsible for setting up the
-ACRN bridge (``acrn-br0``), the TAP device (``acrn_tap0``), and how these are all
+ACRN bridge (``acrn-br0``), the TAP device (``tap0``), and how these are all
 connected. Those files are installed in ``/usr/lib/systemd/network``
-on the target device and can also be found under ``tools/acrnbridge`` in the source code.
+on the target device and can also be found under ``misc/acrnbridge`` in the source code.
 
 Setting up the static IP address
 ********************************
@@ -26,7 +26,7 @@ You can set up a static IP address by copying the
 ``/etc/systemd/network/`` directory. You can create this directory and
 copy the file with the following command:
 
-.. code-block:: console
+.. code-block:: none
 
    mkdir -p /etc/systemd/network
    cp /usr/lib/systemd/network/50-eth.network /etc/systemd/network
@@ -35,8 +35,8 @@ Modify the ``[Network]`` section in the
 ``/etc/systemd/network/50-eth.network`` file you just created.
 This is the content of the file used in ACRN by default.
 
-.. literalinclude:: ../../tools/acrnbridge/eth.network
-   :caption: tools/acrnbridge/eth.network
+.. literalinclude:: ../../misc/acrnbridge/eth.network
+   :caption: misc/acrnbridge/eth.network
    :emphasize-lines: 5
 
 Edit the file to remove the line highlighted above and add your network settings in
@@ -61,7 +61,7 @@ Activate the new configuration
 You do not need to reboot the machine after making the changes to the system, the
 following steps that restart the ``systemd-networkd`` service will suffice (run as ``root``):
 
-.. code-block:: console
+.. code-block:: none
 
    systemctl daemon-reload
    systemctl restart systemd-networkd
@@ -72,7 +72,7 @@ of the configuration you are trying to set up, the modifications you have made t
 the output of ``journalctl -b -u systemd-networkd`` so we can best assist you.
 
 .. _systemd-networkd: https://www.freedesktop.org/software/systemd/man/systemd-networkd.service.html
-.. _Clear Linux: https://clearlinux.org
+.. _Clear Linux OS: https://clearlinux.org
 .. _systemd-network: https://www.freedesktop.org/software/systemd/man/systemd.network.html
 .. _ACRN-users mailing list: https://lists.projectacrn.org/g/acrn-users
 .. _ACRN hypervisor issues: https://github.com/projectacrn/acrn-hypervisor/issues

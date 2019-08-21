@@ -6,34 +6,29 @@
 
 #ifndef UTIL_H
 #define UTIL_H
-
-/** Add an offset (in bytes) to an (base)address.
- *
- *  @param  addr Baseaddress
- *  @param  off  Offset
- *  @return Returns baseaddress + offset in bytes.
- */
-#define ADD_OFFSET(addr, off) (void *)(((uint8_t *)(addr))+(off))
+#include <types.h>
 
 #define offsetof(st, m) __builtin_offsetof(st, m)
-
-/** Round an integer (x) up to a multiple of y */
-#define INT_ROUNDUP(x, y)     (((x)+((y)-1))&-(y))
-
-/** Round an integer up to a multiple of 4 */
-#define INT_ROUNDUP4(x)      INT_ROUNDUP(x, 4)
-
-/** Round an integer up to a multiple of 8 */
-#define INT_ROUNDUP8(x)      INT_ROUNDUP(x, 8)
-
-/** Round an integer up to a multiple of 8 */
-#define INT_ROUNDUP16(x)     INT_ROUNDUP(x, 16)
+#define va_start	__builtin_va_start
+#define va_end		__builtin_va_end
 
 /** Roundup (x/y) to ( x/y + (x%y) ? 1 : 0) **/
-#define INT_DIV_ROUNDUP(x, y)	(((x)+(y)-1)/(y))
+#define INT_DIV_ROUNDUP(x, y)	((((x)+(y))-1)/(y))
 
 #define min(x, y)	((x) < (y)) ? (x) : (y)
 
 #define max(x, y)	((x) < (y)) ? (y) : (x)
+
+/** Replaces 'x' by the string "x". */
+#define STRINGIFY(x) #x
+
+/* Macro used to check if a value is aligned to the required boundary.
+ * Returns TRUE if aligned; FALSE if not aligned
+ * NOTE:  The required alignment must be a power of 2 (2, 4, 8, 16, 32, etc)
+ */
+static inline bool mem_aligned_check(uint64_t value, uint64_t req_align)
+{
+	return ((value & (req_align - 1UL)) == 0UL);
+}
 
 #endif /* UTIL_H */

@@ -7,97 +7,34 @@
 #ifndef INTR_LAPIC_H
 #define INTR_LAPIC_H
 
-#define DEBUG_LAPIC 0
+#include <types.h>
+#include <apicreg.h>
 
-enum intr_lapic_icr_delivery_mode {
-	INTR_LAPIC_ICR_FIXED = 0x0,
-	INTR_LAPIC_ICR_LP = 0x1,
-	INTR_LAPIC_ICR_SMI = 0x2,
-	INTR_LAPIC_ICR_NMI = 0x4,
-	INTR_LAPIC_ICR_INIT = 0x5,
-	INTR_LAPIC_ICR_STARTUP = 0x6,
-};
+/* intr_lapic_icr_delivery_mode */
+#define INTR_LAPIC_ICR_FIXED    0x0U
+#define INTR_LAPIC_ICR_LP          0x1U
+#define INTR_LAPIC_ICR_SMI        0x2U
+#define INTR_LAPIC_ICR_NMI       0x4U
+#define INTR_LAPIC_ICR_INIT       0x5U
+#define INTR_LAPIC_ICR_STARTUP  0x6U
 
-enum intr_lapic_icr_dest_mode {
-	INTR_LAPIC_ICR_PHYSICAL = 0x0,
-	INTR_LAPIC_ICR_LOGICAL = 0x1
-};
+/* intr_lapic_icr_dest_mode */
+#define INTR_LAPIC_ICR_PHYSICAL 0x0U
+#define INTR_LAPIC_ICR_LOGICAL  0x1U
 
-enum intr_lapic_icr_level {
-	INTR_LAPIC_ICR_DEASSERT = 0x0,
-	INTR_LAPIC_ICR_ASSERT = 0x1,
-};
+/* intr_lapic_icr_level */
+#define INTR_LAPIC_ICR_DEASSERT  0x0U
+#define INTR_LAPIC_ICR_ASSERT       0x1U
 
-enum intr_lapic_icr_trigger {
-	INTR_LAPIC_ICR_EDGE = 0x0,
-	INTR_LAPIC_ICR_LEVEL = 0x1,
-};
+/* intr_lapic_icr_trigger */
+#define INTR_LAPIC_ICR_EDGE         0x0U
+#define INTR_LAPIC_ICR_LEVEL        0x1U
 
-enum intr_lapic_icr_shorthand {
-	INTR_LAPIC_ICR_USE_DEST_ARRAY = 0x0,
-	INTR_LAPIC_ICR_SELF = 0x1,
-	INTR_LAPIC_ICR_ALL_INC_SELF = 0x2,
-	INTR_LAPIC_ICR_ALL_EX_SELF = 0x3,
-};
-
-/* Default LAPIC base */
-#define LAPIC_BASE                              0xFEE00000U
-
-/* LAPIC register offset for memory mapped IO access */
-#define LAPIC_ID_REGISTER                       0x00000020U
-#define LAPIC_VERSION_REGISTER                  0x00000030U
-#define LAPIC_TASK_PRIORITY_REGISTER            0x00000080U
-#define LAPIC_ARBITRATION_PRIORITY_REGISTER     0x00000090U
-#define LAPIC_PROCESSOR_PRIORITY_REGISTER       0x000000A0U
-#define LAPIC_EOI_REGISTER                      0x000000B0U
-#define LAPIC_REMOTE_READ_REGISTER              0x000000C0U
-#define LAPIC_LOGICAL_DESTINATION_REGISTER      0x000000D0U
-#define LAPIC_DESTINATION_FORMAT_REGISTER       0x000000E0U
-#define LAPIC_SPURIOUS_VECTOR_REGISTER          0x000000F0U
-#define LAPIC_IN_SERVICE_REGISTER_0             0x00000100U
-#define LAPIC_IN_SERVICE_REGISTER_1             0x00000110U
-#define LAPIC_IN_SERVICE_REGISTER_2             0x00000120U
-#define LAPIC_IN_SERVICE_REGISTER_3             0x00000130U
-#define LAPIC_IN_SERVICE_REGISTER_4             0x00000140U
-#define LAPIC_IN_SERVICE_REGISTER_5             0x00000150U
-#define LAPIC_IN_SERVICE_REGISTER_6             0x00000160U
-#define LAPIC_IN_SERVICE_REGISTER_7             0x00000170U
-#define LAPIC_TRIGGER_MODE_REGISTER_0           0x00000180U
-#define LAPIC_TRIGGER_MODE_REGISTER_1           0x00000190U
-#define LAPIC_TRIGGER_MODE_REGISTER_2           0x000001A0U
-#define LAPIC_TRIGGER_MODE_REGISTER_3           0x000001B0U
-#define LAPIC_TRIGGER_MODE_REGISTER_4           0x000001C0U
-#define LAPIC_TRIGGER_MODE_REGISTER_5           0x000001D0U
-#define LAPIC_TRIGGER_MODE_REGISTER_6           0x000001E0U
-#define LAPIC_TRIGGER_MODE_REGISTER_7           0x000001F0U
-#define LAPIC_INT_REQUEST_REGISTER_0            0x00000200U
-#define LAPIC_INT_REQUEST_REGISTER_1            0x00000210U
-#define LAPIC_INT_REQUEST_REGISTER_2            0x00000220U
-#define LAPIC_INT_REQUEST_REGISTER_3            0x00000230U
-#define LAPIC_INT_REQUEST_REGISTER_4            0x00000240U
-#define LAPIC_INT_REQUEST_REGISTER_5            0x00000250U
-#define LAPIC_INT_REQUEST_REGISTER_6            0x00000260U
-#define LAPIC_INT_REQUEST_REGISTER_7            0x00000270U
-#define LAPIC_ERROR_STATUS_REGISTER             0x00000280U
-#define LAPIC_LVT_CMCI_REGISTER                 0x000002F0U
-#define LAPIC_INT_COMMAND_REGISTER_0            0x00000300U
-#define LAPIC_INT_COMMAND_REGISTER_1            0x00000310U
-#define LAPIC_LVT_TIMER_REGISTER                0x00000320U
-#define LAPIC_LVT_THERMAL_SENSOR_REGISTER       0x00000330U
-#define LAPIC_LVT_PMC_REGISTER                  0x00000340U
-#define LAPIC_LVT_LINT0_REGISTER                0x00000350U
-#define LAPIC_LVT_LINT1_REGISTER                0x00000360U
-#define LAPIC_LVT_ERROR_REGISTER                0x00000370U
-#define LAPIC_INITIAL_COUNT_REGISTER            0x00000380U
-#define LAPIC_CURRENT_COUNT_REGISTER            0x00000390U
-#define LAPIC_DIVIDE_CONFIGURATION_REGISTER     0x000003E0U
-
-/* LAPIC CPUID bit and bitmask definitions */
-#define CPUID_OUT_RDX_APIC_PRESENT              ((uint64_t) 1UL <<  9)
-#define CPUID_OUT_RCX_X2APIC_PRESENT            ((uint64_t) 1UL << 21)
-
-/* LAPIC MSR bit and bitmask definitions */
-#define MSR_01B_XAPIC_GLOBAL_ENABLE             ((uint64_t) 1UL << 11)
+/* intr_lapic_icr_shorthand */
+#define INTR_LAPIC_ICR_USE_DEST_ARRAY    0x0U
+#define INTR_LAPIC_ICR_SELF                          0x1U
+#define INTR_LAPIC_ICR_ALL_INC_SELF         0x2U
+#define INTR_LAPIC_ICR_ALL_EX_SELF            0x3U
 
 /* LAPIC register bit and bitmask definitions */
 #define LAPIC_SVR_VECTOR                        0x000000FFU
@@ -107,9 +44,9 @@ enum intr_lapic_icr_shorthand {
 #define LAPIC_DELIVERY_MODE_EXTINT_MASK         0x00000700U
 
 /* LAPIC Timer bit and bitmask definitions */
-#define LAPIC_TMR_ONESHOT                       ((uint32_t) 0x0U << 17)
-#define LAPIC_TMR_PERIODIC                      ((uint32_t) 0x1U << 17)
-#define LAPIC_TMR_TSC_DEADLINE                  ((uint32_t) 0x2U << 17)
+#define LAPIC_TMR_ONESHOT                       ((uint32_t) 0x0U << 17U)
+#define LAPIC_TMR_PERIODIC                      ((uint32_t) 0x1U << 17U)
+#define LAPIC_TMR_TSC_DEADLINE                  ((uint32_t) 0x2U << 17U)
 
 enum intr_cpu_startup_shorthand {
 	INTR_CPU_STARTUP_USE_DEST,
@@ -117,39 +54,133 @@ enum intr_cpu_startup_shorthand {
 	INTR_CPU_STARTUP_UNKNOWN,
 };
 
-union lapic_id {
-	uint32_t value;
+/* x2APIC Interrupt Command Register (ICR) structure */
+union apic_icr {
+	uint64_t value;
 	struct {
-		uint8_t xapic_id;
-		uint8_t rsvd[3];
-	} xapic;
-	union {
-		uint32_t value;
-		struct {
-			uint8_t xapic_id;
-			uint8_t xapic_edid;
-			uint8_t rsvd[2];
-		} ioxapic_view;
-		struct {
-			uint32_t x2apic_id:4;
-			uint32_t x2apic_cluster:28;
-		} ldr_view;
-	} x2apic;
+		uint32_t lo_32;
+		uint32_t hi_32;
+	} value_32;
+	struct {
+		uint32_t vector:8;
+		uint32_t delivery_mode:3;
+		uint32_t destination_mode:1;
+		uint32_t rsvd_1:2;
+		uint32_t level:1;
+		uint32_t trigger_mode:1;
+		uint32_t rsvd_2:2;
+		uint32_t shorthand:2;
+		uint32_t rsvd_3:12;
+		uint32_t dest_field:32;
+	} bits;
 };
 
-void write_lapic_reg32(uint32_t offset, uint32_t value);
+/**
+ * @defgroup lapic_ext_apis LAPIC External Interfaces
+ *
+ * This is a group that includes LAPIC External Interfaces.
+ *
+ * @{
+ */
+
+/**
+ * @brief Save context of LAPIC
+ *
+ * @param[inout]	regs	Pointer to struct lapic_regs to hold the
+ *				context of current LAPIC
+ */
 void save_lapic(struct lapic_regs *regs);
-int early_init_lapic(void);
-int init_lapic(uint16_t cpu_id);
+
+/**
+ * @brief Enable LAPIC in x2APIC mode
+ *
+ * Enable LAPIC in x2APIC mode via MSR writes.
+ *
+ */
+void early_init_lapic(void);
+
+/**
+ * @brief Suspend LAPIC
+ *
+ * Suspend LAPIC by getting the APIC base addr and saving the registers.
+ */
+void suspend_lapic(void);
+
+/**
+ * @brief Resume LAPIC
+ *
+ * Resume LAPIC by setting the APIC base addr and restoring the registers.
+ */
+void resume_lapic(void);
+
+/**
+ * @brief Get the LAPIC ID
+ *
+ * Get the LAPIC ID via MSR read.
+ *
+ * @return LAPIC ID
+ */
+uint32_t get_cur_lapic_id(void);
+
+/**
+ * @}
+ */
+/* End of lapic_ext_apis */
+
+void init_lapic(uint16_t pcpu_id);
 void send_lapic_eoi(void);
-uint8_t get_cur_lapic_id(void);
-int send_startup_ipi(enum intr_cpu_startup_shorthand cpu_startup_shorthand,
-		uint32_t cpu_startup_dest,
+
+/**
+ * @defgroup ipi_ext_apis IPI External Interfaces
+ *
+ * This is a group that includes IPI External Interfaces.
+ *
+ * @{
+ */
+
+/**
+ * @brief Send an SIPI to a specific cpu
+ *
+ * Send an Startup IPI to a specific cpu, to notify the cpu to start booting.
+ *
+ * @param[in]	cpu_startup_shorthand The startup_shorthand
+ * @param[in]	dest_pcpu_id The id of destination physical cpu
+ * @param[in]	cpu_startup_start_address The address for the dest pCPU to start running
+ *
+ * @pre cpu_startup_shorthand < INTR_CPU_STARTUP_UNKNOWN
+ */
+void send_startup_ipi(enum intr_cpu_startup_shorthand cpu_startup_shorthand,
+		uint16_t dest_pcpu_id,
 		uint64_t cpu_startup_start_address);
-/* API to send an IPI to a single guest */
+
+/**
+ * @brief Send an IPI to multiple pCPUs
+ *
+ * @param[in]	dest_mask The mask of destination physical cpus
+ * @param[in]	vector The vector of interrupt
+ */
+void send_dest_ipi_mask(uint32_t dest_mask, uint32_t vector);
+
+/**
+ * @brief Send an IPI to a single pCPU
+ *
+ * @param[in]	pcpu_id The id of destination physical cpu
+ * @param[in]	vector The vector of interrupt
+ */
 void send_single_ipi(uint16_t pcpu_id, uint32_t vector);
 
-void suspend_lapic(void);
-void resume_lapic(void);
+/**
+ * @}
+ */
+/* End of ipi_ext_apis */
+
+/**
+ * @brief Send an INIT signal to a single pCPU
+ *
+ * @param[in] pcpu_id The id of destination physical cpu
+ *
+ * @return None
+ */
+void send_single_init(uint16_t pcpu_id);
 
 #endif /* INTR_LAPIC_H */

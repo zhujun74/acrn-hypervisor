@@ -13,12 +13,12 @@
 #define SHARED_BUFFER_H
 
 #define SBUF_MAGIC	0x5aa57aa71aa13aa3UL
-#define SBUF_MAX_SIZE	(1 << 22)
-#define SBUF_HEAD_SIZE	64
+#define SBUF_MAX_SIZE	(1UL << 22U)
+#define SBUF_HEAD_SIZE	64U
 
 /* sbuf flags */
-#define OVERRUN_CNT_EN	(1 << 0) /* whether overrun counting is enabled */
-#define OVERWRITE_EN	(1 << 1) /* whether overwrite is enabled */
+#define OVERRUN_CNT_EN	(1U << 0U) /* whether overrun counting is enabled */
+#define OVERWRITE_EN	(1U << 1U) /* whether overwrite is enabled */
 
 /**
  * (sbuf) head + buf (store (ele_num - 1) elements at most)
@@ -37,8 +37,10 @@
  */
 
 enum {
-	ACRN_TRACE,
+	ACRN_TRACE = 0U,
 	ACRN_HVLOG,
+	ACRN_SEP,
+	ACRN_SOCWATCH,
 	ACRN_SBUF_ID_MAX,
 };
 
@@ -49,88 +51,21 @@ struct shared_buf {
 	uint32_t ele_size;	/* sizeof of elements */
 	uint32_t head;		/* offset from base, to read */
 	uint32_t tail;		/* offset from base, to write */
-	uint64_t flags;
+	uint32_t flags;
+	uint32_t reserved;
 	uint32_t overrun_cnt;	/* count of overrun */
 	uint32_t size;		/* ele_num * ele_size */
 	uint32_t padding[6];
 };
 
-#ifdef HV_DEBUG
 
-static inline void sbuf_clear_flags(struct shared_buf *sbuf, uint64_t flags)
-{
-	sbuf->flags &= ~flags;
-}
-
-static inline void sbuf_set_flags(struct shared_buf *sbuf, uint64_t flags)
-{
-	sbuf->flags = flags;
-}
-
-static inline void sbuf_add_flags(struct shared_buf *sbuf, uint64_t flags)
-{
-	sbuf->flags |= flags;
-}
-
-struct shared_buf *sbuf_allocate(uint32_t ele_num, uint32_t ele_size);
-void sbuf_free(struct shared_buf *sbuf);
-int sbuf_get(struct shared_buf *sbuf, uint8_t *data);
-int sbuf_put(struct shared_buf *sbuf, uint8_t *data);
-int sbuf_share_setup(uint16_t pcpu_id, uint32_t sbuf_id, uint64_t *hva);
-
-#else /* HV_DEBUG */
-
-static inline void sbuf_clear_flags(
-		__unused struct shared_buf *sbuf,
-		__unused uint64_t flags)
-{
-}
-
-static inline void sbuf_set_flags(
-		__unused struct shared_buf *sbuf,
-		__unused uint64_t flags)
-{
-}
-
-static inline void sbuf_add_flags(
-		__unused struct shared_buf *sbuf,
-		__unused uint64_t flags)
-{
-}
-
-static inline struct shared_buf *sbuf_allocate(
-		__unused uint32_t ele_num,
-		__unused uint32_t ele_size)
-{
-	return NULL;
-}
-
-static inline void sbuf_free(
-		__unused struct shared_buf *sbuf)
-{
-}
-
-static inline int sbuf_get(
-		__unused struct shared_buf *sbuf,
-		__unused uint8_t *data)
-{
-	return 0;
-}
-
-static inline int sbuf_put(
-		__unused struct shared_buf *sbuf,
-		__unused uint8_t *data)
-{
-	return 0;
-}
-
-static inline int sbuf_share_setup(
-		__unused uint16_t pcpu_id,
-		__unused uint32_t sbuf_id,
-		__unused uint64_t *hva)
-{
-	return -1;
-}
-#endif /* HV_DEBUG */
+/**
+ *@pre sbuf != NULL
+ *@pre data != NULL
+ */
+uint32_t sbuf_put(struct shared_buf *sbuf, uint8_t *data);
+int32_t sbuf_share_setup(uint16_t pcpu_id, uint32_t sbuf_id, uint64_t *hva);
+void sbuf_reset(void);
+uint32_t sbuf_next_ptr(uint32_t pos, uint32_t span, uint32_t scope);
 
 #endif /* SHARED_BUFFER_H */

@@ -3,6 +3,7 @@
 
 #include "macros.h"
 #include <stdint.h>
+#include <stdarg.h>
 #include <sched.h>
 #include <sys/types.h>
 
@@ -17,6 +18,11 @@ typedef uint64_t vm_ooffset_t;
 typedef uint64_t cap_ioctl_t;
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
+
+#define container_of(ptr, type, member) ({                   \
+	const typeof(((type *)0)->member) * __mptr = (ptr);  \
+	(type *)((char *)__mptr - (offsetof(type, member))); \
+})
 
 #define __aligned(x)		__attribute__((aligned(x)))
 #define __section(x)		__attribute__((__section__(x)))
@@ -37,6 +43,7 @@ typedef uint64_t cap_ioctl_t;
 
 #define SET_FOREACH(pvar, set)                      \
 	for (pvar = SET_BEGIN(set); pvar < SET_LIMIT(set); pvar++)
+
 #define nitems(x) (sizeof((x)) / sizeof((x)[0]))
 #define roundup2(x, y)  (((x)+((y)-1))&(~((y)-1)))
 #define rounddown2(x, y) ((x)&(~((y)-1)))
@@ -135,5 +142,7 @@ do_cpuid(u_int ax, u_int *p)
 	  (w)[6] = (uint8_t)((v) >> 48);    \
 	  (w)[7] = (uint8_t)((v) >> 56);    \
 } while (0)
+
+#define __packed       __attribute__((packed))
 
 #endif

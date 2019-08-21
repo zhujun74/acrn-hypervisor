@@ -6,7 +6,7 @@ Getting started guide for UP2 board
 Hardware setup
 **************
 
-The `UP Squared board <http://www.up-board.org/upsquared/>`_ (UP2) is
+The `UP Squared board <http://www.up-board.org/upsquared/specifications/>`_ (UP2) is
 an x86 maker board based on the Intel Apollo Lake platform. The UP boards
 are used in IoT applications, industrial automation, digital signage, and more.
 
@@ -19,16 +19,30 @@ SoCs. Both have been confirmed to work with ACRN.
 Connecting to the serial port
 =============================
 
-The UP2 board has two serial ports. Please refer to the `UP2
-specifications <http://www.up-board.org/upsquared/specifications-up2/>`_
-for more information.  We'll access the serial port through the I/O pins
-in the 40-pin HAT connector using a `USB TTL serial cable
-<http://www.ftdichip.com/Products/USBTTLSerial.htm>`_. Connect pin 6
-(``GND``), pin 8 (``TX``) and pin 10 (``RX``) of the HAT connector to
-respectively the ``GND``, ``RX`` and ``TX`` pins of your USB serial
-cable. Plug the USB TTL serial cable into your PC and use a console
-emulation tool such as ``minicom`` or ``putty`` to communicate with the
-UP2 board for debugging.
+The UP2 board has two serial ports. The following figure shows the UP2 board's 
+40-pin HAT connector we'll be using as documented in the  `UP2 Datasheet
+<https://up-board.org/wp-content/uploads/datasheets/UP-Square-DatasheetV0.5.pdf>`_.
+
+.. image:: images/the-bottom-side-of-UP2-board.png
+   :align: center
+   
+We'll access the serial port through the I/O pins in the 
+40-pin HAT connector using a `USB TTL serial cable
+<http://www.ftdichip.com/Products/USBTTLSerial.htm>`_, 
+and show how to connect a serial port with 
+``PL2303TA USB to TTL serial cable`` for example: 
+
+.. image:: images/USB-to-TTL-serial-cable.png
+   :align: center
+
+Connect pin 6 (``Ground``), pin 8 (``UART_TXD``) and pin 10 (``UART_RXD``) of the HAT 
+connector to respectively the ``GND``, ``RX`` and ``TX`` pins of your 
+USB serial cable. Plug the USB TTL serial cable into your PC and use a 
+console emulation tool such as ``minicom`` or ``putty`` to communicate 
+with the UP2 board for debugging.
+
+.. image:: images/the-connection-of-serial-port.png
+   :align: center
 
 Software setup
 **************
@@ -43,41 +57,45 @@ what is referenced in the :ref:`getting-started-apl-nuc` section:
 
 1. Serial Port settings
 #. Storage device name
-#. ``pci_devices_ignore`` parameter
 
 You will need to keep these in mind in a few places:
 
 * When mounting the EFI System Partition (ESP)
 
-  .. code-block:: console
+  .. code-block:: none
 
      # mount /dev/mmcblk0p1 /mnt
 
 * When adjusting the ``acrn.conf`` file
 
-  * Change the ``options`` line and set ``pci_devices_ignore=(0:18:1)``
   * Set the ``root=`` parameter using the ``PARTUUID`` or device name directly
 
 * When configuring the EFI firmware to boot the ACRN hypervisor by default
 
-  .. code-block:: console
+  .. code-block:: none
 
      # efibootmgr -c -l "\EFI\acrn\acrn.efi" -d /dev/mmcblk0 -p 1 -L "ACRN Hypervisor" \
-         -u "bootloader=\EFI\org.clearlinux\bootloaderx64.efi uart=mmio@0x9141e000"
+         -u "bootloader=\EFI\org.clearlinux\bootloaderx64.efi uart=bdf@0:18.1"
 
 UP2 serial port setting
 =======================
 
-The serial port in the 40-pin HAT connector is located at ``MMIO 0x0x9141e000``.
-You can check this from the ``dmesg`` output from the initial Clearlinux installation.
+The serial port (ttyS1) in the 40-pin HAT connector is located at ``serial PCI BDF 0:18.1``.
+You can check this from the ``lspci`` output from the initial Clearlinux installation.
+Also you can use ``dmesg | grep tty`` to get its IRQ information for console setting; and update
+SOS bootargs ``console=ttyS1`` in acrn.conf to match with console setting.
 
-.. code-block:: console
+.. code-block:: none
 
-   # dmesg | grep dw-apb-uart
-   [2.150689] dw-apb-uart.8: ttyS1 at MMIO 0x91420000 (irq = 4, base_baud = 115200) is a 16550A
-   [2.152072] dw-apb-uart.9: ttyS2 at MMIO 0x9141e000 (irq = 5, base_baud = 115200) is a 16550A
+   # lspci | grep UART
+   00:18.0 . Series HSUART Controller #1 (rev 0b)
+   00:18.1 . Series HSUART Controller #2 (rev 0b)
 
-The second entry associated with ``dw-apb-uart.9`` is the one on the 40-pin HAT connector.
+   # dmesg | grep tty
+   dw-apb-uart.8: ttyS0 at MMIO 0x91524000 (irq = 4, base_baud = 115200) is a 16550A
+   dw-apb-uart.9: ttyS1 at MMIO 0x91522000 (irq = 5, base_baud = 115200) is a 16550A
+
+The second entry associated with ``00:18.1 @irq5`` is the one on the 40-pin HAT connector.
 
 UP2 block device
 ================
@@ -88,7 +106,7 @@ throughout the :ref:`getting_started` therefore is ``/dev/mmcblk0``
 
 The UUID of the partition ``/dev/mmcblk0p3`` can be found by
 
-.. code-block:: console
+.. code-block:: none
 
    # blkid /dev/mmcblk
 

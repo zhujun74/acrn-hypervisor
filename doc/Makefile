@@ -40,34 +40,44 @@ help:
 
 doxy:
 	$(Q)(cat acrn.doxyfile) | doxygen - > doc.log 2>&1
+	$(Q)find doxygen/xml/* | xargs sed -i 's/simplesect kind="pre"/simplesect kind="preconditions"/'
 
 content:
-	$(Q)scripts/extract_content.py
+	$(Q)scripts/extract_content.py . misc
 
 kconfig:
 	$(Q)srctree=../hypervisor \
-	    python3 scripts/genrest.py ../hypervisor/Kconfig reference/kconfig/
+	    python3 scripts/genrest.py Kconfig reference/kconfig/
+
+pullsource:
+	$(Q)scripts/pullsource.sh
 
 html: doxy content kconfig
 	-$(Q)$(SPHINXBUILD) -t $(DOC_TAG) -b html -d $(BUILDDIR)/doctrees $(SOURCEDIR) $(BUILDDIR)/html $(SPHINXOPTS) $(OPTS) >> doc.log 2>&1
 	$(Q)./scripts/filter-doc-log.sh doc.log
 
+singlehtml: doxy content kconfig
+	-$(Q)$(SPHINXBUILD) -t $(DOC_TAG) -b singlehtml -d $(BUILDDIR)/doctrees $(SOURCEDIR) $(BUILDDIR)/html $(SPHINXOPTS) $(OPTS) >> doc.log 2>&1
+	$(Q)./scripts/filter-doc-log.sh doc.log
 
 # Remove generated content (Sphinx and doxygen)
 
 clean:
 	rm -fr $(BUILDDIR) doxygen
-	rm -fr tools
+	rm -fr misc
 	rm -fr reference/kconfig/*.rst
 
 # Copy material over to the GitHub pages staging repo
 # along with a README
 
 publish:
+	mkdir -p $(PUBLISHDIR)
+	cd $(PUBLISHDIR)/..; git pull origin master
 	rm -fr $(PUBLISHDIR)/*
 	cp -r $(BUILDDIR)/html/* $(PUBLISHDIR)
 	cp scripts/publish-README.md $(PUBLISHDIR)/../README.md
 	cp scripts/publish-index.html $(PUBLISHDIR)/../index.html
+	cp scripts/publish-robots.txt $(PUBLISHDIR)/../robots.txt
 	cd $(PUBLISHDIR)/..; git add -A; git commit -s -m "publish $(RELEASE)"; git push origin master;
 
 

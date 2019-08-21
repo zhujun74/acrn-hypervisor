@@ -6,6 +6,7 @@
 
 #ifndef ZEROPAGE_H
 #define ZEROPAGE_H
+#include <e820.h>
 
 struct zero_page {
 	uint8_t pad1[0x1e8];	/* 0x000 */
@@ -33,7 +34,7 @@ struct zero_page {
 	} __packed hdr;
 
 	uint8_t pad3[0x68];	/* 0x268 */
-	struct e820_entry e820[0x80];	/* 0x2d0 */
+	struct e820_entry entries[0x80];	/* 0x2d0 */
 	uint8_t pad4[0x330];	/* 0xcd0 */
 } __packed;
 

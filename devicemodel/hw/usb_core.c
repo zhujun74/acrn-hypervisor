@@ -76,12 +76,12 @@
  */
 
 #include <sys/types.h>
-#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include "usb_core.h"
+#include "dm_string.h"
 
 SET_DECLARE(usb_emu_set, struct usb_devemu);
 int usb_log_level;
@@ -114,8 +114,9 @@ usb_data_xfer_append(struct usb_data_xfer *xfer, void *buf, int blen,
 	xb->blen = blen;
 	xb->hci_data = hci_data;
 	xb->ccs = ccs;
-	xb->processed = 0;
+	xb->processed = USB_XFER_BLK_FREE;
 	xb->bdone = 0;
+	xb->chained = 0;
 	xfer->ndata++;
 	xfer->tail = (xfer->tail + 1) % USB_MAX_XFER_BLOCKS;
 	return xb;
@@ -128,50 +129,6 @@ usb_native_is_bus_existed(uint8_t bus_num)
 
 	snprintf(buf, sizeof(buf), "%s/usb%d", NATIVE_USBSYS_DEVDIR, bus_num);
 	return access(buf, R_OK) ? 0 : 1;
-}
-
-int
-usb_native_is_ss_port(uint8_t bus_of_port)
-{
-	char buf[128];
-	char speed[8];
-	int rc, fd;
-	int usb2_speed_sz = sizeof(NATIVE_USB2_SPEED);
-	int usb3_speed_sz = sizeof(NATIVE_USB3_SPEED);
-
-	assert(usb_native_is_bus_existed(bus_of_port));
-	snprintf(buf, sizeof(buf), "%s/usb%d/speed", NATIVE_USBSYS_DEVDIR,
-			bus_of_port);
-	if (access(buf, R_OK)) {
-		UPRINTF(LWRN, "can't find speed file\r\n");
-		return 0;
-	}
-
-	fd = open(buf, O_RDONLY);
-	if (fd < 0) {
-		UPRINTF(LWRN, "fail to open maxchild file\r\n");
-		return 0;
-	}
-
-	rc = read(fd, &speed, sizeof(speed));
-	if (rc < 0) {
-		UPRINTF(LWRN, "fail to read speed file\r\n");
-		goto errout;
-	}
-
-	if (rc < usb2_speed_sz) {
-		UPRINTF(LWRN, "read invalid speed data\r\n");
-		goto errout;
-	}
-
-	if (strncmp(speed, NATIVE_USB3_SPEED, usb3_speed_sz))
-		goto errout;
-
-	close(fd);
-	return 1;
-errout:
-	close(fd);
-	return 0;
 }
 
 int
@@ -205,7 +162,13 @@ usb_native_is_port_existed(uint8_t bus_num, uint8_t port_num)
 		return 0;
 	}
 
-	native_port_cnt = atoi(cnt);
+	rc = dm_strtoi(cnt, (char **)&cnt, 10, &native_port_cnt);
+	if (rc) {
+		UPRINTF(LWRN, "fail to get maxchild number\r\n");
+		close(fd);
+		return 0;
+	}
+
 	if (port_num > native_port_cnt || port_num < 0) {
 		UPRINTF(LWRN, "invalid port_num %d, max port count %d\r\n",
 				port_num, native_port_cnt);
@@ -242,4 +205,77 @@ void usb_parse_log_level(char level)
 	default:
 		usb_set_log_level(LFTL);
 	}
+}
+
+char *
+usb_dev_path(struct usb_devpath *path)
+{
+	static char output[sizeof("01.02.03.04.05.06.07")+1];
+	int i, r, n;
+
+	if (!path)
+		return NULL;
+
+	r = n = sizeof(output);
+	r -= snprintf(output, n, "%d", path->path[0]);
+
+	for (i = 1; i < path->depth; i++) {
+		r -= snprintf(output + n - r, r, ".%d", path->path[i]);
+		if (r < 0)
+			return NULL;
+	}
+
+	return output;
+}
+
+bool
+usb_dev_path_cmp(struct usb_devpath *p1, struct usb_devpath *p2)
+{
+	if (!p1 || !p2)
+		return false;
+
+	return (p1->bus == p2->bus && p1->depth == p2->depth &&
+				memcmp(p1->path, p2->path, p1->depth) == 0);
+}
+
+int
+usb_get_hub_port_num(struct usb_devpath *path)
+{
+	int rc, fd;
+	int icnt;
+	char buf[128];
+	char cnt[8];
+
+	if (!usb_native_is_bus_existed(path->bus))
+		return -1;
+
+	snprintf(buf, sizeof(buf), "%s/%d-%s/maxchild", NATIVE_USBSYS_DEVDIR,
+			path->bus, usb_dev_path(path));
+	if (access(buf, R_OK)) {
+		UPRINTF(LWRN, "can't find maxchild file\r\n");
+		return -1;
+	}
+
+	fd = open(buf, O_RDONLY);
+	if (fd < 0) {
+		UPRINTF(LWRN, "fail to open maxchild file\r\n");
+		return -1;
+	}
+
+	rc = read(fd, &cnt, sizeof(cnt));
+	if (rc < 0) {
+		UPRINTF(LWRN, "fail to read maxchild file\r\n");
+		close(fd);
+		return -1;
+	}
+
+	close(fd);
+
+	rc = dm_strtoi(cnt, (char **)&cnt, 10, &icnt);
+	if (rc) {
+		UPRINTF(LWRN, "fail to get maxchild\r\n");
+		return -1;
+	}
+
+	return icnt;
 }

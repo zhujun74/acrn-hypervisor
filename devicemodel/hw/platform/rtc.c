@@ -26,22 +26,27 @@
 
 #include <pthread.h>
 #include <string.h>
-#include <assert.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
 #include <time.h>
+#include <errno.h>
 
 #include "vmmapi.h"
 #include "inout.h"
 #include "mc146818rtc.h"
 #include "rtc.h"
+#include "mevent.h"
+#include "timer.h"
+#include "acpi.h"
+#include "lpc.h"
+
+#include "log.h"
 
 /* #define DEBUG_RTC */
 #ifdef DEBUG_RTC
-# define RTC_DEBUG(format, ...)      printf(format, ## __VA_ARGS__)
+# define RTC_DEBUG   pr_dbg
 #else
 # define RTC_DEBUG(format, ...)      do { } while (0)
 #endif
@@ -70,8 +75,8 @@ struct rtcdev {
 struct vrtc {
 	struct vmctx *vm;
 	pthread_mutex_t	mtx;
-	timer_t		periodic_timer_id;  /*periodic timer id*/
-	timer_t		update_timer_id;    /*update timer id*/
+	struct acrn_timer update_timer;     /* timer for update interrupt */
+	struct acrn_timer periodic_timer;   /* timer for periodic interrupt */
 	u_int		addr;               /* RTC register to read or write */
 	time_t		base_uptime;
 	time_t		base_rtctime;
@@ -115,6 +120,9 @@ struct clktime {
  */
 #define	VRTC_BROKEN_TIME	((time_t)-1)
 
+/* signo of timers created by vrtc */
+#define	VRTC_TIMER_SIGNO	SIGALRM
+
 #define	RTC_IRQ			8
 #define	RTCSB_BIN		0x04
 #define	RTCSB_ALL_INTRS		(RTCSB_UINTR | RTCSB_AINTR | RTCSB_PINTR)
@@ -140,7 +148,6 @@ static const int month_days[12] = {
 	31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 };
 
-static int local_time = 1;
 
 /*
  * This inline avoids some unnecessary modulo operations
@@ -224,8 +231,6 @@ vrtc_curtime(struct vrtc *vrtc, time_t *basetime)
 	if (update_enabled(vrtc)) {
 		now = time(NULL);
 		delta = now - vrtc->base_uptime;
-		assert(delta >= 0);
-
 		secs = delta;
 		t += secs;
 		*basetime += secs;
@@ -301,21 +306,11 @@ clk_ts_to_ct(struct timespec *ts, struct clktime *ct)
 	rsec = rsec % 60;
 	ct->sec  = rsec;
 	ct->nsec = ts->tv_nsec;
-
-	assert(ct->year >= 0 && ct->year < 10000);
-	assert(ct->mon >= 1 && ct->mon <= 12);
-	assert(ct->day >= 1 && ct->day <= 31);
-	assert(ct->hour >= 0 && ct->hour <= 23);
-	assert(ct->min >= 0 && ct->min <= 59);
-	/* Not sure if this interface needs to handle leapseconds or not. */
-	assert(ct->sec >= 0 && ct->sec <= 60);
 }
 
 static inline uint8_t
 rtcset(struct rtcdev *rtc, int val)
 {
-	assert(val >= 0 && val < 100);
-
 	return ((rtc->reg_b & RTCSB_BIN) ? val : bin2bcd_data[val]);
 }
 
@@ -389,10 +384,9 @@ secs_to_rtc(time_t rtctime, struct vrtc *vrtc, int force_update)
 	struct rtcdev *rtc;
 	int hour;
 
-	if (rtctime < 0) {
-		assert(rtctime == VRTC_BROKEN_TIME);
+	if (rtctime < 0)
+		/*VRTC_BROKEN_TIME case*/
 		return;
-	}
 
 	/*
 	 * If the RTC is halted then the guest has "ownership" of the
@@ -406,13 +400,11 @@ secs_to_rtc(time_t rtctime, struct vrtc *vrtc, int force_update)
 	ts.tv_nsec = 0;
 	clk_ts_to_ct(&ts, &ct);
 
-	assert(ct.sec >= 0 && ct.sec <= 59);
-	assert(ct.min >= 0 && ct.min <= 59);
-	assert(ct.hour >= 0 && ct.hour <= 23);
-	assert(ct.dow >= 0 && ct.dow <= 6);
-	assert(ct.day >= 1 && ct.day <= 31);
-	assert(ct.mon >= 1 && ct.mon <= 12);
-	assert(ct.year >= POSIX_BASE_YEAR);
+	if ((ct.sec < 0 || ct.sec > 59) || (ct.min < 0 || ct.min > 59)
+			|| (ct.hour < 0 || ct.hour > 23) || (ct.dow < 0 || ct.dow > 6)
+			|| (ct.day < 1 || ct.day > 31) || (ct.mon < 1 || ct.mon > 12)
+			|| (ct.year < POSIX_BASE_YEAR))
+		return;
 
 	rtc = &vrtc->rtcdev;
 	rtc->sec = rtcset(rtc, ct.sec);
@@ -464,13 +456,13 @@ rtc_to_secs(struct vrtc *vrtc)
 	bzero(&ct, sizeof(struct clktime));
 	error = rtcget(rtc, rtc->sec, &ct.sec);
 	if (error || ct.sec < 0 || ct.sec > 59) {
-		RTC_DEBUG("Invalid RTC sec %#x/%d", rtc->sec, ct.sec);
+		RTC_DEBUG("Invalid RTC sec %#x/%d\n", rtc->sec, ct.sec);
 		goto fail;
 	}
 
 	error = rtcget(rtc, rtc->min, &ct.min);
 	if (error || ct.min < 0 || ct.min > 59) {
-		RTC_DEBUG("Invalid RTC min %#x/%d", rtc->min, ct.min);
+		RTC_DEBUG("Invalid RTC min %#x/%d\n", rtc->min, ct.min);
 		goto fail;
 	}
 
@@ -500,14 +492,14 @@ rtc_to_secs(struct vrtc *vrtc)
 			if (pm)
 				ct.hour += 12;
 		} else {
-			RTC_DEBUG("Invalid RTC 12-hour format %#x/%d",
+			RTC_DEBUG("Invalid RTC 12-hour format %#x/%d\n",
 					rtc->hour, ct.hour);
 			goto fail;
 		}
 	}
 
 	if (error || ct.hour < 0 || ct.hour > 23) {
-		RTC_DEBUG("Invalid RTC hour %#x/%d", rtc->hour, ct.hour);
+		RTC_DEBUG("Invalid RTC hour %#x/%d\n", rtc->hour, ct.hour);
 		goto fail;
 	}
 
@@ -521,36 +513,36 @@ rtc_to_secs(struct vrtc *vrtc)
 
 	error = rtcget(rtc, rtc->day_of_month, &ct.day);
 	if (error || ct.day < 1 || ct.day > 31) {
-		RTC_DEBUG("Invalid RTC mday %#x/%d", rtc->day_of_month,
+		RTC_DEBUG("Invalid RTC mday %#x/%d\n", rtc->day_of_month,
 				ct.day);
 		goto fail;
 	}
 
 	error = rtcget(rtc, rtc->month, &ct.mon);
 	if (error || ct.mon < 1 || ct.mon > 12) {
-		RTC_DEBUG("Invalid RTC month %#x/%d", rtc->month, ct.mon);
+		RTC_DEBUG("Invalid RTC month %#x/%d\n", rtc->month, ct.mon);
 		goto fail;
 	}
 
 	error = rtcget(rtc, rtc->year, &year);
 	if (error || year < 0 || year > 99) {
-		RTC_DEBUG("Invalid RTC year %#x/%d", rtc->year, year);
+		RTC_DEBUG("Invalid RTC year %#x/%d\n", rtc->year, year);
 		goto fail;
 	}
 
 	error = rtcget(rtc, rtc->century, &century);
 	ct.year = century * 100 + year;
 	if (error || ct.year < POSIX_BASE_YEAR) {
-		RTC_DEBUG("Invalid RTC century %#x/%d", rtc->century,
+		RTC_DEBUG("Invalid RTC century %#x/%d\n", rtc->century,
 				ct.year);
 		goto fail;
 	}
 
 	error = clk_ct_to_ts(&ct, &ts);
 	if (error || ts.tv_sec < 0) {
-		RTC_DEBUG("Invalid RTC clocktime.date %04d-%02d-%02d",
+		RTC_DEBUG("Invalid RTC clocktime.date %04d-%02d-%02d\n",
 				ct.year, ct.mon, ct.day);
-		RTC_DEBUG("Invalid RTC clocktime.time %02d:%02d:%02d",
+		RTC_DEBUG("Invalid RTC clocktime.time %02d:%02d:%02d\n",
 				ct.hour, ct.min, ct.sec);
 		goto fail;
 	}
@@ -560,40 +552,22 @@ fail:
 	 * Stop updating the RTC if the date/time fields programmed by
 	 * the guest are invalid.
 	 */
-	RTC_DEBUG("Invalid RTC date/time programming detected");
+	RTC_DEBUG("Invalid RTC date/time programming detected\n");
 	return VRTC_BROKEN_TIME;
 }
 
-static timer_t
-vrtc_create_timer(struct vrtc *vrtc, time_t sec, time_t nsec, void (*cb)())
+static void
+vrtc_start_timer(struct acrn_timer *timer, time_t sec, time_t nsec)
 {
-	timer_t timerid;
-	struct sigevent sigevt;
 	struct itimerspec ts;
 
-	memset(&sigevt, 0, sizeof(struct sigevent));
-	memset(&ts, 0, sizeof(struct itimerspec));
-
-	sigevt.sigev_value.sival_ptr = vrtc;
-	sigevt.sigev_notify = SIGEV_THREAD;
-	sigevt.sigev_notify_function = cb;
-
-	assert(timer_create(CLOCK_REALTIME, &sigevt, &timerid) == 0);
 	/*setting the interval time*/
 	ts.it_interval.tv_sec = sec;
 	ts.it_interval.tv_nsec = nsec;
 	/*set the delay time it will be started when timer_setting*/
 	ts.it_value.tv_sec = sec;
 	ts.it_value.tv_nsec = nsec;
-	assert(timer_settime(timerid, 0, &ts, NULL) == 0);
-
-	return timerid;
-}
-
-static void
-vrtc_delete_timer(timer_t timerid)
-{
-	timer_delete(timerid);
+	acrn_timer_settime(timer, &ts);
 }
 
 static int
@@ -673,7 +647,7 @@ vrtc_time_update(struct vrtc *vrtc, time_t newtime, time_t newbase)
 }
 
 static void
-vrtc_periodic_timer(void *arg)
+vrtc_periodic_timer(void *arg, uint64_t nexp)
 {
 	struct vrtc *vrtc = arg;
 
@@ -686,13 +660,14 @@ vrtc_periodic_timer(void *arg)
 }
 
 static void
-vrtc_update_timer(void *arg)
+vrtc_update_timer(void *arg, uint64_t nexp)
 {
 	struct vrtc *vrtc = arg;
 	time_t basetime;
 	time_t curtime;
 
 	pthread_mutex_lock(&vrtc->mtx);
+
 	if (aintr_enabled(vrtc) || uintr_enabled(vrtc)) {
 		curtime = vrtc_curtime(vrtc, &basetime);
 		vrtc_time_update(vrtc, curtime, basetime);
@@ -731,13 +706,10 @@ vrtc_set_reg_c(struct vrtc *vrtc, uint8_t newval)
 	}
 
 	if (!oldirqf && newirqf) {
-
-		vm_isa_assert_irq(vrtc->vm, RTC_IRQ, RTC_IRQ);
-		/*vm_ioapic_assert_irq(vrtc->vm, RTC_IRQ);*/
+		vm_set_gsi_irq(vrtc->vm, RTC_IRQ, GSI_SET_HIGH);
 		RTC_DEBUG("RTC irq %d asserted\n", RTC_IRQ);
 	} else if (oldirqf && !newirqf) {
-		vm_isa_deassert_irq(vrtc->vm, RTC_IRQ, RTC_IRQ);
-		/*vm_ioapic_deassert_irq(vrtc->vm, RTC_IRQ);*/
+		vm_set_gsi_irq(vrtc->vm, RTC_IRQ, GSI_SET_LOW);
 		RTC_DEBUG("RTC irq %d deasserted\n", RTC_IRQ);
 	}
 }
@@ -748,7 +720,6 @@ vrtc_set_reg_b(struct vrtc *vrtc, uint8_t newval)
 	struct rtcdev *rtc;
 	time_t oldfreq, newfreq, basetime;
 	time_t curtime, rtctime;
-	int error;
 	uint8_t oldval, changed;
 
 	rtc = &vrtc->rtcdev;
@@ -772,7 +743,8 @@ vrtc_set_reg_b(struct vrtc *vrtc, uint8_t newval)
 			}
 		} else {
 			curtime = vrtc_curtime(vrtc, &basetime);
-			assert(curtime == vrtc->base_rtctime);
+			if (curtime != vrtc->base_rtctime)
+				return -1;
 
 			/*
 			 * Force a refresh of the RTC date/time fields so
@@ -788,8 +760,8 @@ vrtc_set_reg_b(struct vrtc *vrtc, uint8_t newval)
 			rtctime = VRTC_BROKEN_TIME;
 			rtc->reg_b &= ~RTCSB_UINTR;
 		}
-		error = vrtc_time_update(vrtc, rtctime, basetime);
-		assert(error == 0);
+		if (vrtc_time_update(vrtc, rtctime, basetime) != 0)
+			return -1;
 	}
 
 	/*
@@ -804,16 +776,8 @@ vrtc_set_reg_b(struct vrtc *vrtc, uint8_t newval)
 	newfreq = vrtc_freq(vrtc);
 
 	if (pintr_enabled(vrtc) && newfreq != oldfreq) {
-		/*stop the previous timer*/
-		if (vrtc->periodic_timer_id > 0) {
-			assert(timer_delete(vrtc->periodic_timer_id) == 0);
-			vrtc->periodic_timer_id = 0;
-		}
-
-		/*create the new periodic timer*/
-		vrtc->periodic_timer_id =
-		    vrtc_create_timer(vrtc, 0, newfreq, vrtc_periodic_timer);
-		assert(vrtc->periodic_timer_id > 0);
+		/*start the new periodic timer*/
+		vrtc_start_timer(&vrtc->periodic_timer, 0, newfreq);
 
 	} else {
 		/*Nothing to do*/
@@ -837,7 +801,7 @@ vrtc_set_reg_a(struct vrtc *vrtc, uint8_t newval)
 	oldfreq = vrtc_freq(vrtc);
 
 	if (divider_enabled(oldval) && !divider_enabled(newval)) {
-		RTC_DEBUG("RTC divider held in reset at %#lx/%#lx",
+		RTC_DEBUG("RTC divider held in reset at %#lx/%#lx\n",
 				vrtc->base_rtctime, vrtc->base_uptime);
 	} else if (!divider_enabled(oldval) && divider_enabled(newval)) {
 		/*
@@ -847,7 +811,7 @@ vrtc_set_reg_a(struct vrtc *vrtc, uint8_t newval)
 		 * while the dividers were disabled.
 		 */
 		vrtc->base_uptime = time(NULL);
-		RTC_DEBUG("RTC divider out of reset at %#lx/%#lx",
+		RTC_DEBUG("RTC divider out of reset at %#lx/%#lx\n",
 				vrtc->base_rtctime, vrtc->base_uptime);
 	} else {
 		/* NOTHING */
@@ -856,7 +820,7 @@ vrtc_set_reg_a(struct vrtc *vrtc, uint8_t newval)
 	vrtc->rtcdev.reg_a = newval;
 	changed = oldval ^ newval;
 	if (changed) {
-		RTC_DEBUG("RTC reg_a changed from %#x to %#x",
+		RTC_DEBUG("RTC reg_a changed from %#x to %#x\n",
 				oldval, newval);
 	}
 
@@ -866,49 +830,11 @@ vrtc_set_reg_a(struct vrtc *vrtc, uint8_t newval)
 	newfreq = vrtc_freq(vrtc);
 
 	if (pintr_enabled(vrtc) && newfreq != oldfreq) {
-		/*stop the previous timer*/
-		if (vrtc->periodic_timer_id > 0) {
-			assert(timer_delete(vrtc->periodic_timer_id) == 0);
-			vrtc->periodic_timer_id = 0;
-		}
-
-		/*create the new periodic timer*/
-		vrtc->periodic_timer_id =
-		     vrtc_create_timer(vrtc, 0, newfreq, vrtc_periodic_timer);
-		assert(vrtc->periodic_timer_id > 0);
+		/*start the new periodic timer*/
+		vrtc_start_timer(&vrtc->periodic_timer, 0, newfreq);
 	} else {
 		/*Nothing to do*/
 	}
-}
-
-int
-vrtc_nvram_read(struct vrtc *vrtc, int offset, uint8_t *retval)
-{
-	time_t basetime;
-	time_t curtime;
-	uint8_t *ptr;
-
-	/*
-	 * Allow all offsets in the RTC to be read.
-	 */
-	if (offset < 0 || offset >= sizeof(struct rtcdev))
-		return -1;
-
-	pthread_mutex_lock(&vrtc->mtx);
-
-	/*
-	 * Update RTC date/time fields if necessary.
-	 */
-	if (offset < 10 || offset == RTC_CENTURY) {
-		curtime = vrtc_curtime(vrtc, &basetime);
-		secs_to_rtc(curtime, vrtc, 0);
-	}
-
-	ptr = (uint8_t *)(&vrtc->rtcdev);
-	*retval = ptr[offset];
-	pthread_mutex_unlock(&vrtc->mtx);
-
-	return 0;
 }
 
 int
@@ -922,14 +848,14 @@ vrtc_nvram_write(struct vrtc *vrtc, int offset, uint8_t value)
 	if (offset < offsetof(struct rtcdev, nvram[0]) ||
 			offset == RTC_CENTURY ||
 			offset >= sizeof(struct rtcdev)) {
-		RTC_DEBUG("RTC nvram write to invalid offset %d", offset);
+		RTC_DEBUG("RTC nvram write to invalid offset %d\n", offset);
 		return -1;
 	}
 
 	pthread_mutex_lock(&vrtc->mtx);
 	ptr = (uint8_t *)(&vrtc->rtcdev);
 	ptr[offset] = value;
-	RTC_DEBUG("RTC nvram write %#x to offset %#x", value, offset);
+	RTC_DEBUG("RTC nvram write %#x to offset %#x\n", value, offset);
 	pthread_mutex_unlock(&vrtc->mtx);
 
 	return 0;
@@ -1040,8 +966,7 @@ vrtc_data_handler(struct vmctx *ctx, int vcpu, int in, int port,
 		if (offset == RTC_CENTURY && !rtc_halted(vrtc)) {
 			curtime = rtc_to_secs(vrtc);
 			error = vrtc_time_update(vrtc, curtime, time(NULL));
-			assert(!error);
-			if (curtime == VRTC_BROKEN_TIME && rtc_flag_broken_time)
+			if ((error != 0) || (curtime == VRTC_BROKEN_TIME && rtc_flag_broken_time))
 				error = -1;
 		}
 	}
@@ -1061,64 +986,70 @@ vrtc_set_time(struct vrtc *vrtc, time_t secs)
 	pthread_mutex_unlock(&vrtc->mtx);
 
 	if (error)
-		RTC_DEBUG("Error %d setting RTC time to %#lx", error, secs);
+		RTC_DEBUG("Error %d setting RTC time to %#lx\n", error, secs);
 	else
-		RTC_DEBUG("RTC time set to %#lx", secs);
+		RTC_DEBUG("RTC time set to %#lx\n", secs);
 
 	return error;
-}
-
-time_t
-vrtc_get_time(struct vrtc *vrtc)
-{
-	time_t basetime;
-	time_t t;
-
-	pthread_mutex_lock(&vrtc->mtx);
-	t = vrtc_curtime(vrtc, &basetime);
-	pthread_mutex_unlock(&vrtc->mtx);
-	return t;
-}
-
-void
-vrtc_reset(struct vrtc *vrtc)
-{
-	struct rtcdev *rtc;
-
-	pthread_mutex_lock(&vrtc->mtx);
-
-	rtc = &vrtc->rtcdev;
-	vrtc_set_reg_b(vrtc, rtc->reg_b & ~(RTCSB_ALL_INTRS | RTCSB_SQWE));
-	vrtc_set_reg_c(vrtc, 0);
-
-	pthread_mutex_unlock(&vrtc->mtx);
-}
-
-void
-vrtc_enable_localtime(int l_time)
-{
-	local_time = l_time;
 }
 
 int
 vrtc_init(struct vmctx *ctx)
 {
 	struct vrtc *vrtc;
+	size_t lomem, himem;
+	int err;
 	struct rtcdev *rtc;
 	time_t curtime;
 	struct inout_port rtc_addr, rtc_data;
 
 	vrtc = calloc(1, sizeof(struct vrtc));
-	assert(vrtc != NULL);
+	if (vrtc == NULL)
+		return -ENOMEM;
+
 	vrtc->vm = ctx;
 	ctx->vrtc = vrtc;
 
 	pthread_mutex_init(&vrtc->mtx, NULL);
 
-	/*create update interrupt timer(1s)*/
-	vrtc->update_timer_id =
-		vrtc_create_timer(vrtc, 1, 0, vrtc_update_timer);
-	assert(vrtc->update_timer_id > 0);
+	/*
+	 * Report guest memory size in nvram cells as required by UEFI.
+	 * Little-endian encoding.
+	 * 0x34/0x35 - 64KB chunks above 16MB, below 4GB
+	 * 0x5b/0x5c/0x5d - 64KB chunks above 4GB
+	 */
+	lomem = vm_get_lowmem_size(ctx);
+	if (lomem < 16 * MB) {
+		err = -EINVAL;
+		goto fail;
+	}
+
+	lomem = (lomem - 16 * MB) / (64 * KB);
+	if (vrtc_nvram_write(vrtc, RTC_LMEM_LSB, lomem) != 0) {
+		err = -EIO;
+		goto fail;
+	}
+
+	if (vrtc_nvram_write(vrtc, RTC_LMEM_MSB, lomem >> 8) != 0) {
+		err = -EIO;
+		goto fail;
+	}
+
+	himem = vm_get_highmem_size(ctx) / (64 * KB);
+	if (vrtc_nvram_write(vrtc, RTC_HMEM_LSB, himem) != 0) {
+		err = -EIO;
+		goto fail;
+	}
+
+	if (vrtc_nvram_write(vrtc, RTC_HMEM_SB, himem >> 8) != 0) {
+		err = -EIO;
+		goto fail;
+	}
+
+	if (vrtc_nvram_write(vrtc, RTC_HMEM_MSB, himem >> 16) != 0) {
+		err = -EIO;
+		goto fail;
+	}
 
 	memset(&rtc_addr, 0, sizeof(struct inout_port));
 	memset(&rtc_data, 0, sizeof(struct inout_port));
@@ -1129,7 +1060,10 @@ vrtc_init(struct vmctx *ctx)
 	rtc_addr.flags = IOPORT_F_INOUT;
 	rtc_addr.handler = vrtc_addr_handler;
 	rtc_addr.arg = vrtc;
-	assert(register_inout(&rtc_addr) == 0);
+	if (register_inout(&rtc_addr) != 0) {
+		err = -EINVAL;
+		goto fail;
+	}
 
 	/*register io port handler for rtc data*/
 	rtc_data.name = "rtc";
@@ -1138,7 +1072,10 @@ vrtc_init(struct vmctx *ctx)
 	rtc_data.flags = IOPORT_F_INOUT;
 	rtc_data.handler = vrtc_data_handler;
 	rtc_data.arg = vrtc;
-	assert(register_inout(&rtc_data) == 0);
+	if (register_inout(&rtc_data) != 0) {
+		err = -EINVAL;
+		goto fail;
+	}
 
 	/* Allow dividers o keep time but disable everything else */
 	rtc = &vrtc->rtcdev;
@@ -1162,7 +1099,20 @@ vrtc_init(struct vmctx *ctx)
 	secs_to_rtc(curtime, vrtc, 0);
 	pthread_mutex_unlock(&vrtc->mtx);
 
+	/* init periodic interrupt timer */
+	vrtc->periodic_timer.clockid = CLOCK_REALTIME;
+	acrn_timer_init(&vrtc->periodic_timer, vrtc_periodic_timer, vrtc);
+
+	/* init update interrupt timer(1s)*/
+	vrtc->update_timer.clockid = CLOCK_REALTIME;
+	acrn_timer_init(&vrtc->update_timer, vrtc_update_timer, vrtc);
+	vrtc_start_timer(&vrtc->update_timer, 1, 0);
+
 	return 0;
+
+fail:
+	free(vrtc);
+	return err;
 }
 
 void
@@ -1170,6 +1120,10 @@ vrtc_deinit(struct vmctx *ctx)
 {
 	struct vrtc *vrtc = ctx->vrtc;
 	struct inout_port iop;
+
+	/*deinit acrn_timer*/
+	acrn_timer_deinit(&vrtc->periodic_timer);
+	acrn_timer_deinit(&vrtc->update_timer);
 
 	memset(&iop, 0, sizeof(struct inout_port));
 	iop.name = "rtc";
@@ -1183,7 +1137,30 @@ vrtc_deinit(struct vmctx *ctx)
 	iop.size = 1;
 	unregister_inout(&iop);
 
-	vrtc_delete_timer(vrtc->update_timer_id);
 	free(vrtc);
 	ctx->vrtc = NULL;
 }
+
+static void
+rtc_dsdt(void)
+{
+	dsdt_line("");
+	dsdt_line("Device (RTC)");
+	dsdt_line("{");
+	dsdt_line("  Name (_HID, EisaId (\"PNP0B00\"))");
+	dsdt_line("  Name (_CRS, ResourceTemplate ()");
+	dsdt_line("  {");
+	dsdt_indent(2);
+	dsdt_fixed_ioport(IO_RTC, 2);
+	dsdt_fixed_irq(8);
+	dsdt_unindent(2);
+	dsdt_line("  })");
+	dsdt_line("}");
+}
+LPC_DSDT(rtc_dsdt);
+
+/*
+ * Reserve the extended RTC I/O ports although they are not emulated at this
+ * time.
+ */
+SYSRES_IO(0x72, 6);

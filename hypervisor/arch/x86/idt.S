@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <gdt.h>
 #include <idt.h>
 
 .altmacro
@@ -24,13 +23,15 @@ HOST_IDTR:
  * We'll rearrange and fix up the descriptors at runtime
  */
 .macro interrupt_descriptor entry, dpl=0 ist=0
-	.long	HOST_GDT_RING0_CODE_SEL << 16
+	/* 0x0008 = HOST_GDT_RING0_CODE_SEL */
+	.long	0x0008 << 16
 	.long	0x00008e00 + (dpl << 13) + ist
 	.quad	entry
 .endm
 
 .macro	trap_descriptor entry, dpl=0, ist=0
-	.long	HOST_GDT_RING0_CODE_SEL << 16
+        /* 0x0008 = HOST_GDT_RING0_CODE_SEL */
+	.long	0x0008 << 16
 	.long	0x00008f00 + (dpl <<13) + ist
 	.quad	entry
 .endm
@@ -263,42 +264,45 @@ vector =0x20
  */
 .align 8
 excp_save_frame:
-    pushq   %r11
-    pushq   %r10
-    pushq   %r9
-    pushq   %r8
-    pushq   %rdi
-    pushq   %rsi
-    pushq   %rdx
-    pushq   %rcx
-    pushq   %rax
-    pushq   %rbp
-    pushq   %rbx
-    pushq   %r15
-    pushq   %r14
-    pushq   %r13
-    pushq   %r12
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rsp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
+
 
     /* Put current stack pointer into 1st param register (rdi) */
     movq    %rsp, %rdi
 
     call   dispatch_exception
 
-    popq    %r12
-    popq    %r13
-    popq    %r14
-    popq    %r15
-    popq    %rbx
-    popq    %rbp
     popq    %rax
     popq    %rcx
     popq    %rdx
+    popq    %rbx
+    popq    %rsp
+    popq    %rbp
     popq    %rsi
     popq    %rdi
     popq    %r8
     popq    %r9
     popq    %r10
     popq    %r11
+    popq    %r12
+    popq    %r13
+    popq    %r14
+    popq    %r15
 
     /* Skip vector and error code*/
     add     $16, %rsp
@@ -313,45 +317,44 @@ excp_save_frame:
  */
 .align 8
 excp_rsvd:
-    pushq   %r11
-    pushq   %r10
-    pushq   %r9
-    pushq   %r8
-    pushq   %rdi
-    pushq   %rsi
-    pushq   %rdx
-    pushq   %rcx
-    pushq   %rax
-
-
-    pushq   %rbp
-    pushq   %rbx
-    pushq   %r15
-    pushq   %r14
-    pushq   %r13
-    pushq   %r12
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rsp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
 
     /* Put current stack pointer into 1st param register (rdi) */
     movq    %rsp, %rdi
 
     call   dispatch_exception
 
-    popq    %r12
-    popq    %r13
-    popq    %r14
-    popq    %r15
-    popq    %rbx
-    popq    %rbp
-
     popq    %rax
     popq    %rcx
     popq    %rdx
+    popq    %rbx
+    popq    %rsp
+    popq    %rbp
     popq    %rsi
     popq    %rdi
     popq    %r8
     popq    %r9
     popq    %r10
     popq    %r11
+    popq    %r12
+    popq    %r13
+    popq    %r14
+    popq    %r15
 
     /* Skip vector and error code*/
     add     $16, %rsp
@@ -365,23 +368,22 @@ excp_rsvd:
  */
 .align 8
 external_interrupt_save_frame:
-    pushq   %r11
-    pushq   %r10
-    pushq   %r9
-    pushq   %r8
-    pushq   %rdi
-    pushq   %rsi
-    pushq   %rdx
-    pushq   %rcx
-    pushq   %rax
-
-
-    pushq   %rbp
-    pushq   %rbx
-    pushq   %r15
-    pushq   %r14
-    pushq   %r13
-    pushq   %r12
+    pushq %r15
+    pushq %r14
+    pushq %r13
+    pushq %r12
+    pushq %r11
+    pushq %r10
+    pushq %r9
+    pushq %r8
+    pushq %rdi
+    pushq %rsi
+    pushq %rbp
+    pushq %rsp
+    pushq %rbx
+    pushq %rdx
+    pushq %rcx
+    pushq %rax
 
     /* Put current stack pointer into 1st param register (rdi) */
     movq    %rsp, %rdi
@@ -390,25 +392,25 @@ external_interrupt_save_frame:
 
     /*
      * We disable softirq path from interrupt IRET, since right now all IRQ
-     * are for Guest, and we can execute softirq in hv_main() loop
+     * are for Guest.
      */
-
-    popq    %r12
-    popq    %r13
-    popq    %r14
-    popq    %r15
-    popq    %rbx
-    popq    %rbp
 
     popq    %rax
     popq    %rcx
     popq    %rdx
+    popq    %rbx
+    popq    %rsp
+    popq    %rbp
     popq    %rsi
     popq    %rdi
     popq    %r8
     popq    %r9
     popq    %r10
     popq    %r11
+    popq    %r12
+    popq    %r13
+    popq    %r14
+    popq    %r15
 
     /* Skip vector and error code*/
     add     $16, %rsp

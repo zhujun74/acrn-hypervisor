@@ -30,9 +30,9 @@
 #include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <linux/falloc.h>
 #include <linux/fs.h>
 #include <errno.h>
-#include <assert.h>
 #include <err.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -45,6 +45,7 @@
 #include "dm.h"
 #include "block_if.h"
 #include "ahci.h"
+#include "dm_string.h"
 
 /*
  * Notes:
@@ -62,6 +63,7 @@
 
 #define BLOCKIF_NUMTHR	8
 #define BLOCKIF_MAXREQ	(64 + BLOCKIF_NUMTHR)
+#define MAX_DISCARD_SEGMENT	256
 
 /*
  * Debug printf
@@ -74,7 +76,7 @@ enum blockop {
 	BOP_READ,
 	BOP_WRITE,
 	BOP_FLUSH,
-	BOP_DELETE
+	BOP_DISCARD
 };
 
 enum blockstat {
@@ -95,11 +97,9 @@ struct blockif_elem {
 };
 
 struct blockif_ctxt {
-	int			magic;
 	int			fd;
 	int			isblk;
-	int			isgeom;
-	int			candelete;
+	int			candiscard;
 	int			rdonly;
 	off_t			size;
 	int			sub_file_assign;
@@ -108,6 +108,9 @@ struct blockif_ctxt {
 	int			sectsz;
 	int			psectsz;
 	int			psectoff;
+	int			max_discard_sectors;
+	int			max_discard_seg;
+	int			discard_sector_alignment;
 	int			closing;
 	pthread_t		btid[BLOCKIF_NUMTHR];
 	pthread_mutex_t		mtx;
@@ -118,6 +121,9 @@ struct blockif_ctxt {
 	TAILQ_HEAD(, blockif_elem) pendq;
 	TAILQ_HEAD(, blockif_elem) busyq;
 	struct blockif_elem	reqs[BLOCKIF_MAXREQ];
+
+	/* write cache enable */
+	uint8_t			wce;
 };
 
 static pthread_once_t blockif_once = PTHREAD_ONCE_INIT;
@@ -129,7 +135,26 @@ struct blockif_sig_elem {
 	struct blockif_sig_elem		*next;
 };
 
+struct discard_range {
+	uint64_t sector;
+	uint32_t num_sectors;
+	uint32_t flags;
+};
+
 static struct blockif_sig_elem *blockif_bse_head;
+
+static int
+blockif_flush_cache(struct blockif_ctxt *bc)
+{
+	int err;
+
+	err = 0;
+	if (!bc->wce) {
+		if (fsync(bc->fd))
+			err = errno;
+	}
+	return err;
+}
 
 static int
 blockif_enqueue(struct blockif_ctxt *bc, struct blockif_req *breq,
@@ -140,15 +165,17 @@ blockif_enqueue(struct blockif_ctxt *bc, struct blockif_req *breq,
 	int i;
 
 	be = TAILQ_FIRST(&bc->freeq);
-	assert(be != NULL);
-	assert(be->status == BST_FREE);
+	if (be == NULL || be->status != BST_FREE) {
+		WPRINTF(("%s: failed to get element from freeq\n", __func__));
+		return 0;
+	}
 	TAILQ_REMOVE(&bc->freeq, be, link);
 	be->req = breq;
 	be->op = op;
 	switch (op) {
 	case BOP_READ:
 	case BOP_WRITE:
-	case BOP_DELETE:
+	case BOP_DISCARD:
 		off = breq->offset;
 		for (i = 0; i < breq->iovcnt; i++)
 			off += breq->iov[i].iov_len;
@@ -184,7 +211,6 @@ blockif_dequeue(struct blockif_ctxt *bc, pthread_t t, struct blockif_elem **bep)
 	TAILQ_FOREACH(be, &bc->pendq, link) {
 		if (be->status == BST_PEND)
 			break;
-		assert(be->status == BST_BLOCK);
 	}
 	if (be == NULL)
 		return 0;
@@ -215,117 +241,129 @@ blockif_complete(struct blockif_ctxt *bc, struct blockif_elem *be)
 	TAILQ_INSERT_TAIL(&bc->freeq, be, link);
 }
 
+static int
+discard_range_validate(struct blockif_ctxt *bc, off_t start, off_t size)
+{
+	off_t start_sector = start / DEV_BSIZE;
+	off_t size_sector = size / DEV_BSIZE;
+
+	if (!size || (start + size) > (bc->size + bc->sub_file_start_lba))
+		return -1;
+
+	if ((size_sector > bc->max_discard_sectors) ||
+			(bc->discard_sector_alignment &&
+			start_sector % bc->discard_sector_alignment))
+		return -1;
+	return 0;
+}
+
+static int
+blockif_process_discard(struct blockif_ctxt *bc, struct blockif_req *br)
+{
+	int err;
+	struct discard_range *range;
+	int n_range, i, segment;
+	off_t arg[MAX_DISCARD_SEGMENT][2];
+
+	err = 0;
+	n_range = 0;
+	segment = 0;
+	if (!bc->candiscard)
+		return EOPNOTSUPP;
+
+	if (bc->rdonly)
+		return EROFS;
+
+	if (br->iovcnt == 1) {
+		/* virtio-blk use iov to transfer discard range */
+		n_range = br->iov[0].iov_len/sizeof(*range);
+		range = br->iov[0].iov_base;
+		for (i = 0; i < n_range; i++) {
+			arg[i][0] = range[i].sector * DEV_BSIZE +
+					bc->sub_file_start_lba;
+			arg[i][1] = range[i].num_sectors * DEV_BSIZE;
+			segment++;
+			if (segment > bc->max_discard_seg) {
+				WPRINTF(("segment > max_discard_seg\n"));
+				return EINVAL;
+			}
+			if (discard_range_validate(bc, arg[i][0], arg[i][1])) {
+				WPRINTF(("range [%ld: %ld] is invalid\n", arg[i][0], arg[i][1]));
+				return EINVAL;
+			}
+		}
+	} else {
+		/* ahci parse discard range to br->offset and br->reside */
+		arg[0][0] = br->offset + bc->sub_file_start_lba;
+		arg[0][1] = br->resid;
+		segment = 1;
+	}
+	for (i = 0; i < segment; i++) {
+		if (bc->isblk) {
+			err = ioctl(bc->fd, BLKDISCARD, arg[i]);
+		} else {
+			/* FALLOC_FL_PUNCH_HOLE:
+			 *	Deallocates space in the byte range starting at offset and
+			 *	continuing for length bytes.  After a successful call,
+			 *	subsequent reads from this range will return zeroes.
+			 * FALLOC_FL_KEEP_SIZE:
+			 *	Do not modify the apparent length of the file.
+			 */
+			err = fallocate(bc->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+				arg[i][0], arg[i][1]);
+			if (!err)
+				err = fdatasync(bc->fd);
+		}
+		if (err) {
+			WPRINTF(("Failed to discard offset=%ld nbytes=%ld err code: %d\n",
+				 arg[i][0], arg[i][1], err));
+			return err;
+		}
+	}
+	br->resid = 0;
+
+	return 0;
+}
+
 static void
-blockif_proc(struct blockif_ctxt *bc, struct blockif_elem *be, uint8_t *buf)
+blockif_proc(struct blockif_ctxt *bc, struct blockif_elem *be)
 {
 	struct blockif_req *br;
-	off_t arg[2];
-	ssize_t clen, len, off, boff, voff;
-	int i, err;
+	ssize_t len;
+	int err;
 
 	br = be->req;
-	if (br->iovcnt <= 1)
-		buf = NULL;
 	err = 0;
 	switch (be->op) {
 	case BOP_READ:
-		if (buf == NULL) {
-			len = preadv(bc->fd, br->iov, br->iovcnt,
-				     br->offset + bc->sub_file_start_lba);
-			if (len < 0)
-				err = errno;
-			else
-				br->resid -= len;
-			break;
-		}
-		i = 0;
-		off = voff = 0;
-		while (br->resid > 0) {
-			len = MIN(br->resid, MAXPHYS);
-			if (pread(bc->fd, buf, len, br->offset +
-			    off + bc->sub_file_start_lba) < 0) {
-				err = errno;
-				break;
-			}
-			boff = 0;
-			do {
-				clen = MIN(len - boff, br->iov[i].iov_len -
-				    voff);
-				memcpy(br->iov[i].iov_base + voff,
-				    buf + boff, clen);
-				if (clen < br->iov[i].iov_len - voff)
-					voff += clen;
-				else {
-					i++;
-					voff = 0;
-				}
-				boff += clen;
-			} while (boff < len);
-			off += len;
+		len = preadv(bc->fd, br->iov, br->iovcnt,
+				 br->offset + bc->sub_file_start_lba);
+		if (len < 0)
+			err = errno;
+		else
 			br->resid -= len;
-		}
 		break;
 	case BOP_WRITE:
 		if (bc->rdonly) {
 			err = EROFS;
 			break;
 		}
-		if (buf == NULL) {
-			len = pwritev(bc->fd, br->iov, br->iovcnt,
-				      br->offset + bc->sub_file_start_lba);
-			if (len < 0)
-				err = errno;
-			else
-				br->resid -= len;
-			break;
-		}
-		i = 0;
-		off = voff = 0;
-		while (br->resid > 0) {
-			len = MIN(br->resid, MAXPHYS);
-			boff = 0;
-			do {
-				clen = MIN(len - boff, br->iov[i].iov_len -
-				    voff);
-				memcpy(buf + boff,
-				    br->iov[i].iov_base + voff, clen);
-				if (clen < br->iov[i].iov_len - voff)
-					voff += clen;
-				else {
-					i++;
-					voff = 0;
-				}
-				boff += clen;
-			} while (boff < len);
-			if (pwrite(bc->fd, buf, len, br->offset +
-			    off + bc->sub_file_start_lba) < 0) {
-				err = errno;
-				break;
-			}
-			off += len;
+
+		len = pwritev(bc->fd, br->iov, br->iovcnt,
+				  br->offset + bc->sub_file_start_lba);
+		if (len < 0)
+			err = errno;
+		else {
 			br->resid -= len;
+			err = blockif_flush_cache(bc);
 		}
 		break;
 	case BOP_FLUSH:
 		if (fsync(bc->fd))
 			err = errno;
 		break;
-	case BOP_DELETE:
-		/* only used by AHCI */
-		if (!bc->candelete)
-			err = EOPNOTSUPP;
-		else if (bc->rdonly)
-			err = EROFS;
-		else if (bc->isblk) {
-			arg[0] = br->offset;
-			arg[1] = br->resid;
-			if (ioctl(bc->fd, BLKDISCARD, arg))
-				err = errno;
-			else
-				br->resid = 0;
-		}
-		else
-			err = EOPNOTSUPP;
+	case BOP_DISCARD:
+		err = blockif_process_discard(bc, br);
 		break;
 	default:
 		err = EINVAL;
@@ -343,20 +381,16 @@ blockif_thr(void *arg)
 	struct blockif_ctxt *bc;
 	struct blockif_elem *be;
 	pthread_t t;
-	uint8_t *buf;
 
 	bc = arg;
-	if (bc->isgeom)
-		buf = malloc(MAXPHYS);
-	else
-		buf = NULL;
 	t = pthread_self();
 
 	pthread_mutex_lock(&bc->mtx);
+
 	for (;;) {
 		while (blockif_dequeue(bc, t, &be)) {
 			pthread_mutex_unlock(&bc->mtx);
-			blockif_proc(bc, be, buf);
+			blockif_proc(bc, be);
 			pthread_mutex_lock(&bc->mtx);
 			blockif_complete(bc, be);
 		}
@@ -365,10 +399,8 @@ blockif_thr(void *arg)
 			break;
 		pthread_cond_wait(&bc->cond, &bc->mtx);
 	}
-	pthread_mutex_unlock(&bc->mtx);
 
-	if (buf)
-		free(buf);
+	pthread_mutex_unlock(&bc->mtx);
 	pthread_exit(NULL);
 	return NULL;
 }
@@ -464,22 +496,34 @@ blockif_open(const char *optstr, const char *ident)
 	struct stat sbuf;
 	/* struct diocgattr_arg arg; */
 	off_t size, psectsz, psectoff;
-	int extra, fd, i, sectsz;
-	int nocache, sync, ro, candelete, geom, ssopt, pssopt;
+	int fd, i, sectsz;
+	int writeback, ro, candiscard, ssopt, pssopt;
 	long sz;
 	long long b;
 	int err_code = -1;
 	off_t sub_file_start_lba, sub_file_size;
 	int sub_file_assign;
+	int max_discard_sectors, max_discard_seg, discard_sector_alignment;
+	off_t probe_arg[] = {0, 0};
 
 	pthread_once(&blockif_once, blockif_init);
 
 	fd = -1;
 	ssopt = 0;
-	nocache = 0;
-	sync = 0;
+	pssopt = 0;
 	ro = 0;
 	sub_file_assign = 0;
+	sub_file_start_lba = 0;
+	sub_file_size = 0;
+
+	max_discard_sectors = -1;
+	max_discard_seg = -1;
+	discard_sector_alignment = -1;
+
+	/* writethru is on by default */
+	writeback = 0;
+
+	candiscard = 0;
 
 	/*
 	 * The first element in the optstring is always a pathname.
@@ -494,39 +538,63 @@ blockif_open(const char *optstr, const char *ident)
 		cp = strsep(&xopts, ",");
 		if (cp == nopt)		/* file or device pathname */
 			continue;
-		else if (!strcmp(cp, "nocache"))
-			nocache = 1;
-		else if (!strcmp(cp, "sync") || !strcmp(cp, "direct"))
-			sync = 1;
+		else if (!strcmp(cp, "writeback"))
+			writeback = 1;
+		else if (!strcmp(cp, "writethru"))
+			writeback = 0;
 		else if (!strcmp(cp, "ro"))
 			ro = 1;
-		else if (sscanf(cp, "sectorsize=%d/%d", &ssopt, &pssopt) == 2)
-			;
-		else if (sscanf(cp, "sectorsize=%d", &ssopt) == 1)
-			pssopt = ssopt;
-		else if (sscanf(cp, "range=%ld/%ld", &sub_file_start_lba,
-				&sub_file_size) == 2)
-			sub_file_assign = 1;
-		else {
+		else if (!strncmp(cp, "discard", strlen("discard"))) {
+			strsep(&cp, "=");
+			if (cp != NULL) {
+				if (!(!dm_strtoi(cp, &cp, 10, &max_discard_sectors) &&
+					*cp == ':' &&
+					!dm_strtoi(cp + 1, &cp, 10, &max_discard_seg) &&
+					*cp == ':' &&
+					!dm_strtoi(cp + 1, &cp, 10, &discard_sector_alignment)))
+					goto err;
+			}
+			candiscard = 1;
+		} else if (!strncmp(cp, "sectorsize", strlen("sectorsize"))) {
+			/*
+			 *  sectorsize=<sector size>
+			 * or
+			 *  sectorsize=<sector size>/<physical sector size>
+			 */
+			if (strsep(&cp, "=") && !dm_strtoi(cp, &cp, 10, &ssopt)) {
+				pssopt = ssopt;
+				if (*cp == '/' &&
+					dm_strtoi(cp + 1, &cp, 10, &pssopt) < 0)
+					goto err;
+			} else {
+				goto err;
+			}
+		} else if (!strncmp(cp, "range", strlen("range"))) {
+			/* range=<start lba>/<subfile size> */
+			if (strsep(&cp, "=") &&
+				!dm_strtol(cp, &cp, 10, &sub_file_start_lba) &&
+				*cp == '/' &&
+				!dm_strtol(cp + 1, &cp, 10, &sub_file_size))
+				sub_file_assign = 1;
+			else
+				goto err;
+		} else {
 			fprintf(stderr, "Invalid device option \"%s\"\n", cp);
 			goto err;
 		}
 	}
 
-	/* enforce a write-through policy by default */
-	nocache = 1;
-	sync = 1;
+	/*
+	 * To support "writeback" and "writethru" mode switch during runtime,
+	 * O_SYNC is not used directly, as O_SYNC flag cannot dynamic change
+	 * after file is opened. Instead, we call fsync() after each write
+	 * operation to emulate it.
+	 */
 
-	extra = 0;
-	if (nocache)
-		extra |= O_DIRECT;
-	if (sync)
-		extra |= O_SYNC;
-
-	fd = open(nopt, (ro ? O_RDONLY : O_RDWR) | extra);
+	fd = open(nopt, ro ? O_RDONLY : O_RDWR);
 	if (fd < 0 && !ro) {
 		/* Attempt a r/w fail with a r/o open */
-		fd = open(nopt, O_RDONLY | extra);
+		fd = open(nopt, O_RDONLY);
 		ro = 1;
 	}
 
@@ -546,7 +614,6 @@ blockif_open(const char *optstr, const char *ident)
 	size = sbuf.st_size;
 	sectsz = DEV_BSIZE;
 	psectsz = psectoff = 0;
-	candelete = geom = 0;
 
 	if (S_ISBLK(sbuf.st_mode)) {
 		/* get size */
@@ -581,8 +648,22 @@ blockif_open(const char *optstr, const char *ident)
 		DPRINTF(("block partition physical sector size is 0x%lx\n",
 			 psectsz));
 
-	} else
+		if (candiscard) {
+			err_code = ioctl(fd, BLKDISCARD, probe_arg);
+			if (err_code) {
+				WPRINTF(("not support DISCARD\n"));
+				candiscard = 0;
+			}
+		}
+
+	} else {
+		if (size < DEV_BSIZE || (size & (DEV_BSIZE - 1))) {
+			WPRINTF(("%s size not corret, should be multiple of %d\n",
+						nopt, DEV_BSIZE));
+			goto err;
+		}
 		psectsz = sbuf.st_blksize;
+	}
 
 	if (ssopt != 0) {
 		if (!powerof2(ssopt) || !powerof2(pssopt) || ssopt < 512 ||
@@ -638,16 +719,24 @@ blockif_open(const char *optstr, const char *ident)
 		bc->sub_file_start_lba = 0;
 	}
 
-	bc->magic = BLOCKIF_SIG;
 	bc->fd = fd;
 	bc->isblk = S_ISBLK(sbuf.st_mode);
-	bc->isgeom = geom;
-	bc->candelete = candelete;
+	bc->candiscard = candiscard;
+	if (candiscard) {
+		bc->max_discard_sectors =
+			(max_discard_sectors != -1) ?
+				max_discard_sectors : (size / DEV_BSIZE);
+		bc->max_discard_seg =
+			(max_discard_seg != -1) ? max_discard_seg : 1;
+		bc->discard_sector_alignment =
+			(discard_sector_alignment != -1) ? discard_sector_alignment : 0;
+	}
 	bc->rdonly = ro;
 	bc->size = size;
 	bc->sectsz = sectsz;
 	bc->psectsz = psectsz;
 	bc->psectoff = psectoff;
+	bc->wce = writeback;
 	pthread_mutex_init(&bc->mtx, NULL);
 	pthread_cond_init(&bc->cond, NULL);
 	TAILQ_INIT(&bc->freeq);
@@ -659,13 +748,26 @@ blockif_open(const char *optstr, const char *ident)
 	}
 
 	for (i = 0; i < BLOCKIF_NUMTHR; i++) {
+		if (snprintf(tname, sizeof(tname), "blk-%s-%d",
+					ident, i) >= sizeof(tname)) {
+			perror("blk thread name too long");
+		}
 		pthread_create(&bc->btid[i], NULL, blockif_thr, bc);
-		snprintf(tname, sizeof(tname), "blk-%s-%d", ident, i);
 		pthread_setname_np(bc->btid[i], tname);
+	}
+
+	/* free strdup memory */
+	if (nopt) {
+		free(nopt);
+		nopt = NULL;
 	}
 
 	return bc;
 err:
+	/* handle failure case: free strdup memory*/
+	if (nopt)
+		free(nopt);
+
 	if (fd >= 0)
 		close(fd);
 	return NULL;
@@ -704,37 +806,31 @@ blockif_request(struct blockif_ctxt *bc, struct blockif_req *breq,
 int
 blockif_read(struct blockif_ctxt *bc, struct blockif_req *breq)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return blockif_request(bc, breq, BOP_READ);
 }
 
 int
 blockif_write(struct blockif_ctxt *bc, struct blockif_req *breq)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return blockif_request(bc, breq, BOP_WRITE);
 }
 
 int
 blockif_flush(struct blockif_ctxt *bc, struct blockif_req *breq)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return blockif_request(bc, breq, BOP_FLUSH);
 }
 
 int
-blockif_delete(struct blockif_ctxt *bc, struct blockif_req *breq)
+blockif_discard(struct blockif_ctxt *bc, struct blockif_req *breq)
 {
-	assert(bc->magic == BLOCKIF_SIG);
-	return blockif_request(bc, breq, BOP_DELETE);
+	return blockif_request(bc, breq, BOP_DISCARD);
 }
 
 int
 blockif_cancel(struct blockif_ctxt *bc, struct blockif_req *breq)
 {
 	struct blockif_elem *be;
-
-	assert(bc->magic == BLOCKIF_SIG);
 
 	pthread_mutex_lock(&bc->mtx);
 	/*
@@ -812,7 +908,6 @@ blockif_close(struct blockif_ctxt *bc)
 	void *jval;
 	int i;
 
-	assert(bc->magic == BLOCKIF_SIG);
 	sub_file_unlock(bc);
 
 	/*
@@ -820,8 +915,9 @@ blockif_close(struct blockif_ctxt *bc)
 	 */
 	pthread_mutex_lock(&bc->mtx);
 	bc->closing = 1;
-	pthread_mutex_unlock(&bc->mtx);
 	pthread_cond_broadcast(&bc->cond);
+	pthread_mutex_unlock(&bc->mtx);
+
 	for (i = 0; i < BLOCKIF_NUMTHR; i++)
 		pthread_join(bc->btid[i], &jval);
 
@@ -830,7 +926,6 @@ blockif_close(struct blockif_ctxt *bc)
 	/*
 	 * Release resources
 	 */
-	bc->magic = 0;
 	close(bc->fd);
 	free(bc);
 
@@ -848,8 +943,6 @@ blockif_chs(struct blockif_ctxt *bc, uint16_t *c, uint8_t *h, uint8_t *s)
 	off_t hcyl;		/* cylinders times heads */
 	uint16_t secpt;		/* sectors per track */
 	uint8_t heads;
-
-	assert(bc->magic == BLOCKIF_SIG);
 
 	sectors = bc->size / bc->sectsz;
 
@@ -892,21 +985,18 @@ blockif_chs(struct blockif_ctxt *bc, uint16_t *c, uint8_t *h, uint8_t *s)
 off_t
 blockif_size(struct blockif_ctxt *bc)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return bc->size;
 }
 
 int
 blockif_sectsz(struct blockif_ctxt *bc)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return bc->sectsz;
 }
 
 void
 blockif_psectsz(struct blockif_ctxt *bc, int *size, int *off)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	*size = bc->psectsz;
 	*off = bc->psectoff;
 }
@@ -914,20 +1004,58 @@ blockif_psectsz(struct blockif_ctxt *bc, int *size, int *off)
 int
 blockif_queuesz(struct blockif_ctxt *bc)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return (BLOCKIF_MAXREQ - 1);
 }
 
 int
 blockif_is_ro(struct blockif_ctxt *bc)
 {
-	assert(bc->magic == BLOCKIF_SIG);
 	return bc->rdonly;
 }
 
 int
-blockif_candelete(struct blockif_ctxt *bc)
+blockif_candiscard(struct blockif_ctxt *bc)
 {
-	assert(bc->magic == BLOCKIF_SIG);
-	return bc->candelete;
+	return bc->candiscard;
+}
+
+int
+blockif_max_discard_sectors(struct blockif_ctxt *bc)
+{
+	return bc->max_discard_sectors;
+}
+
+int
+blockif_max_discard_seg(struct blockif_ctxt *bc)
+{
+	return bc->max_discard_seg;
+}
+
+int
+blockif_discard_sector_alignment(struct blockif_ctxt *bc)
+{
+	return bc->discard_sector_alignment;
+}
+
+uint8_t
+blockif_get_wce(struct blockif_ctxt *bc)
+{
+	return bc->wce;
+}
+
+void
+blockif_set_wce(struct blockif_ctxt *bc, uint8_t wce)
+{
+	bc->wce = wce;
+}
+
+int
+blockif_flush_all(struct blockif_ctxt *bc)
+{
+	int err;
+
+	err=0;
+	if (fsync(bc->fd))
+		err = errno;
+	return err;
 }

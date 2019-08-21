@@ -31,7 +31,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <pthread.h>
 #include <inttypes.h>
 #include <openssl/md5.h>
@@ -626,7 +625,6 @@ ahci_build_iov(struct ahci_port *p, struct ahci_ioreq *aior,
 	if (j == BLOCKIF_IOV_MAX) {
 		extra = todo % blockif_sectsz(p->bctx);
 		todo -= extra;
-		assert(todo > 0);
 		while (extra > 0) {
 			if (breq->iov[j - 1].iov_len > extra) {
 				breq->iov[j - 1].iov_len -= extra;
@@ -702,7 +700,10 @@ ahci_handle_rw(struct ahci_port *p, int slot, uint8_t *cfis, uint32_t done)
 
 	/* Pull request off free list */
 	aior = STAILQ_FIRST(&p->iofhd);
-	assert(aior != NULL);
+	if (aior == NULL) {
+		WPRINTF("%s: failed to pull request off free list\n", __func__);
+		return;
+	}
 	STAILQ_REMOVE_HEAD(&p->iofhd, io_flist);
 
 	aior->cfis = cfis;
@@ -726,7 +727,8 @@ ahci_handle_rw(struct ahci_port *p, int slot, uint8_t *cfis, uint32_t done)
 		err = blockif_read(p->bctx, breq);
 	else
 		err = blockif_write(p->bctx, breq);
-	assert(err == 0);
+	if (err)
+		WPRINTF("%s: blockif read or write error\n", __func__);
 }
 
 static void
@@ -740,7 +742,10 @@ ahci_handle_flush(struct ahci_port *p, int slot, uint8_t *cfis)
 	 * Pull request off free list
 	 */
 	aior = STAILQ_FIRST(&p->iofhd);
-	assert(aior != NULL);
+	if (aior == NULL) {
+		WPRINTF("%s: failed to pull request off free list\n", __func__);
+		return;
+	}
 	STAILQ_REMOVE_HEAD(&p->iofhd, io_flist);
 	aior->cfis = cfis;
 	aior->slot = slot;
@@ -760,7 +765,8 @@ ahci_handle_flush(struct ahci_port *p, int slot, uint8_t *cfis)
 	TAILQ_INSERT_HEAD(&p->iobhd, aior, io_blist);
 
 	err = blockif_flush(p->bctx, breq);
-	assert(err == 0);
+	if (err)
+		WPRINTF("%s: blockif flush failed\n", __func__);
 }
 
 static inline void
@@ -849,7 +855,10 @@ next:
 	 * Pull request off free list
 	 */
 	aior = STAILQ_FIRST(&p->iofhd);
-	assert(aior != NULL);
+	if (aior == NULL) {
+		WPRINTF("%s: failed to pull request off free list\n", __func__);
+		return;
+	}
 	STAILQ_REMOVE_HEAD(&p->iofhd, io_flist);
 	aior->cfis = cfis;
 	aior->slot = slot;
@@ -874,8 +883,9 @@ next:
 	if (ncq && first)
 		ahci_write_fis_d2h_ncq(p, slot);
 
-	err = blockif_delete(p->bctx, breq);
-	assert(err == 0);
+	err = blockif_discard(p->bctx, breq);
+	if (err)
+		WPRINTF("%s: blockif discard failed\n", __func__);
 }
 
 static inline void
@@ -943,7 +953,7 @@ ahci_handle_read_log(struct ahci_port *p, int slot, uint8_t *cfis)
 		memcpy(buf8, p->err_cfis, sizeof(p->err_cfis));
 		ahci_checksum(buf8, sizeof(buf));
 	} else if (cfis[4] == 0x13) {	/* SATA NCQ Send and Receive Log */
-		if (blockif_candelete(p->bctx) && !blockif_is_ro(p->bctx)) {
+		if (blockif_candiscard(p->bctx) && !blockif_is_ro(p->bctx)) {
 			buf[0x00] = 1;	/* SFQ DSM supported */
 			buf[0x01] = 1;	/* SFQ DSM TRIM supported */
 		}
@@ -971,12 +981,12 @@ handle_identify(struct ahci_port *p, int slot, uint8_t *cfis)
 	} else {
 		uint16_t buf[256];
 		uint64_t sectors;
-		int sectsz, psectsz, psectoff, candelete, ro;
+		int sectsz, psectsz, psectoff, candiscard, ro;
 		uint16_t cyl;
 		uint8_t sech, heads;
 
 		ro = blockif_is_ro(p->bctx);
-		candelete = blockif_candelete(p->bctx);
+		candiscard = blockif_candiscard(p->bctx);
 		sectsz = blockif_sectsz(p->bctx);
 		sectors = blockif_size(p->bctx) / sectsz;
 		blockif_chs(p->bctx, &cyl, &heads, &sech);
@@ -1036,7 +1046,7 @@ handle_identify(struct ahci_port *p, int slot, uint8_t *cfis)
 		buf[101] = (sectors >> 16);
 		buf[102] = (sectors >> 32);
 		buf[103] = (sectors >> 48);
-		if (candelete && !ro) {
+		if (candiscard && !ro) {
 			buf[69] |= ATA_SUPPORT_RZAT | ATA_SUPPORT_DRAT;
 			buf[105] = 1;
 			buf[169] = ATA_SUPPORT_DSM_TRIM;
@@ -1401,7 +1411,10 @@ atapi_read(struct ahci_port *p, int slot, uint8_t *cfis, uint32_t done)
 	 * Pull request off free list
 	 */
 	aior = STAILQ_FIRST(&p->iofhd);
-	assert(aior != NULL);
+	if (aior == NULL) {
+		WPRINTF("%s: failed to pull request off free list\n", __func__);
+		return;
+	}
 	STAILQ_REMOVE_HEAD(&p->iofhd, io_flist);
 	aior->cfis = cfis;
 	aior->slot = slot;
@@ -1418,7 +1431,8 @@ atapi_read(struct ahci_port *p, int slot, uint8_t *cfis, uint32_t done)
 	TAILQ_INSERT_HEAD(&p->iobhd, aior, io_blist);
 
 	err = blockif_read(p->bctx, breq);
-	assert(err == 0);
+	if (err)
+		WPRINTF("%s: blockif read failed\n", __func__);
 }
 
 static void
@@ -1999,7 +2013,7 @@ out:
 	DPRINTF("%s exit\n", __func__);
 }
 
-static void
+static int
 pci_ahci_ioreq_init(struct ahci_port *pr)
 {
 	struct ahci_ioreq *vr;
@@ -2008,7 +2022,10 @@ pci_ahci_ioreq_init(struct ahci_port *pr)
 	pr->ioqsz = blockif_queuesz(pr->bctx);
 	pr->ioreq = calloc(pr->ioqsz, sizeof(struct ahci_ioreq));
 
-	assert(pr->ioreq != NULL);
+	if (pr->ioreq == NULL) {
+		WPRINTF("%s: failed to calloc for ioreq\n", __func__);
+		return -1;
+	}
 
 	STAILQ_INIT(&pr->iofhd);
 
@@ -2027,6 +2044,7 @@ pci_ahci_ioreq_init(struct ahci_port *pr)
 	}
 
 	TAILQ_INIT(&pr->iobhd);
+	return 0;
 }
 
 static void
@@ -2177,8 +2195,16 @@ pci_ahci_write(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 {
 	struct pci_ahci_vdev *ahci_dev = dev->arg;
 
-	assert(baridx == 5);
-	assert((offset % 4) == 0 && size == 4);
+	if (baridx != 5) {
+		WPRINTF("%s: baridx=%d not support \n", __func__, baridx);
+		return;
+	}
+
+	if (!((offset % 4) == 0 && size == 4)) {
+		WPRINTF("%s: offset=%ld, size=%d not support \n",
+				__func__, offset, size);
+		return;
+	}
 
 	pthread_mutex_lock(&ahci_dev->mtx);
 
@@ -2278,9 +2304,19 @@ pci_ahci_read(struct vmctx *ctx, int vcpu, struct pci_vdev *dev, int baridx,
 	uint64_t offset;
 	uint32_t value;
 
-	assert(baridx == 5);
-	assert(size == 1 || size == 2 || size == 4);
-	assert((regoff & (size - 1)) == 0);
+	value = 0;
+	if (baridx != 5) {
+		WPRINTF("%s: baridx=%d error", __func__, baridx);
+		return value;
+	}
+	if (size != 1 && size != 2 && size != 4) {
+		WPRINTF("%s: size=%d not support", __func__, size);
+		return value;
+	}
+	if ((regoff & (size - 1)) != 0) {
+		WPRINTF("%s: regoff=%ld not support", __func__, regoff);
+		return value;
+	}
 
 	pthread_mutex_lock(&ahci_dev->mtx);
 
@@ -2307,7 +2343,7 @@ pci_ahci_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts, int atapi)
 	char bident[16];
 	struct blockif_ctxt *bctxt;
 	struct pci_ahci_vdev *ahci_dev;
-	int ret, slots;
+	int ret, slots, rc;
 	uint8_t p;
 	MD5_CTX mdctx;
 	u_char digest[16];
@@ -2315,6 +2351,7 @@ pci_ahci_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts, int atapi)
 
 	ret = 0;
 
+#define MAX_OPTS_LEN 256
 #ifdef AHCI_DEBUG
 	dbg = fopen("/tmp/log", "w+");
 #endif
@@ -2376,17 +2413,23 @@ pci_ahci_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts, int atapi)
 		 * Use parts of the md5 sum of the filename
 		 */
 		MD5_Init(&mdctx);
-		MD5_Update(&mdctx, opts, strlen(opts));
+		MD5_Update(&mdctx, opts, strnlen(opts, MAX_OPTS_LEN));
 		MD5_Final(digest, &mdctx);
-		sprintf(ahci_dev->port[p].ident,
+		rc = snprintf(ahci_dev->port[p].ident,
+			sizeof(ahci_dev->port[p].ident),
 			"ACRN--%02X%02X-%02X%02X-%02X%02X", digest[0],
 			digest[1], digest[2], digest[3], digest[4], digest[5]);
+		if (rc > sizeof(ahci_dev->port[p].ident))
+			WPRINTF("%s: digest is longer than ident\n", __func__);
 
 		/*
 		 * Allocate blockif request structures and add them
 		 * to the free list
 		 */
-		pci_ahci_ioreq_init(&ahci_dev->port[p]);
+		if (pci_ahci_ioreq_init(&ahci_dev->port[p])) {
+			ret = -1;
+			goto open_fail;
+		}
 
 		ahci_dev->pi |= (1 << p);
 		if (ahci_dev->port[p].ioqsz < slots)

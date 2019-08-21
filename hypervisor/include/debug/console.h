@@ -7,38 +7,22 @@
 #ifndef CONSOLE_H
 #define CONSOLE_H
 
-#ifdef HV_DEBUG
-extern struct timer console_timer;
+#include <vuart.h>
 
 /** Initializes the console module.
  *
- *  @param cdev A pointer to the character device to use for the console.
- *
- *  @return '0' on success. Any other value indicates an error.
  */
-
-int console_init(void);
-
-/** Writes a NUL terminated string to the console.
- *
- *  @param str A pointer to the NUL terminated string to write.
- *
- *  @return The number of characters written or -1 if an error occurred
- *          and no character was written.
- */
-
-int console_puts(const char *str);
+void console_init(void);
 
 /** Writes a given number of characters to the console.
  *
- *  @param str A pointer to character array to write.
+ *  @param s A pointer to character array to write.
  *  @param len The number of characters to write.
  *
  *  @return The number of characters written or -1 if an error occurred
  *          and no character was written.
  */
-
-int console_write(const char *str, size_t len);
+size_t console_write(const char *s, size_t len);
 
 /** Writes a single character to the console.
  *
@@ -47,61 +31,13 @@ int console_write(const char *str, size_t len);
  *  @preturn The number of characters written or -1 if an error
  *           occurred before any character was written.
  */
-
-int console_putc(int ch);
-
-/** Dumps an array to the console.
- *
- *  This function dumps an array of bytes to the console
- *  in a hexadecimal format.
- *
- *  @param p A pointer to the byte array to dump.
- *  @param len The number of bytes to dump.
- */
-
-void console_dump_bytes(const void *p, unsigned int len);
+void console_putc(const char *ch);
+char console_getc(void);
 
 void console_setup_timer(void);
 
-uint32_t get_serial_handle(void);
-
-static inline void suspend_console(void)
-{
-	del_timer(&console_timer);
-}
-
-static inline void resume_console(void)
-{
-	console_setup_timer();
-}
-
-#else
-static inline int console_init(void)
-{
-	return 0;
-}
-static inline int console_puts(__unused const char *str)
-{
-	return 0;
-}
-static inline int console_write(__unused const char *str,
-			__unused size_t len)
-{
-	return 0;
-}
-static inline int console_putc(__unused int ch)
-{
-	return 0;
-}
-static inline void console_dump_bytes(__unused const void *p,
-			__unused unsigned int len)
-{
-}
-static inline void console_setup_timer(void) {}
-static inline uint32_t get_serial_handle(void) { return 0; }
-
-static inline void suspend_console(void) {}
-static inline void resume_console(void) {}
-#endif
+void suspend_console(void);
+void resume_console(void);
+struct acrn_vuart *vm_console_vuart(struct acrn_vm *vm);
 
 #endif /* CONSOLE_H */

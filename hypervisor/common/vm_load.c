@@ -4,223 +4,229 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <hypervisor.h>
+#include <vm.h>
+#include <e820.h>
 #include <zeropage.h>
+#include <boot_context.h>
+#include <ept.h>
+#include <mmu.h>
+#include <multiboot.h>
+#include <errno.h>
+#include <sprintf.h>
+#include <logmsg.h>
 
-static uint32_t create_e820_table(struct e820_entry *_e820)
+#define NUM_REMAIN_1G_PAGES	3UL
+
+/*
+ * We put the guest init gdt after kernel/bootarg/ramdisk images. Suppose this is a
+ * safe place for guest init gdt of guest whatever the configuration is used by guest.
+ */
+static uint64_t get_guest_gdt_base_gpa(const struct acrn_vm *vm)
 {
-	uint32_t i;
+	uint64_t new_guest_gdt_base_gpa, guest_kernel_end_gpa, guest_bootargs_end_gpa, guest_ramdisk_end_gpa;
 
-	ASSERT(e820_entries > 0U,
-			"e820 should be inited");
+	guest_kernel_end_gpa = (uint64_t)vm->sw.kernel_info.kernel_load_addr + vm->sw.kernel_info.kernel_size;
+	guest_bootargs_end_gpa = (uint64_t)vm->sw.bootargs_info.load_addr + vm->sw.bootargs_info.size;
+	guest_ramdisk_end_gpa = (uint64_t)vm->sw.ramdisk_info.load_addr + vm->sw.ramdisk_info.size;
 
-	for (i = 0U; i < e820_entries; i++) {
-		_e820[i].baseaddr = e820[i].baseaddr;
-		_e820[i].length = e820[i].length;
-		_e820[i].type = e820[i].type;
-	}
+	new_guest_gdt_base_gpa = max(guest_kernel_end_gpa, max(guest_bootargs_end_gpa, guest_ramdisk_end_gpa));
+	new_guest_gdt_base_gpa = (new_guest_gdt_base_gpa + 7UL) & ~(8UL - 1UL);
 
-	return e820_entries;
+	return new_guest_gdt_base_gpa;
 }
 
-static uint64_t create_zero_page(struct vm *vm)
+/**
+ * @pre zp != NULL && vm != NULL
+ */
+static uint32_t create_zeropage_e820(struct zero_page *zp, const struct acrn_vm *vm)
+{
+	uint32_t entry_num = vm->e820_entry_num;
+	struct e820_entry *zp_e820 = zp->entries;
+	const struct e820_entry *vm_e820 = vm->e820_entries;
+
+	if ((zp_e820 == NULL) || (vm_e820 == NULL) || (entry_num == 0U) || (entry_num > E820_MAX_ENTRIES)) {
+		pr_err("e820 create error");
+		entry_num = 0U;
+	} else {
+		(void)memcpy_s((void *)zp_e820, entry_num * sizeof(struct e820_entry),
+			(void *)vm_e820, entry_num * sizeof(struct e820_entry));
+	}
+	return entry_num;
+}
+
+/**
+ * @pre vm != NULL
+ */
+static uint64_t create_zero_page(struct acrn_vm *vm)
 {
 	struct zero_page *zeropage;
-	struct sw_linux *sw_linux = &(vm->sw.linux_info);
+	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
+	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
+	struct sw_module_info *ramdisk_info = &(vm->sw.ramdisk_info);
 	struct zero_page *hva;
-	uint64_t gpa;
+	uint64_t gpa, addr;
 
 	/* Set zeropage in Linux Guest RAM region just past boot args */
-	hva = GPA2HVA(vm, (uint64_t)sw_linux->bootargs_load_addr);
-	zeropage = (struct zero_page *)((char *)hva + MEM_4K);
+	gpa = (uint64_t)bootargs_info->load_addr + MEM_4K;
+	hva = (struct zero_page *)gpa2hva(vm, gpa);
+	zeropage = hva;
 
+	stac();
 	/* clear the zeropage */
-	(void)memset(zeropage, 0, MEM_2K);
+	(void)memset(zeropage, 0U, MEM_2K);
 
 	/* copy part of the header into the zero page */
-	hva = GPA2HVA(vm, (uint64_t)vm->sw.kernel_info.kernel_load_addr);
-	memcpy_s(&(zeropage->hdr), sizeof(zeropage->hdr),
+	hva = (struct zero_page *)gpa2hva(vm, (uint64_t)sw_kernel->kernel_load_addr);
+	(void)memcpy_s(&(zeropage->hdr), sizeof(zeropage->hdr),
 				&(hva->hdr), sizeof(hva->hdr));
 
 	/* See if kernel has a RAM disk */
-	if (sw_linux->ramdisk_src_addr != NULL) {
+	if (ramdisk_info->src_addr != NULL) {
 		/* Copy ramdisk load_addr and size in zeropage header structure
 		 */
-		zeropage->hdr.ramdisk_addr =
-			(uint32_t)(uint64_t)sw_linux->ramdisk_load_addr;
-		zeropage->hdr.ramdisk_size = (uint32_t)sw_linux->ramdisk_size;
+		addr = (uint64_t)ramdisk_info->load_addr;
+		zeropage->hdr.ramdisk_addr = (uint32_t)addr;
+		zeropage->hdr.ramdisk_size = (uint32_t)ramdisk_info->size;
 	}
 
 	/* Copy bootargs load_addr in zeropage header structure */
-	zeropage->hdr.bootargs_addr =
-		(uint32_t)(uint64_t)sw_linux->bootargs_load_addr;
+	addr = (uint64_t)bootargs_info->load_addr;
+	zeropage->hdr.bootargs_addr = (uint32_t)addr;
 
 	/* set constant arguments in zero page */
-	zeropage->hdr.loader_type = 0xff;
-	zeropage->hdr.load_flags |= (1U << 5);	/* quiet */
+	zeropage->hdr.loader_type = 0xffU;
+	zeropage->hdr.load_flags |= (1U << 5U);	/* quiet */
 
 	/* Create/add e820 table entries in zeropage */
-	zeropage->e820_nentries = create_e820_table(zeropage->e820);
-
-	/* Get the host physical address of the zeropage */
-	gpa = hpa2gpa(vm, HVA2HPA((uint64_t)zeropage));
+	zeropage->e820_nentries = (uint8_t)create_zeropage_e820(zeropage, vm);
+	clac();
 
 	/* Return Physical Base Address of zeropage */
 	return gpa;
 }
 
-int load_guest(struct vm *vm, struct vcpu *vcpu)
+/**
+ * @pre vm != NULL
+ */
+static void prepare_loading_bzimage(struct acrn_vm *vm, struct acrn_vcpu *vcpu)
 {
-	int32_t ret = 0;
-	void *hva;
-	struct run_context *cur_context =
-		&vcpu->arch_vcpu.contexts[vcpu->arch_vcpu.cur_context];
-	uint64_t  lowmem_gpa_top;
-
-	hva  = GPA2HVA(vm, GUEST_CFG_OFFSET);
-	lowmem_gpa_top = *(uint64_t *)hva;
-
-	/* hardcode vcpu entry addr(kernel entry) & rsi (zeropage)*/
-	(void)memset(cur_context->guest_cpu_regs.longs,
-			0, sizeof(uint64_t)*NUM_GPRS);
-
-	hva  = GPA2HVA(vm, lowmem_gpa_top -
-			MEM_4K - MEM_2K);
-	vcpu->entry_addr = (void *)(*((uint64_t *)hva));
-	cur_context->guest_cpu_regs.regs.rsi =
-		lowmem_gpa_top - MEM_4K;
-
-	pr_info("%s, Set config according to predefined offset:",
-			__func__);
-	pr_info("VCPU%hu Entry: 0x%llx, RSI: 0x%016llx, cr3: 0x%016llx",
-			vcpu->vcpu_id, vcpu->entry_addr,
-			cur_context->guest_cpu_regs.regs.rsi,
-			vm->arch_vm.guest_init_pml4);
-
-	return ret;
-}
-
-int general_sw_loader(struct vm *vm, struct vcpu *vcpu)
-{
-	int32_t ret = 0;
-	void *hva;
-	struct run_context *cur_context =
-		&vcpu->arch_vcpu.contexts[vcpu->arch_vcpu.cur_context];
+	uint32_t i;
 	char  dyn_bootargs[100] = {0};
 	uint32_t kernel_entry_offset;
 	struct zero_page *zeropage;
+	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
+	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
+	const struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
-	ASSERT(vm != NULL, "Incorrect argument");
+	/* calculate the kernel entry point */
+	zeropage = (struct zero_page *)sw_kernel->kernel_src_addr;
+	stac();
+	kernel_entry_offset = (uint32_t)(zeropage->hdr.setup_sects + 1U) * 512U;
+	clac();
+	if (vcpu->arch.cpu_mode == CPU_MODE_64BIT) {
+		/* 64bit entry is the 512bytes after the start */
+		kernel_entry_offset += 512U;
+	}
+
+	sw_kernel->kernel_entry_addr = (void *)((uint64_t)sw_kernel->kernel_load_addr + kernel_entry_offset);
+
+	/* Documentation states: ebx=0, edi=0, ebp=0, esi=ptr to
+	 * zeropage
+	 */
+	for (i = 0U; i < NUM_GPRS; i++) {
+		vcpu_set_gpreg(vcpu, i, 0UL);
+	}
+
+	/* add "hugepagesz=1G hugepages=x" to cmdline for 1G hugepage
+	 * reserving. Current strategy is "total_mem_size in Giga -
+	 * remained 1G pages" for reserving.
+	 */
+	if (is_sos_vm(vm) && (bootargs_info->load_addr != NULL)) {
+		int64_t reserving_1g_pages;
+
+		reserving_1g_pages = (vm_config->memory.size >> 30U) - NUM_REMAIN_1G_PAGES;
+		if (reserving_1g_pages > 0) {
+			snprintf(dyn_bootargs, 100U, " hugepagesz=1G hugepages=%lld", reserving_1g_pages);
+			(void)copy_to_gpa(vm, dyn_bootargs, ((uint64_t)bootargs_info->load_addr
+				+ bootargs_info->size), (strnlen_s(dyn_bootargs, 99U) + 1U));
+		}
+	}
+
+	/* Create Zeropage and copy Physical Base Address of Zeropage
+	 * in RSI
+	 */
+	vcpu_set_gpreg(vcpu, CPU_REG_RSI, create_zero_page(vm));
+	pr_info("%s, RSI pointing to zero page for VM %d at GPA %X",
+			__func__, vm->vm_id, vcpu_get_gpreg(vcpu, CPU_REG_RSI));
+}
+
+/**
+ * @pre vm != NULL
+ */
+static void prepare_loading_rawimage(struct acrn_vm *vm)
+{
+	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
+	const struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	sw_kernel->kernel_entry_addr = (void *)vm_config->os_config.kernel_entry_addr;
+}
+
+/**
+ * @pre vm != NULL
+ */
+int32_t direct_boot_sw_loader(struct acrn_vm *vm)
+{
+	int32_t ret = 0;
+	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
+	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
+	struct sw_module_info *ramdisk_info = &(vm->sw.ramdisk_info);
+	/* get primary vcpu */
+	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BOOT_CPU_ID);
 
 	pr_dbg("Loading guest to run-time location");
 
-	/* FIXME: set config according to predefined offset */
-	if (!is_vm0(vm))
-		return load_guest(vm, vcpu);
-
-	/* calculate the kernel entry point */
-	zeropage = (struct zero_page *)
-			vm->sw.kernel_info.kernel_src_addr;
-	kernel_entry_offset = (zeropage->hdr.setup_sects + 1) * 512;
-	if (vcpu->arch_vcpu.cpu_mode == CPU_MODE_64BIT)
-		/* 64bit entry is the 512bytes after the start */
-		kernel_entry_offset += 512;
-
-	vm->sw.kernel_info.kernel_entry_addr =
-		(void *)((uint64_t)vm->sw.kernel_info.kernel_load_addr
-			+ kernel_entry_offset);
-	if (is_vcpu_bsp(vcpu)) {
-		/* Set VCPU entry point to kernel entry */
-		vcpu->entry_addr = vm->sw.kernel_info.kernel_entry_addr;
-		pr_info("%s, VM *d VCPU %hu Entry: 0x%016llx ",
-			__func__, vm->attr.id, vcpu->vcpu_id, vcpu->entry_addr);
-	}
-
-	/* Calculate the host-physical address where the guest will be loaded */
-	hva = GPA2HVA(vm, (uint64_t)vm->sw.kernel_info.kernel_load_addr);
+	/*
+	 * TODO:
+	 *    - We need to initialize the guest bsp registers according to
+	 *      guest boot mode (real mode vs protect mode)
+	 */
+	init_vcpu_protect_mode_regs(vcpu, get_guest_gdt_base_gpa(vcpu->vm));
 
 	/* Copy the guest kernel image to its run-time location */
-	memcpy_s((void *)hva, vm->sw.kernel_info.kernel_size,
-				vm->sw.kernel_info.kernel_src_addr,
-				vm->sw.kernel_info.kernel_size);
+	(void)copy_to_gpa(vm, sw_kernel->kernel_src_addr,
+		(uint64_t)sw_kernel->kernel_load_addr, sw_kernel->kernel_size);
 
-	/* See if guest is a Linux guest */
-	if (vm->sw.kernel_type == VM_LINUX_GUEST) {
-		/* Documentation states: ebx=0, edi=0, ebp=0, esi=ptr to
-		 * zeropage
-		 */
-		(void)memset(cur_context->guest_cpu_regs.longs,
-			0, sizeof(uint64_t) * NUM_GPRS);
-
-		/* Get host-physical address for guest bootargs */
-		hva = GPA2HVA(vm,
-			(uint64_t)vm->sw.linux_info.bootargs_load_addr);
-
-		/* Copy Guest OS bootargs to its load location */
-		strcpy_s((char *)hva, MEM_2K,
-				vm->sw.linux_info.bootargs_src_addr);
-
-#ifdef CONFIG_CMA
-		/* add "cma=XXXXM@0xXXXXXXXX" to cmdline*/
-		if (is_vm0(vm) && (e820_mem.max_ram_blk_size > 0)) {
-			snprintf(dyn_bootargs, 100, " cma=%dM@0x%llx",
-					(e820_mem.max_ram_blk_size >> 20),
-					e820_mem.max_ram_blk_base);
-			strcpy_s((char *)hva
-					+vm->sw.linux_info.bootargs_size,
-					100, dyn_bootargs);
-		}
-#else
-		/* add "hugepagesz=1G hugepages=x" to cmdline for 1G hugepage
-		 * reserving. Current strategy is "total_mem_size in Giga -
-		 * remained 1G pages" for reserving.
-		 */
-		if (is_vm0(vm) && check_mmu_1gb_support(PTT_HOST)) {
-			int32_t reserving_1g_pages;
-
-#ifdef CONFIG_REMAIN_1G_PAGES
-			reserving_1g_pages = (e820_mem.total_mem_size >> 30) -
-						CONFIG_REMAIN_1G_PAGES;
-#else
-			reserving_1g_pages = (e820_mem.total_mem_size >> 30) -
-						3;
-#endif
-			if (reserving_1g_pages > 0) {
-				snprintf(dyn_bootargs, 100,
-					" hugepagesz=1G hugepages=%d",
-					reserving_1g_pages);
-				strcpy_s((char *)hva
-					+vm->sw.linux_info.bootargs_size,
-					100, dyn_bootargs);
-			}
-		}
-#endif
-
-		/* Check if a RAM disk is present with Linux guest */
-		if (vm->sw.linux_info.ramdisk_src_addr != NULL) {
-			/* Get host-physical address for guest RAM disk */
-			hva = GPA2HVA(vm,
-				(uint64_t)vm->sw.linux_info.ramdisk_load_addr);
-
-			/* Copy RAM disk to its load location */
-			memcpy_s((void *)hva, vm->sw.linux_info.ramdisk_size,
-					vm->sw.linux_info.ramdisk_src_addr,
-					vm->sw.linux_info.ramdisk_size);
-
-		}
-
-		/* Create Zeropage and copy Physical Base Address of Zeropage
-		 * in RSI
-		 */
-		cur_context->guest_cpu_regs.regs.rsi = create_zero_page(vm);
-
-		pr_info("%s, RSI pointing to zero page for VM %d at GPA %X",
-				__func__, vm->attr.id,
-				cur_context->guest_cpu_regs.regs.rsi);
-
-	} else {
+	/* Check if a RAM disk is present */
+	if (ramdisk_info->size != 0U) {
+		/* Copy RAM disk to its load location */
+		(void)copy_to_gpa(vm, ramdisk_info->src_addr,
+			(uint64_t)ramdisk_info->load_addr,
+			ramdisk_info->size);
+	}
+	/* Copy Guest OS bootargs to its load location */
+	if (bootargs_info->size != 0U) {
+		(void)copy_to_gpa(vm, bootargs_info->src_addr,
+			(uint64_t)bootargs_info->load_addr,
+			(strnlen_s((char *)bootargs_info->src_addr, MAX_BOOTARGS_SIZE) + 1U));
+	}
+	switch (vm->sw.kernel_type) {
+	case KERNEL_BZIMAGE:
+		prepare_loading_bzimage(vm, vcpu);
+		break;
+	case KERNEL_ZEPHYR:
+		prepare_loading_rawimage(vm);
+		break;
+	default:
 		pr_err("%s, Loading VM SW failed", __func__);
 		ret = -EINVAL;
+		break;
+	}
+
+	if (ret == 0) {
+		/* Set VCPU entry point to kernel entry */
+		vcpu_set_rip(vcpu, (uint64_t)sw_kernel->kernel_entry_addr);
+		pr_info("%s, VM %hu VCPU %hu Entry: 0x%016llx ", __func__, vm->vm_id, vcpu->vcpu_id,
+			sw_kernel->kernel_entry_addr);
 	}
 
 	return ret;

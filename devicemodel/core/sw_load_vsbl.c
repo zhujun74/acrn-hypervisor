@@ -28,7 +28,6 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
 #include <stdbool.h>
 
 #include "dm.h"
@@ -99,18 +98,20 @@ struct vsbl_para {
 	uint64_t		bootargs_address;
 	uint32_t		trusty_enabled;
 	uint32_t		key_info_lock;
-	uint32_t		watchdog_reset;
+	uint32_t		reserved;
 	uint32_t		boot_device_address;
 };
 
 static char guest_part_info_path[STR_LEN];
-static int guest_part_info_size;
+static size_t guest_part_info_size;
 static bool with_guest_part_info;
 
 static char vsbl_path[STR_LEN];
-static int vsbl_size;
+static size_t vsbl_size;
 
 static int boot_blk_bdf;
+
+extern int init_cmos_vrpmb(struct vmctx *ctx);
 
 #define	LOW_8BIT(x)	((x) & 0xFF)
 void
@@ -123,26 +124,27 @@ vsbl_set_bdf(int bnum, int snum, int fnum)
 int
 acrn_parse_guest_part_info(char *arg)
 {
-	size_t len = strlen(arg);
+	int error = -1;
+	size_t len = strnlen(arg, STR_LEN);
 
 	if (len < STR_LEN) {
 		strncpy(guest_part_info_path, arg, len + 1);
-		assert(check_image(guest_part_info_path) == 0);
-
-		with_guest_part_info = true;
-
-		printf("SW_LOAD: get partition blob path %s\n",
-			guest_part_info_path);
-		return 0;
-	} else
-		return -1;
+		if (check_image(guest_part_info_path, 0, &guest_part_info_size) == 0) {
+			with_guest_part_info = true;
+			printf("SW_LOAD: get partition blob path %s\n",
+						guest_part_info_path);
+			error = 0;
+		}
+	}
+	return error;
 }
 
 static int
 acrn_prepare_guest_part_info(struct vmctx *ctx)
 {
 	FILE *fp;
-	int len, read;
+	long len;
+	size_t read;
 
 	fp = fopen(guest_part_info_path, "r");
 	if (fp == NULL) {
@@ -154,14 +156,20 @@ acrn_prepare_guest_part_info(struct vmctx *ctx)
 
 	fseek(fp, 0, SEEK_END);
 	len = ftell(fp);
+
+	if (len != guest_part_info_size) {
+		fprintf(stderr,
+			"SW_LOAD ERR: partition blob changed\n");
+		fclose(fp);
+		return -1;
+	}
+
 	if ((len + GUEST_PART_INFO_OFF(ctx)) > BOOTARGS_OFF(ctx)) {
 		fprintf(stderr,
 			"SW_LOAD ERR: too large partition blob\n");
 		fclose(fp);
 		return -1;
 	}
-
-	guest_part_info_size = len;
 
 	fseek(fp, 0, SEEK_SET);
 	read = fread(ctx->baseaddr + GUEST_PART_INFO_OFF(ctx),
@@ -173,7 +181,7 @@ acrn_prepare_guest_part_info(struct vmctx *ctx)
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: partition blob %s size %d copy to guest 0x%lx\n",
+	printf("SW_LOAD: partition blob %s size %lu copy to guest 0x%lx\n",
 		guest_part_info_path, guest_part_info_size,
 		GUEST_PART_INFO_OFF(ctx));
 
@@ -183,26 +191,25 @@ acrn_prepare_guest_part_info(struct vmctx *ctx)
 int
 acrn_parse_vsbl(char *arg)
 {
-	size_t len = strlen(arg);
+	int error = -1;
+	size_t len = strnlen(arg, STR_LEN);
 
 	if (len < STR_LEN) {
 		strncpy(vsbl_path, arg, len + 1);
-		assert(check_image(vsbl_path) == 0);
-
-		vsbl_file_name = vsbl_path;
-
-		printf("SW_LOAD: get vsbl path %s\n",
-			vsbl_path);
-		return 0;
-	} else
-		return -1;
+		if (check_image(vsbl_path, 8 * MB, &vsbl_size) == 0) {
+			vsbl_file_name = vsbl_path;
+			printf("SW_LOAD: get vsbl path %s\n", vsbl_path);
+			error = 0;
+		}
+	}
+	return error;
 }
 
 static int
 acrn_prepare_vsbl(struct vmctx *ctx)
 {
 	FILE *fp;
-	int len, read;
+	size_t read;
 
 	fp = fopen(vsbl_path, "r");
 	if (fp == NULL) {
@@ -213,27 +220,25 @@ acrn_prepare_vsbl(struct vmctx *ctx)
 	}
 
 	fseek(fp, 0, SEEK_END);
-	len = ftell(fp);
-	if (len > (8*MB)) {
+
+	if (ftell(fp) != vsbl_size) {
 		fprintf(stderr,
-			"SW_LOAD ERR: too large vsbl file\n");
+			"SW_LOAD ERR: vsbl file changed\n");
 		fclose(fp);
 		return -1;
 	}
 
-	vsbl_size = len;
-
 	fseek(fp, 0, SEEK_SET);
 	read = fread(ctx->baseaddr + VSBL_TOP(ctx) - vsbl_size,
-		sizeof(char), len, fp);
-	if (read < len) {
+		sizeof(char), vsbl_size, fp);
+	if (read < vsbl_size) {
 		fprintf(stderr,
 			"SW_LOAD ERR: could not read whole partition blob\n");
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: partition blob %s size %d copy to guest 0x%lx\n",
+	printf("SW_LOAD: partition blob %s size %lu copy to guest 0x%lx\n",
 		vsbl_path, vsbl_size, VSBL_TOP(ctx) - vsbl_size);
 
 	return 0;
@@ -245,12 +250,8 @@ acrn_sw_load_vsbl(struct vmctx *ctx)
 	int ret;
 	struct e820_entry *e820;
 	struct vsbl_para *vsbl_para;
-	uint64_t *vsbl_entry =
-		(uint64_t *)(ctx->baseaddr + VSBL_ENTRY_OFF(ctx));
-	uint64_t *cfg_offset =
-		(uint64_t *)(ctx->baseaddr + GUEST_CFG_OFFSET);
 
-	*cfg_offset = ctx->lowmem;
+	init_cmos_vrpmb(ctx);
 
 	vsbl_para = (struct vsbl_para *)
 		(ctx->baseaddr + CONFIGPAGE_OFF(ctx));
@@ -267,7 +268,7 @@ acrn_sw_load_vsbl(struct vmctx *ctx)
 	vsbl_para->acpi_table_size = get_acpi_table_length();
 
 	if (with_bootargs) {
-		strcpy(ctx->baseaddr + BOOTARGS_OFF(ctx), get_bootargs());
+		strncpy(ctx->baseaddr + BOOTARGS_OFF(ctx), get_bootargs(), STR_LEN);
 		vsbl_para->bootargs_address = BOOTARGS_OFF(ctx);
 	} else {
 		vsbl_para->bootargs_address = 0;
@@ -294,12 +295,25 @@ acrn_sw_load_vsbl(struct vmctx *ctx)
 	vsbl_para->e820_entries = add_e820_entry(e820, vsbl_para->e820_entries,
 		vsbl_para->vsbl_address, vsbl_size, E820_TYPE_RESERVED);
 
-
-	*vsbl_entry = VSBL_TOP(ctx) - 16;	/* reset vector */
-	printf("SW_LOAD: vsbl_entry 0x%lx\n", *vsbl_entry);
+	printf("SW_LOAD: vsbl_entry 0x%lx\n", VSBL_TOP(ctx) - 16);
 
 	vsbl_para->boot_device_address = boot_blk_bdf;
 	vsbl_para->trusty_enabled = trusty_enabled;
+
+	/* set guest bsp state. Will call hypercall set bsp state
+	 * after bsp is created.
+	 */
+	memset(&ctx->bsp_regs, 0, sizeof( struct acrn_set_vcpu_regs));
+	ctx->bsp_regs.vcpu_id = 0;
+
+	/* CR0_ET | CR0_NE */
+	ctx->bsp_regs.vcpu_regs.cr0 = 0x30U;
+	ctx->bsp_regs.vcpu_regs.cs_ar = 0x009FU;
+	ctx->bsp_regs.vcpu_regs.cs_sel = 0xF000U;
+	ctx->bsp_regs.vcpu_regs.cs_limit = 0xFFFFU;
+	ctx->bsp_regs.vcpu_regs.cs_base = (VSBL_TOP(ctx) - 16) &0xFFFF0000UL;
+	ctx->bsp_regs.vcpu_regs.rip = (VSBL_TOP(ctx) - 16) & 0xFFFFUL;
+	ctx->bsp_regs.vcpu_regs.gprs.rsi = CONFIGPAGE_OFF(ctx);
 
 	return 0;
 }

@@ -4,208 +4,125 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <hypervisor.h>
-#include "serial_internal.h"
+#include <types.h>
+#include <pci.h>
+#include <uart16550.h>
+#include <shell.h>
+#include <timer.h>
+#include <vuart.h>
+#include <logmsg.h>
+#include <acrn_hv_defs.h>
+#include <vm.h>
+#include <console.h>
 
-static spinlock_t lock;
+struct hv_timer console_timer;
 
-static uint32_t serial_handle = SERIAL_INVALID_HANDLE;
-struct timer console_timer;
+#define CONSOLE_KICK_TIMER_TIMEOUT  40UL /* timeout is 40ms*/
+/* Switching key combinations for shell and uart console */
+#define GUEST_CONSOLE_TO_HV_SWITCH_KEY      0       /* CTRL + SPACE */
+uint16_t console_vmid = ACRN_INVALID_VMID;
 
-#define CONSOLE_KICK_TIMER_TIMEOUT  40 /* timeout is 40ms*/
-
-uint32_t get_serial_handle(void)
+void console_init(void)
 {
-	return serial_handle;
 }
 
-static void print_char(char x)
+void console_putc(const char *ch)
 {
-	serial_puts(serial_handle, &x, 1);
-
-	if (x == '\n')
-		serial_puts(serial_handle, "\r", 1);
+	(void)uart16550_puts(ch, 1U);
 }
 
-int console_init(void)
+
+size_t console_write(const char *s, size_t len)
 {
-	spinlock_init(&lock);
-
-	serial_handle = serial_open("STDIO");
-
-	return 0;
+	return  uart16550_puts(s, len);
 }
 
-int console_putc(int ch)
+char console_getc(void)
 {
-	int res = -1;
+	return uart16550_getc();
+}
 
-	spinlock_obtain(&lock);
+/*
+ * @post return != NULL
+ */
+struct acrn_vuart *vm_console_vuart(struct acrn_vm *vm)
+{
+	return &vm->vuart[0];
+}
 
-	if (serial_handle != SERIAL_INVALID_HANDLE) {
-		print_char(ch);
-		res = 0;
+/**
+ * @pre vu != NULL
+ * @pre vu->active == true
+ */
+static void vuart_console_rx_chars(struct acrn_vuart *vu)
+{
+	char ch = -1;
+
+	/* Get data from physical uart */
+	ch = uart16550_getc();
+
+	if (ch == GUEST_CONSOLE_TO_HV_SWITCH_KEY) {
+		/* Switch the console */
+		console_vmid = ACRN_INVALID_VMID;
+		printf("\r\n\r\n ---Entering ACRN SHELL---\r\n");
+	}
+	if (ch != -1) {
+		vuart_putchar(vu, ch);
+		vuart_toggle_intr(vu);
 	}
 
-	spinlock_release(&lock);
-
-	return res;
 }
 
-int console_puts(const char *s)
+/**
+ * @pre vu != NULL
+ */
+static void vuart_console_tx_chars(struct acrn_vuart *vu)
 {
-	int res = -1;
-	const char *p;
+	char c = vuart_getchar(vu);
 
-	spinlock_obtain(&lock);
+	while(c != -1) {
+		printf("%c", c);
+		c = vuart_getchar(vu);
+	}
+}
 
-	if (serial_handle != SERIAL_INVALID_HANDLE) {
-		res = 0;
-		while ((*s) != 0) {
-			/* start output at the beginning of the string search
-			 * for end of string or '\n'
-			 */
-			p = s;
+static struct acrn_vuart *vuart_console_active(void)
+{
+	struct acrn_vm *vm = NULL;
+	struct acrn_vuart *vu = NULL;
 
-			while ((*p != 0) && *p != '\n')
-				++p;
-
-			/* write all characters up to p */
-			serial_puts(serial_handle, s, p - s);
-
-			res += p - s;
-
-			if (*p == '\n') {
-				print_char('\n');
-				++p;
-				res += 2;
-			}
-
-			/* continue at position p */
-			s = p;
+	if (console_vmid < CONFIG_MAX_VM_NUM) {
+		vm = get_vm_from_vmid(console_vmid);
+		if (!is_poweroff_vm(vm)) {
+			vu = vm_console_vuart(vm);
+		} else {
+			/* Console vm is invalid, switch back to HV-Shell */
+			console_vmid = ACRN_INVALID_VMID;
 		}
 	}
 
-	spinlock_release(&lock);
-
-	return res;
+	return ((vu != NULL) && vu->active) ? vu : NULL;
 }
 
-int console_write(const char *s, size_t len)
+static void console_timer_callback(__unused void *data)
 {
-	int res = -1;
-	const char *e;
-	const char *p;
+	struct acrn_vuart *vu;
 
-	spinlock_obtain(&lock);
-
-	if (serial_handle != SERIAL_INVALID_HANDLE) {
-		/* calculate pointer to the end of the string */
-		e = s + len;
-		res = 0;
-
-		/* process all characters */
-		while (s != e) {
-			/* search for '\n' or the end of the string */
-			p = s;
-
-			while ((p != e) && (*p != '\n'))
-				++p;
-
-			/* write all characters processed so far */
-			serial_puts(serial_handle, s, p - s);
-
-			res += p - s;
-
-			/* write '\n' if end of string is not reached */
-			if (p != e) {
-				print_char('\n');
-				++p;
-				res += 2;
-			}
-
-			/* continue at next position */
-			s = p;
-		}
-	}
-
-	spinlock_release(&lock);
-
-	return res;
-}
-
-void console_dump_bytes(const void *p, unsigned int len)
-{
-
-	const unsigned char *x = p;
-	const unsigned char *e = x + len;
-	int i;
-
-	/* dump all bytes */
-	while (x < e) {
-		/* write the address of the first byte in the row */
-		printf("%08x: ", (uint64_t) x);
-		/* print one row (16 bytes) as hexadecimal values */
-		for (i = 0; i < 16; i++)
-			printf("%02x ", x[i]);
-
-		/* print one row as ASCII characters (if possible) */
-		for (i = 0; i < 16; i++) {
-			if ((x[i] < ' ') || (x[i] >= 127))
-				console_putc('.');
-			else
-				console_putc(x[i]);
-		}
-		/* continue with next row */
-		console_putc('\n');
-		/* set pointer one row ahead */
-		x += 16;
-	}
-}
-
-static void console_read(void)
-{
-	spinlock_obtain(&lock);
-
-	if (serial_handle != SERIAL_INVALID_HANDLE) {
-		/* Get all the data available in the RX FIFO */
-		serial_get_rx_data(serial_handle);
-	}
-
-	spinlock_release(&lock);
-}
-
-static void console_handler(void)
-{
-	/* Dump the RX FIFO to a circular buffer */
-	console_read();
-
-	/* serial Console Rx operation */
-	vuart_console_rx_chars(serial_handle);
-
-	/* serial Console Tx operation */
-	vuart_console_tx_chars();
-
-	shell_kick_session();
-}
-
-static int console_timer_callback(__unused void *data)
-{
 	/* Kick HV-Shell and Uart-Console tasks */
-	console_handler();
-
-	return 0;
+	vu = vuart_console_active();
+	if (vu != NULL) {
+		/* serial Console Rx operation */
+		vuart_console_rx_chars(vu);
+		/* serial Console Tx operation */
+		vuart_console_tx_chars(vu);
+	} else {
+		shell_kick();
+	}
 }
 
 void console_setup_timer(void)
 {
 	uint64_t period_in_cycle, fire_tsc;
-
-	if (serial_handle == SERIAL_INVALID_HANDLE) {
-		pr_err("%s: no uart, not need setup console timer",
-			__func__);
-		return;
-	}
 
 	period_in_cycle = CYCLES_PER_MS * CONSOLE_KICK_TIMER_TIMEOUT;
 	fire_tsc = rdtsc() + period_in_cycle;
@@ -214,6 +131,17 @@ void console_setup_timer(void)
 			fire_tsc, TICK_MODE_PERIODIC, period_in_cycle);
 
 	/* Start an periodic timer */
-	if (add_timer(&console_timer) != 0)
+	if (add_timer(&console_timer) != 0) {
 		pr_err("Failed to add console kick timer");
+	}
+}
+
+void suspend_console(void)
+{
+	del_timer(&console_timer);
+}
+
+void resume_console(void)
+{
+	console_setup_timer();
 }

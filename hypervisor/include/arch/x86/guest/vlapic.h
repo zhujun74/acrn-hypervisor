@@ -27,111 +27,190 @@
  * $FreeBSD$
  */
 
-#ifndef _VLAPIC_H_
-#define	_VLAPIC_H_
+#ifndef VLAPIC_H
+#define VLAPIC_H
 
-struct vlapic;
+#include <page.h>
+#include <timer.h>
+#include <apicreg.h>
 
-/* APIC write handlers */
-void vlapic_set_cr8(struct vlapic *vlapic, uint64_t val);
-uint64_t vlapic_get_cr8(struct vlapic *vlapic);
-
-/*
- * Returns 0 if there is no eligible vector that can be delivered to the
- * guest at this time and non-zero otherwise.
+/**
+ * @file vlapic.h
  *
- * If an eligible vector number is found and 'vecptr' is not NULL then it will
- * be stored in the location pointed to by 'vecptr'.
+ * @brief public APIs for virtual LAPIC
+ */
+
+
+#define VLAPIC_MAXLVT_INDEX	APIC_LVT_CMCI
+
+struct vlapic_pir_desc {
+	uint64_t pir[4];
+	uint64_t pending;
+	uint64_t unused[3];
+} __aligned(64);
+
+struct vlapic_timer {
+	struct hv_timer timer;
+	uint32_t mode;
+	uint32_t tmicr;
+	uint32_t divisor_shift;
+};
+
+struct acrn_vlapic {
+	/*
+	 * Please keep 'apic_page' and 'pir_desc' be the first two fields in
+	 * current structure, as below alignment restrictions are mandatory
+	 * to support APICv features:
+	 * - 'apic_page' MUST be 4KB aligned.
+	 * - 'pir_desc' MUST be 64 bytes aligned.
+	 * IRR, TMR and PIR could be accessed by other vCPUs when deliver
+	 * an interrupt to vLAPIC.
+	 */
+	struct lapic_regs	apic_page;
+	struct vlapic_pir_desc	pir_desc;
+
+	struct acrn_vm		*vm;
+	struct acrn_vcpu	*vcpu;
+
+	uint32_t		esr_pending;
+	int32_t			esr_firing;
+
+	struct vlapic_timer	vtimer;
+
+	/*
+	 * isrv: vector number for the highest priority bit that is set in the ISR
+	 */
+	uint32_t	isrv;
+
+	uint64_t	msr_apicbase;
+
+	const struct acrn_apicv_ops *ops;
+
+	/*
+	 * Copies of some registers in the virtual APIC page. We do this for
+	 * a couple of different reasons:
+	 * - to be able to detect what changed (e.g. svr_last)
+	 * - to maintain a coherent snapshot of the register (e.g. lvt_last)
+	 */
+	uint32_t	svr_last;
+	uint32_t	lvt_last[VLAPIC_MAXLVT_INDEX + 1];
+} __aligned(PAGE_SIZE);
+
+struct acrn_apicv_ops {
+	void (*accept_intr)(struct acrn_vlapic *vlapic, uint32_t vector, bool level);
+	bool (*inject_intr)(struct acrn_vlapic *vlapic, bool guest_irq_enabled, bool injected);
+	bool (*has_pending_delivery_intr)(struct acrn_vcpu *vcpu);
+	bool (*apic_read_access_may_valid)(uint32_t offset);
+	bool (*apic_write_access_may_valid)(uint32_t offset);
+	bool (*x2apic_read_msr_may_valid)(uint32_t offset);
+	bool (*x2apic_write_msr_may_valid)(uint32_t offset);
+};
+
+extern const struct acrn_apicv_ops *apicv_ops;
+void vlapic_set_apicv_ops(void);
+
+/**
+ * @brief virtual LAPIC
  *
- * Note that the vector does not automatically transition to the ISR as a
- * result of calling this function.
+ * @addtogroup acrn_vlapic ACRN vLAPIC
+ * @{
  */
-int vlapic_pending_intr(struct vlapic *vlapic, uint32_t *vecptr);
 
-/*
- * Transition 'vector' from IRR to ISR. This function is called with the
- * vector returned by 'vlapic_pending_intr()' when the guest is able to
- * accept this interrupt (i.e. RFLAGS.IF = 1 and no conditions exist that
- * block interrupt delivery).
+bool vlapic_inject_intr(struct acrn_vlapic *vlapic, bool guest_irq_enabled, bool injected);
+bool vlapic_has_pending_delivery_intr(struct acrn_vcpu *vcpu);
+
+/**
+ * @brief Get physical address to PIR description.
+ *
+ * If APICv Posted-interrupt is supported, this address will be configured
+ * to VMCS "Posted-interrupt descriptor address" field.
+ *
+ * @param[in] vcpu Target vCPU
+ *
+ * @return physicall address to PIR
+ *
+ * @pre vcpu != NULL
  */
-void vlapic_intr_accepted(struct vlapic *vlapic, uint32_t vector);
+uint64_t apicv_get_pir_desc_paddr(struct acrn_vcpu *vcpu);
 
-struct vlapic *vm_lapic_from_vcpuid(struct vm *vm, uint16_t vcpu_id);
-struct vlapic *vm_lapic_from_pcpuid(struct vm *vm, uint16_t pcpu_id);
-bool is_vlapic_msr(uint32_t num);
-int vlapic_rdmsr(struct vcpu *vcpu, uint32_t msr, uint64_t *rval);
-int vlapic_wrmsr(struct vcpu *vcpu, uint32_t msr, uint64_t wval);
-
-int vlapic_read_mmio_reg(struct vcpu *vcpu, uint64_t gpa,
-		uint64_t *rval, int size);
-int vlapic_write_mmio_reg(struct vcpu *vcpu, uint64_t gpa,
-		uint64_t wval, int size);
+uint64_t vlapic_get_tsc_deadline_msr(const struct acrn_vlapic *vlapic);
+void vlapic_set_tsc_deadline_msr(struct acrn_vlapic *vlapic, uint64_t val_arg);
+uint64_t vlapic_get_apicbase(const struct acrn_vlapic *vlapic);
+int32_t vlapic_set_apicbase(struct acrn_vlapic *vlapic, uint64_t new);
+int32_t vlapic_x2apic_read(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t *val);
+int32_t vlapic_x2apic_write(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t val);
 
 /*
  * Signals to the LAPIC that an interrupt at 'vector' needs to be generated
  * to the 'cpu', the state is recorded in IRR.
+ *  @pre vcpu != NULL
+ *  @pre vector <= 255U
  */
-int vlapic_set_intr(struct vcpu *vcpu, uint32_t vector, bool trig);
+void vlapic_set_intr(struct acrn_vcpu *vcpu, uint32_t vector, bool level);
 
 #define	LAPIC_TRIG_LEVEL	true
 #define	LAPIC_TRIG_EDGE		false
-static inline int
-vlapic_intr_level(struct vcpu *vcpu, uint32_t vector)
-{
-	return vlapic_set_intr(vcpu, vector, LAPIC_TRIG_LEVEL);
-}
 
-static inline int
-vlapic_intr_edge(struct vcpu *vcpu, uint32_t vector)
-{
-	return vlapic_set_intr(vcpu, vector, LAPIC_TRIG_EDGE);
-}
-
-/*
- * Triggers the LAPIC local interrupt (LVT) 'vector' on 'cpu'.  'cpu' can
- * be set to -1 to trigger the interrupt on all CPUs.
+/**
+ * @brief Triggers LAPIC local interrupt(LVT).
+ *
+ * @param[in] vm           Pointer to VM data structure
+ * @param[in] vcpu_id_arg  ID of vCPU, BROADCAST_CPU_ID means triggering
+ *			   interrupt to all vCPUs.
+ * @param[in] lvt_index    The index which LVT would to be fired.
+ *
+ * @retval 0 on success.
+ * @retval -EINVAL on error that vcpu_id_arg or vector of the LVT is invalid.
+ *
+ * @pre vm != NULL
  */
-int vlapic_set_local_intr(struct vm *vm, uint16_t vcpu_id, uint32_t vector);
+int32_t vlapic_set_local_intr(struct acrn_vm *vm, uint16_t vcpu_id_arg, uint32_t lvt_index);
 
-int vlapic_intr_msi(struct vm *vm, uint64_t addr, uint64_t msg);
-
-void vlapic_deliver_intr(struct vm *vm, bool level, uint32_t dest,
-		bool phys, int delmode, int vec);
-
-/* Reset the trigger-mode bits for all vectors to be edge-triggered */
-void vlapic_reset_tmr(struct vlapic *vlapic);
-
-/*
- * Set the trigger-mode bit associated with 'vector' to level-triggered if
- * the (dest,phys,delmode) tuple resolves to an interrupt being delivered to
- * this 'vlapic'.
+/**
+ * @brief Inject MSI to target VM.
+ *
+ * @param[in] vm   Pointer to VM data structure
+ * @param[in] addr MSI address.
+ * @param[in] msg  MSI data.
+ *
+ * @retval 0 on success.
+ * @retval -1 on error that addr is invalid.
+ *
+ * @pre vm != NULL
  */
-void vlapic_set_tmr_one_vec(struct vlapic *vlapic, int delmode,
-		uint32_t vector, bool level);
+int32_t vlapic_intr_msi(struct acrn_vm *vm, uint64_t addr, uint64_t msg);
 
-void
-vlapic_apicv_batch_set_tmr(struct vlapic *vlapic);
+void vlapic_receive_intr(struct acrn_vm *vm, bool level, uint32_t dest,
+		bool phys, uint32_t delmode, uint32_t vec, bool rh);
 
-int vlapic_mmio_access_handler(struct vcpu *vcpu, struct mem_io *mmio,
-		void *handler_private_data);
-
-uint32_t vlapic_get_id(struct vlapic *vlapic);
-uint8_t vlapic_get_apicid(struct vlapic *vlapic);
-
-int vlapic_create(struct vcpu *vcpu);
-void vlapic_free(struct vcpu *vcpu);
-void vlapic_init(struct vlapic *vlapic);
-void vlapic_reset(struct vlapic *vlapic);
-void vlapic_restore(struct vlapic *vlapic, struct lapic_regs *regs);
-bool vlapic_enabled(struct vlapic *vlapic);
-uint64_t apicv_get_apic_access_addr(struct vm *vm);
-uint64_t apicv_get_apic_page_addr(struct vlapic *vlapic);
-bool vlapic_apicv_enabled(struct vcpu *vcpu);
-void apicv_inject_pir(struct vlapic *vlapic);
-int apic_access_vmexit_handler(struct vcpu *vcpu);
-int apic_write_vmexit_handler(struct vcpu *vcpu);
-int veoi_vmexit_handler(struct vcpu *vcpu);
-int tpr_below_threshold_vmexit_handler(struct vcpu *vcpu);
-
-void calcvdest(struct vm *vm, uint64_t *dmask, uint32_t dest, bool phys);
-#endif	/* _VLAPIC_H_ */
+uint32_t vlapic_get_apicid(const struct acrn_vlapic *vlapic);
+void vlapic_create(struct acrn_vcpu *vcpu);
+/*
+ *  @pre vcpu != NULL
+ */
+void vlapic_free(struct acrn_vcpu *vcpu);
+/**
+ * @pre vlapic->vm != NULL
+ * @pre vlapic->vcpu->vcpu_id < CONFIG_MAX_VCPUS_PER_VM
+ */
+void vlapic_init(struct acrn_vlapic *vlapic);
+void vlapic_reset(struct acrn_vlapic *vlapic, const struct acrn_apicv_ops *ops);
+void vlapic_restore(struct acrn_vlapic *vlapic, const struct lapic_regs *regs);
+uint64_t vlapic_apicv_get_apic_access_addr(void);
+uint64_t vlapic_apicv_get_apic_page_addr(struct acrn_vlapic *vlapic);
+int32_t apic_access_vmexit_handler(struct acrn_vcpu *vcpu);
+int32_t apic_write_vmexit_handler(struct acrn_vcpu *vcpu);
+int32_t veoi_vmexit_handler(struct acrn_vcpu *vcpu);
+void vlapic_update_tpr_threshold(const struct acrn_vlapic *vlapic);
+int32_t tpr_below_threshold_vmexit_handler(struct acrn_vcpu *vcpu);
+void vlapic_calc_dest(struct acrn_vm *vm, uint64_t *dmask, bool is_broadcast,
+		uint32_t dest, bool phys, bool lowprio);
+void vlapic_calc_dest_lapic_pt(struct acrn_vm *vm, uint64_t *dmask, bool is_broadcast,
+		uint32_t dest, bool phys);
+bool is_x2apic_enabled(const struct acrn_vlapic *vlapic);
+bool is_xapic_enabled(const struct acrn_vlapic *vlapic);
+/**
+ * @}
+ */
+/* End of acrn_vlapic */
+#endif /* VLAPIC_H */

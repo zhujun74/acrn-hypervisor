@@ -29,22 +29,19 @@
 #define _CORE_SW_LOAD_
 
 #define STR_LEN 1024
-
-#define KB      (1024UL)
-#define MB      (1024 * 1024UL)
-#define GB      (1024 * 1024 * 1024UL)
+#define BOOT_ARG_LEN 2048
 
 /* E820 memory types */
-#define E820_TYPE_RAM           1   /* EFI 1, 2, 3, 4, 5, 6, 7 */
+#define E820_TYPE_RAM           1U   /* EFI 1, 2, 3, 4, 5, 6, 7 */
 /* EFI 0, 11, 12, 13 (everything not used elsewhere) */
-#define E820_TYPE_RESERVED      2
-#define E820_TYPE_ACPI_RECLAIM  3   /* EFI 9 */
-#define E820_TYPE_ACPI_NVS      4   /* EFI 10 */
-#define E820_TYPE_UNUSABLE      5   /* EFI 8 */
+#define E820_TYPE_RESERVED      2U
+#define E820_TYPE_ACPI_RECLAIM  3U   /* EFI 9 */
+#define E820_TYPE_ACPI_NVS      4U   /* EFI 10 */
+#define E820_TYPE_UNUSABLE      5U   /* EFI 8 */
 
-#define NUM_E820_ENTRIES        6
-#define LOWRAM_E820_ENTRIES     2
-#define HIGHRAM_E820_ENTRIES    5
+#define NUM_E820_ENTRIES        8
+#define LOWRAM_E820_ENTRY       2
+#define HIGHRAM_E820_ENTRY      7
 
 /* Defines a single entry in an E820 memory map. */
 struct e820_entry {
@@ -58,23 +55,31 @@ struct e820_entry {
 
 extern const struct e820_entry e820_default_entries[NUM_E820_ENTRIES];
 extern int with_bootargs;
+extern bool writeback_nv_storage;
+
+size_t ovmf_image_size(void);
 
 int acrn_parse_kernel(char *arg);
 int acrn_parse_ramdisk(char *arg);
 int acrn_parse_bootargs(char *arg);
 int acrn_parse_gvtargs(char *arg);
 int acrn_parse_vsbl(char *arg);
+int acrn_parse_ovmf(char *arg);
+int acrn_parse_elf(char *arg);
 int acrn_parse_guest_part_info(char *arg);
 char *get_bootargs(void);
 void vsbl_set_bdf(int bnum, int snum, int fnum);
 
-int check_image(char *path);
+int check_image(char *path, size_t size_limit, size_t *size);
 uint32_t acrn_create_e820_table(struct vmctx *ctx, struct e820_entry *e820);
 int add_e820_entry(struct e820_entry *e820, int len, uint64_t start,
 	uint64_t size, uint32_t type);
 
 int acrn_sw_load_bzimage(struct vmctx *ctx);
+int acrn_sw_load_elf(struct vmctx *ctx);
 int acrn_sw_load_vsbl(struct vmctx *ctx);
+int acrn_sw_load_ovmf(struct vmctx *ctx);
+int acrn_writeback_ovmf_nvstorage(struct vmctx *ctx);
 int acrn_sw_load(struct vmctx *ctx);
 #endif
 

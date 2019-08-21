@@ -28,17 +28,17 @@ vbs_vqs_info_set(int fd, void *arg)
 }
 
 /* VBS-K common ops */
-/* VBS-K init/reset */
-int
-vbs_kernel_init(int fd)
-{
-	return VIRTIO_SUCCESS;
-}
-
+/**
+ * @brief Virtio kernel module reset.
+ *
+ * @param fd File descriptor representing virtio backend in kernel module.
+ *
+ * @return 0 on OK and non-zero on error.
+ */
 int
 vbs_kernel_reset(int fd)
 {
-	return VIRTIO_SUCCESS;
+	return ioctl(fd, VBS_K_RESET_DEV, NULL);
 }
 
 /*
@@ -46,7 +46,15 @@ vbs_kernel_reset(int fd)
  * change the configuration of the virtio device after VBS-K has been
  * initialized.
  */
-/* VBS-K start/stop */
+/**
+ * @brief Virtio kernel module start.
+ *
+ * @param fd File descriptor representing virtio backend in kernel module.
+ * @param dev Pointer to struct vbs_dev_info.
+ * @param vqs Pointer to struct vbs_vqs_info.
+ *
+ * @return 0 on OK and non-zero on error.
+ */
 int
 vbs_kernel_start(int fd, struct vbs_dev_info *dev, struct vbs_vqs_info *vqs)
 {
@@ -72,6 +80,13 @@ vbs_kernel_start(int fd, struct vbs_dev_info *dev, struct vbs_vqs_info *vqs)
 	return VIRTIO_SUCCESS;
 }
 
+/**
+ * @brief Virtio kernel module stop.
+ *
+ * @param fd File descriptor representing virtio backend in kernel module.
+ *
+ * @return 0 on OK and non-zero on error.
+ */
 int
 vbs_kernel_stop(int fd)
 {

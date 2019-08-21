@@ -37,56 +37,67 @@
 
 #ifndef CPU_H
 #define CPU_H
-
-/* Define page size */
-#define CPU_PAGE_SHIFT          12
-#define CPU_PAGE_SIZE           0x1000
-#define CPU_PAGE_MASK           0xFFFFFFFFFFFFF000UL
-
-#define MMU_PTE_PAGE_SHIFT	CPU_PAGE_SHIFT
-#define MMU_PDE_PAGE_SHIFT	21
+#include <types.h>
 
 /* Define CPU stack alignment */
 #define CPU_STACK_ALIGN         16UL
 
 /* CR0 register definitions */
-#define CR0_PG                  (1U<<31)	/* paging enable */
-#define CR0_CD                  (1U<<30)	/* cache disable */
-#define CR0_NW                  (1U<<29)	/* not write through */
-#define CR0_AM                  (1U<<18)	/* alignment mask */
-#define CR0_WP                  (1U<<16)	/* write protect */
-#define CR0_NE                  (1U<<5)	/* numeric error */
-#define CR0_ET                  (1U<<4)	/* extension type */
-#define CR0_TS                  (1U<<3)	/* task switched */
-#define CR0_EM                  (1U<<2)	/* emulation */
-#define CR0_MP                  (1U<<1)	/* monitor coprocessor */
-#define CR0_PE                  (1U<<0)	/* protected mode enabled */
+#define CR0_PG                  (1UL<<31U)	/* paging enable */
+#define CR0_CD                  (1UL<<30U)	/* cache disable */
+#define CR0_NW                  (1UL<<29U)	/* not write through */
+#define CR0_AM                  (1UL<<18U)	/* alignment mask */
+#define CR0_WP                  (1UL<<16U)	/* write protect */
+#define CR0_NE                  (1UL<<5U)	/* numeric error */
+#define CR0_ET                  (1UL<<4U)	/* extension type */
+#define CR0_TS                  (1UL<<3U)	/* task switched */
+#define CR0_EM                  (1UL<<2U)	/* emulation */
+#define CR0_MP                  (1UL<<1U)	/* monitor coprocessor */
+#define CR0_PE                  (1UL<<0U)	/* protected mode enabled */
 
 /* CR3 register definitions */
-#define CR3_PWT                 (1U<<3)	/* page-level write through */
-#define CR3_PCD                 (1U<<4)	/* page-level cache disable */
+#define CR3_PWT                 (1UL<<3U)	/* page-level write through */
+#define CR3_PCD                 (1UL<<4U)	/* page-level cache disable */
 
 /* CR4 register definitions */
-#define CR4_VME                 (1U<<0)	/* virtual 8086 mode extensions */
-#define CR4_PVI                 (1U<<1)	/* protected mode virtual interrupts */
-#define CR4_TSD                 (1U<<2)	/* time stamp disable */
-#define CR4_DE                  (1U<<3)	/* debugging extensions */
-#define CR4_PSE                 (1U<<4)	/* page size extensions */
-#define CR4_PAE                 (1U<<5)	/* physical address extensions */
-#define CR4_MCE                 (1U<<6)	/* machine check enable */
-#define CR4_PGE                 (1U<<7)	/* page global enable */
-#define CR4_PCE                 (1U<<8)
+#define CR4_VME                 (1UL<<0U)	/* virtual 8086 mode extensions */
+#define CR4_PVI                 (1UL<<1U)	/* protected mode virtual interrupts */
+#define CR4_TSD                 (1UL<<2U)	/* time stamp disable */
+#define CR4_DE                  (1UL<<3U)	/* debugging extensions */
+#define CR4_PSE                 (1UL<<4U)	/* page size extensions */
+#define CR4_PAE                 (1UL<<5U)	/* physical address extensions */
+#define CR4_MCE                 (1UL<<6U)	/* machine check enable */
+#define CR4_PGE                 (1UL<<7U)	/* page global enable */
+#define CR4_PCE                 (1UL<<8U)
 /* performance monitoring counter enable */
-#define CR4_OSFXSR              (1U<<9)	/* OS support for FXSAVE/FXRSTOR */
-#define CR4_OSXMMEXCPT          (1U<<10)
+#define CR4_OSFXSR              (1UL<<9U)	/* OS support for FXSAVE/FXRSTOR */
+#define CR4_OSXMMEXCPT          (1UL<<10U)
 /* OS support for unmasked SIMD floating point exceptions */
-#define CR4_VMXE                (1U<<13)	/* VMX enable */
-#define CR4_SMXE                (1U<<14)	/* SMX enable */
-#define CR4_PCIDE               (1U<<17)	/* PCID enable */
-#define CR4_OSXSAVE             (1U<<18)
-#define CR4_SMEP                (1U<<20)
-#define CR4_SMAP                (1U<<21)
+#define CR4_UMIP                (1UL<<11U)	/* User-Mode Inst prevention */
+#define CR4_VMXE                (1UL<<13U)	/* VMX enable */
+#define CR4_SMXE                (1UL<<14U)	/* SMX enable */
+#define CR4_FSGSBASE            (1UL<<16U)	/* RD(FS|GS|FS)BASE inst */
+#define CR4_PCIDE               (1UL<<17U)	/* PCID enable */
+#define CR4_OSXSAVE             (1UL<<18U)
 /* XSAVE and Processor Extended States enable bit */
+#define CR4_SMEP                (1UL<<20U)
+#define CR4_SMAP                (1UL<<21U)
+#define CR4_PKE                 (1UL<<22U)	/* Protect-key-enable */
+
+/* XCR0_SSE */
+#define XCR0_SSE		(1UL<<1U)
+/* XCR0_AVX */
+#define XCR0_AVX		(1UL<<2U)
+/* XCR0_BNDREGS */
+#define XCR0_BNDREGS		(1UL<<3U)
+/* XCR0_BNDCSR */
+#define XCR0_BNDCSR		(1UL<<4U)
+/* According to SDM Vol1 13.3:
+ *   XCR0[63:10] and XCR0[8] are reserved. Executing the XSETBV instruction causes
+ *   a general-protection fault if ECX = 0 and any corresponding bit in EDX:EAX
+ *   is not 0.
+ */
+#define	XCR0_RESERVED_BITS	((~((1UL << 10U) - 1UL)) | (1UL << 8U))
 
 
 /*
@@ -130,47 +141,78 @@
 #define CPU_MHZ_TO_KHZ          1000
 
 /* Boot CPU ID */
-#define CPU_BOOT_ID             0U
-
-/* hypervisor stack bottom magic('intl') */
-#define SP_BOTTOM_MAGIC    0x696e746cUL
-
-/* type of speculation control
- * 0 - no speculation control support
- * 1 - raw IBRS + IPBP support
- * 2 - with STIBP optimization support
- */
-#define IBRS_NONE	0
-#define IBRS_RAW	1
-#define IBRS_OPT	2
+#define BOOT_CPU_ID             0U
 
 #ifndef ASSEMBLER
+
+#define AP_MASK			(((1UL << get_pcpu_nums()) - 1UL) & ~(1UL << 0U))
+
+/**
+ *
+ * Identifiers for architecturally defined registers.
+ *
+ * These register names is used in condition statement.
+ * Within the following groups,register name need to be
+ * kept in order:
+ * General register names group (CPU_REG_RAX~CPU_REG_R15);
+ * Non general register names group (CPU_REG_CR0~CPU_REG_GDTR);
+ * Segement register names group (CPU_REG_ES~CPU_REG_GS).
+ */
+enum cpu_reg_name {
+	/* General purpose register layout should align with
+	 * struct acrn_gp_regs
+	 */
+	CPU_REG_RAX,
+	CPU_REG_RCX,
+	CPU_REG_RDX,
+	CPU_REG_RBX,
+	CPU_REG_RSP,
+	CPU_REG_RBP,
+	CPU_REG_RSI,
+	CPU_REG_RDI,
+	CPU_REG_R8,
+	CPU_REG_R9,
+	CPU_REG_R10,
+	CPU_REG_R11,
+	CPU_REG_R12,
+	CPU_REG_R13,
+	CPU_REG_R14,
+	CPU_REG_R15,
+
+	CPU_REG_CR0,
+	CPU_REG_CR2,
+	CPU_REG_CR3,
+	CPU_REG_CR4,
+	CPU_REG_DR7,
+	CPU_REG_RIP,
+	CPU_REG_RFLAGS,
+	/*CPU_REG_NATURAL_LAST*/
+	CPU_REG_EFER,
+	CPU_REG_PDPTE0,
+	CPU_REG_PDPTE1,
+	CPU_REG_PDPTE2,
+	CPU_REG_PDPTE3,
+	/*CPU_REG_64BIT_LAST,*/
+	CPU_REG_ES,
+	CPU_REG_CS,
+	CPU_REG_SS,
+	CPU_REG_DS,
+	CPU_REG_FS,
+	CPU_REG_GS,
+	CPU_REG_LDTR,
+	CPU_REG_TR,
+	CPU_REG_IDTR,
+	CPU_REG_GDTR
+	/*CPU_REG_LAST*/
+};
 
 /**********************************/
 /* EXTERNAL VARIABLES             */
 /**********************************/
-extern const uint8_t          _ld_trampoline_load[];
-extern uint8_t                _ld_trampoline_start[];
-extern uint8_t                _ld_trampoline_end[];
-extern const uint64_t         _ld_trampoline_size;
-extern uint8_t                _ld_bss_start[];
-extern uint8_t                _ld_bss_end[];
-
-extern uint8_t                trampoline_fixup_cs[];
-extern uint8_t                trampoline_fixup_ip[];
-extern uint8_t                trampoline_fixup_target[];
-extern uint8_t                CPU_Boot_Page_Tables_Start[];
-extern uint8_t                CPU_Boot_Page_Tables_ptr[];
-extern uint8_t                trampoline_pdpt_addr[];
-extern uint8_t                trampoline_gdt_ptr[];
-extern uint8_t                trampoline_start64_fixup[];
 
 /* In trampoline range, hold the jump target which trampline will jump to */
 extern uint64_t               main_entry[1];
-
-extern uint64_t trampoline_start16_paddr;
-extern int ibrs_type;
-extern spinlock_t trampoline_spinlock;
+extern uint64_t               secondary_cpu_stack[1];
 
 /*
  * To support per_cpu access, we use a special struct "per_cpu_region" to hold
@@ -190,25 +232,6 @@ extern spinlock_t trampoline_spinlock;
  * to locate the per cpu data.
  */
 
-#define	PER_CPU_DATA_OFFSET(sym_addr)					\
-	((uint64_t)(sym_addr) - (uint64_t)(_ld_cpu_data_start))
-
-#define	PER_CPU_DATA_SIZE						\
-	((uint64_t)_ld_cpu_data_end - (uint64_t)(_ld_cpu_data_start))
-
-/* CPUID feature words */
-enum feature_word {
-	FEAT_1_ECX = 0,         /* CPUID[1].ECX */
-	FEAT_1_EDX,             /* CPUID[1].EDX */
-	FEAT_7_0_EBX,           /* CPUID[EAX=7,ECX=0].EBX */
-	FEAT_7_0_ECX,           /* CPUID[EAX=7,ECX=0].ECX */
-	FEAT_7_0_EDX,           /* CPUID[EAX=7,ECX=0].EDX */
-	FEAT_8000_0001_ECX,     /* CPUID[8000_0001].ECX */
-	FEAT_8000_0001_EDX,     /* CPUID[8000_0001].EDX */
-	FEAT_8000_0008_EBX,     /* CPUID[8000_0008].EAX */
-	FEATURE_WORDS,
-};
-
 /**
  *The invalid cpu_id (INVALID_CPU_ID) is error
  *code for error handling, this means that
@@ -223,95 +246,89 @@ enum feature_word {
  */
 #define BROADCAST_CPU_ID 0xfffeU
 
+struct descriptor_table {
+	uint16_t limit;
+	uint64_t base;
+} __packed;
+
 /* CPU states defined */
-enum cpu_state {
-	CPU_STATE_RESET = 0,
-	CPU_STATE_INITIALIZING,
-	CPU_STATE_RUNNING,
-	CPU_STATE_HALTED,
-	CPU_STATE_DEAD,
+enum pcpu_boot_state {
+	PCPU_STATE_RESET = 0U,
+	PCPU_STATE_INITIALIZING,
+	PCPU_STATE_RUNNING,
+	PCPU_STATE_HALTED,
+	PCPU_STATE_DEAD,
 };
-
-struct cpu_state_info {
-	uint8_t			 px_cnt;	/* count of all Px states */
-	const struct cpu_px_data *px_data;
-	uint8_t			 cx_cnt;	/* count of all Cx entries */
-	const struct cpu_cx_data *cx_data;
-};
-
-struct cpuinfo_x86 {
-	uint8_t x86, x86_model;
-	uint8_t x86_virt_bits;
-	uint8_t x86_phys_bits;
-	uint32_t cpuid_level;
-	uint32_t extended_cpuid_level;
-	uint64_t physical_address_mask;
-	uint32_t cpuid_leaves[FEATURE_WORDS];
-	char model_name[64];
-	struct cpu_state_info state_info;
-};
-#ifdef STACK_PROTECTOR
-struct stack_canary {
-	/* Gcc generates extra code, using [fs:40] to access canary */
-	uint8_t reserved[40];
-	uint64_t canary;
-};
-#endif
-
-extern struct cpuinfo_x86 boot_cpu_data;
-
-#define MAX_PSTATE	20U	/* max num of supported Px count */
-#define MAX_CSTATE	8U	/* max num of supported Cx count */
-
-/* We support MAX_CSTATE num of Cx, means have (MAX_CSTATE - 1) Cx entries,
- * i.e. supported Cx entry index range from 1 to MAX_CX_ENTRY.
- */
-#define MAX_CX_ENTRY	(MAX_CSTATE - 1U)
 
 /* Function prototypes */
-void cpu_dead(uint16_t pcpu_id);
+void cpu_do_idle(void);
+void cpu_dead(void);
 void trampoline_start16(void);
-int32_t hv_main(uint16_t cpu_id);
-bool is_vapic_supported(void);
-bool is_vapic_intr_delivery_supported(void);
-bool is_vapic_virt_reg_supported(void);
-bool cpu_has_cap(uint32_t bit);
-void load_cpu_state_data(void);
-void start_cpus();
-void stop_cpus();
+void load_pcpu_state_data(void);
+void init_pcpu_pre(bool is_bsp);
+void init_pcpu_post(uint16_t pcpu_id);
+bool start_pcpus(uint64_t mask);
+void wait_pcpus_offline(uint64_t mask);
+void stop_pcpus(void);
+void wait_sync_change(volatile const uint64_t *sync, uint64_t wake_sync);
+
+#define CPU_SEG_READ(seg, result_ptr)						\
+{										\
+	asm volatile ("mov %%" STRINGIFY(seg) ", %0": "=r" (*(result_ptr)));	\
+}
 
 /* Read control register */
-#define CPU_CR_READ(cr, result_ptr)                         \
-{                                                           \
-	asm volatile ("mov %%" __CPP_STRING(cr) ", %0"      \
-			: "=r"(*result_ptr));               \
+#define CPU_CR_READ(cr, result_ptr)				\
+{								\
+	asm volatile ("mov %%" STRINGIFY(cr) ", %0"		\
+			: "=r"(*(result_ptr)));			\
 }
 
 /* Write control register */
-#define CPU_CR_WRITE(cr, value)                             \
-{                                                           \
-	asm volatile ("mov %0, %%" __CPP_STRING(cr)         \
-			: /* No output */                   \
-			: "r"(value));                      \
+#define CPU_CR_WRITE(cr, value)					\
+{								\
+	asm volatile ("mov %0, %%" STRINGIFY(cr)		\
+			: /* No output */			\
+			: "r"(value));				\
+}
+
+static inline uint64_t sgdt(void)
+{
+	struct descriptor_table gdtb = {0U, 0UL};
+	asm volatile ("sgdt %0":"=m"(gdtb)::"memory");
+	return gdtb.base;
+}
+
+static inline uint64_t sidt(void)
+{
+	struct descriptor_table idtb = {0U, 0UL};
+	asm volatile ("sidt %0":"=m"(idtb)::"memory");
+	return idtb.base;
 }
 
 /* Read MSR */
-#define CPU_MSR_READ(reg, msr_val_ptr)                      \
-{                                                           \
-	uint32_t  msrl, msrh;                                 \
-	asm volatile (" rdmsr ":"=a"(msrl),                 \
-			"=d"(msrh) : "c" (reg));            \
-	*msr_val_ptr = ((uint64_t)msrh<<32) | msrl;           \
+static inline uint64_t cpu_msr_read(uint32_t reg)
+{
+	uint32_t  msrl, msrh;
+
+	asm volatile (" rdmsr ":"=a"(msrl), "=d"(msrh) : "c" (reg));
+	return (((uint64_t)msrh << 32U) | msrl);
 }
 
 /* Write MSR */
-#define CPU_MSR_WRITE(reg, msr_val)                         \
-{                                                           \
-	uint32_t msrl, msrh;                                  \
-	msrl = (uint32_t)msr_val;                             \
-	msrh = (uint32_t)(msr_val >> 32);                     \
-	asm volatile (" wrmsr " : : "c" (reg),              \
-			"a" (msrl), "d" (msrh));            \
+static inline void cpu_msr_write(uint32_t reg, uint64_t msr_val)
+{
+	asm volatile (" wrmsr " : : "c" (reg), "a" ((uint32_t)msr_val), "d" ((uint32_t)(msr_val >> 32U)));
+}
+
+static inline void asm_pause(void)
+{
+	asm volatile ("pause" ::: "memory");
+}
+
+static inline void asm_hlt(void)
+{
+	asm volatile ("hlt");
 }
 
 /* Disables interrupts on the current CPU */
@@ -327,28 +344,23 @@ void stop_cpus();
 }
 
 /* This macro writes the stack pointer. */
-#define CPU_SP_WRITE(stack_ptr)                             \
-{                                                           \
-	uint64_t rsp = (uint64_t)stack_ptr & ~(CPU_STACK_ALIGN - 1UL);  \
-	asm volatile ("movq %0, %%rsp" : : "r"(rsp));             \
-}
+static inline void cpu_sp_write(uint64_t *stack_ptr)
+{
+	uint64_t rsp = (uint64_t)stack_ptr & ~(CPU_STACK_ALIGN - 1UL);
 
-/* Synchronizes all read accesses from memory */
-#define CPU_MEMORY_READ_BARRIER()                           \
-{                                                           \
-	asm volatile ("lfence\n" : : : "memory");           \
+	asm volatile ("movq %0, %%rsp" : : "r"(rsp));
 }
 
 /* Synchronizes all write accesses to memory */
-#define CPU_MEMORY_WRITE_BARRIER()                          \
-{                                                           \
-	asm volatile ("sfence\n" : : : "memory");           \
+static inline void cpu_write_memory_barrier(void)
+{
+	asm volatile ("sfence\n" : : : "memory");
 }
 
 /* Synchronizes all read and write accesses to/from memory */
-#define CPU_MEMORY_BARRIER()                                \
-{                                                           \
-	asm volatile ("mfence\n" : : : "memory");           \
+static inline void cpu_memory_barrier(void)
+{
+	asm volatile ("mfence\n" : : : "memory");
 }
 
 /* Write the task register */
@@ -358,20 +370,14 @@ void stop_cpus();
 }
 
 /* Read time-stamp counter / processor ID */
-#define CPU_RDTSCP_EXECUTE(timestamp_ptr, cpu_id_ptr)       \
-{                                                           \
-	uint32_t  tsl, tsh;                                   \
-	asm volatile ("rdtscp":"=a"(tsl), "=d"(tsh),        \
-			"=c"(*cpu_id_ptr));                 \
-	*timestamp_ptr = ((uint64_t)tsh << 32) | tsl;         \
-}
+static inline void
+cpu_rdtscp_execute(uint64_t *timestamp_ptr, uint32_t *cpu_id_ptr)
+{
+	uint32_t tsl, tsh;
 
-/* Define variable(s) required to save / restore architecture interrupt state.
- * These variable(s) are used in conjunction with the ESAL_AR_INT_ALL_DISABLE()
- * and ESAL_AR_INT_ALL_RESTORE() macros to hold any data that must be preserved
- * in order to allow these macros to function correctly.
- */
-#define         CPU_INT_CONTROL_VARS                uint64_t    cpu_int_value
+	asm volatile ("rdtscp":"=a"(tsl), "=d"(tsh), "=c"(*cpu_id_ptr));
+	*timestamp_ptr = ((uint64_t)tsh << 32U) | tsl;
+}
 
 /* Macro to save rflags register */
 #define CPU_RFLAGS_SAVE(rflags_ptr)                     \
@@ -398,9 +404,9 @@ void stop_cpus();
  *        defined below and CPU_INT_CONTROL_VARS defined above.
  */
 
-#define CPU_INT_ALL_DISABLE()                       \
+#define CPU_INT_ALL_DISABLE(p_rflags)               \
 {                                                   \
-	CPU_RFLAGS_SAVE(&cpu_int_value);            \
+	CPU_RFLAGS_SAVE(p_rflags);	             \
 	CPU_IRQ_DISABLE();                          \
 }
 
@@ -411,13 +417,16 @@ void stop_cpus();
  * NOTE:  This macro is used in conjunction with CPU_INT_ALL_DISABLE
  *        and CPU_INT_CONTROL_VARS defined above.
  */
-#define CPU_INT_ALL_RESTORE()                       \
+#define CPU_INT_ALL_RESTORE(rflags)                 \
 {                                                   \
-	CPU_RFLAGS_RESTORE(cpu_int_value);          \
+	CPU_RFLAGS_RESTORE(rflags);                 \
 }
 
-/* Macro to get CPU ID */
-static inline uint16_t get_cpu_id(void)
+/*
+ * Macro to get CPU ID
+ * @pre: the return CPU ID would never equal or large than phys_cpu_num.
+ */
+static inline uint16_t get_pcpu_id(void)
 {
 	uint32_t tsl, tsh, cpu_id;
 
@@ -429,8 +438,7 @@ static inline uint64_t cpu_rsp_get(void)
 {
 	uint64_t ret;
 
-	asm volatile("movq %%rsp, %0"
-			:  "=r"(ret));
+	asm volatile("movq %%rsp, %0" :  "=r"(ret));
 	return ret;
 }
 
@@ -438,37 +446,64 @@ static inline uint64_t cpu_rbp_get(void)
 {
 	uint64_t ret;
 
-	asm volatile("movq %%rbp, %0"
-			:  "=r"(ret));
+	asm volatile("movq %%rbp, %0" :  "=r"(ret));
 	return ret;
 }
 
-
-
-static inline uint64_t
-msr_read(uint32_t reg_num)
+static inline uint64_t msr_read(uint32_t reg_num)
 {
-	uint64_t msr_val;
-
-	CPU_MSR_READ(reg_num, &msr_val);
-	return msr_val;
+	return cpu_msr_read(reg_num);
 }
 
-static inline void
-msr_write(uint32_t reg_num, uint64_t value64)
+static inline void msr_write(uint32_t reg_num, uint64_t value64)
 {
-	CPU_MSR_WRITE(reg_num, value64);
+	cpu_msr_write(reg_num, value64);
 }
 
-static inline void
-write_xcr(int reg, uint64_t val)
-{
-	uint32_t low, high;
 
-	low = val;
-	high = val >> 32;
-	asm volatile("xsetbv" : : "c" (reg), "a" (low), "d" (high));
+/* wrmsr/rdmsr smp call data */
+struct msr_data_struct {
+	uint32_t msr_index;
+	uint64_t read_val;
+	uint64_t write_val;
+};
+
+void msr_write_pcpu(uint32_t msr_index, uint64_t value64, uint16_t pcpu_id);
+uint64_t msr_read_pcpu(uint32_t msr_index, uint16_t pcpu_id);
+
+static inline void write_xcr(int32_t reg, uint64_t val)
+{
+	asm volatile("xsetbv" : : "c" (reg), "a" ((uint32_t)val), "d" ((uint32_t)(val >> 32U)));
 }
+
+/*
+ * stac/clac pair is used to access guest's memory protected by SMAP,
+ * following below flow:
+ *
+ *	stac();
+ *	#access guest's memory.
+ *	clac();
+ *
+ * Notes:Avoid inserting another stac/clac pair between stac and clac,
+ *	As once clac after multiple stac will invalidate SMAP protection
+ *	and hence Page Fault crash.
+ *	Logging message to memory buffer will induce this case,
+ *	please disable SMAP temporlly or don't log messages to shared
+ *	memory buffer, if it is evitable for you for debug purpose.
+ */
+static inline void stac(void)
+{
+	asm volatile ("stac" : : : "memory");
+}
+
+static inline void clac(void)
+{
+	asm volatile ("clac" : : : "memory");
+}
+
+uint16_t get_pcpu_nums(void);
+bool is_pcpu_active(uint16_t pcpu_id);
+uint64_t get_active_pcpu_bitmap(void);
 #else /* ASSEMBLER defined */
 
 #endif /* ASSEMBLER defined */

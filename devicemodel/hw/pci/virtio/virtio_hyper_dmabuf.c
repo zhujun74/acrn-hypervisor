@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <assert.h>
 #include <pthread.h>
 
 #include "dm.h"
@@ -84,7 +83,6 @@ static struct virtio_ops virtio_hyper_dmabuf_ops_k = {
 	NULL,				/* write virtio config */
 	NULL,				/* apply negotiated features */
 	virtio_hyper_dmabuf_set_status,	/* called on guest set status */
-	0,				/* our capabilities */
 };
 
 static int
@@ -117,6 +115,7 @@ virtio_hyper_dmabuf_k_dev_set(const char *name, int vmid, int nvq,
 {
 	/* init kdev */
 	strncpy(kdev.name, name, VBS_NAME_LEN);
+	kdev.name[VBS_NAME_LEN - 1] = '\0';
 	kdev.vmid = vmid;
 	kdev.nvq = nvq;
 	kdev.negotiated_features = feature;
@@ -187,7 +186,7 @@ virtio_hyper_dmabuf_reset(void *base)
 	if (kstatus == VIRTIO_DEV_STARTED) {
 		virtio_hyper_dmabuf_k_stop();
 		virtio_hyper_dmabuf_k_reset();
-		kstatus = VIRTIO_DEV_INITIAL;
+		kstatus = VIRTIO_DEV_INIT_SUCCESS;
 	}
 }
 
@@ -214,7 +213,7 @@ virtio_hyper_dmabuf_set_status(void *base, uint64_t status)
 	nvq = hyper_dmabuf->base.vops->nvq;
 
 	if (kstatus == VIRTIO_DEV_INIT_SUCCESS &&
-	    (status & VIRTIO_CR_STATUS_DRIVER_OK)) {
+	    (status & VIRTIO_CONFIG_S_DRIVER_OK)) {
 		/* time to kickoff VBS-K side */
 		/* init vdev first */
 		rc = virtio_hyper_dmabuf_k_dev_set(
@@ -300,7 +299,8 @@ virtio_hyper_dmabuf_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		      &virtio_hyper_dmabuf_ops_k,
 		      hyper_dmabuf,
 		      dev,
-		      hyper_dmabuf->vq);
+		      hyper_dmabuf->vq,
+		      BACKEND_VBSK);
 
 	rc = virtio_hyper_dmabuf_k_init();
 	if (rc < 0) {
@@ -342,8 +342,9 @@ virtio_hyper_dmabuf_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		virtio_hyper_dmabuf_k_stop();
 		virtio_hyper_dmabuf_k_reset();
 		kstatus = VIRTIO_DEV_INITIAL;
-		assert(vbs_k_hyper_dmabuf_fd >= 0);
-		close(vbs_k_hyper_dmabuf_fd);
+		if (vbs_k_hyper_dmabuf_fd >= 0) {
+			close(vbs_k_hyper_dmabuf_fd);
+		}
 		vbs_k_hyper_dmabuf_fd = -1;
 	}
 

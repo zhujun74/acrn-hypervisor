@@ -4,12 +4,23 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <hypervisor.h>
+#include <types.h>
+#include <per_cpu.h>
+#include <mmu.h>
+#include <vcpu.h>
+#include <vmx.h>
+#include <vm.h>
+#include <init.h>
+#include <logmsg.h>
+#include <dump.h>
+
+#define CALL_TRACE_HIERARCHY_MAX    20U
+#define DUMP_STACK_SIZE 0x200U
 
 /*
  * readable exception descriptors.
  */
-static const char *const excp_names[] = {
+static const char *const excp_names[32] = {
 	[0] = "Divide Error",
 	[1] = "RESERVED",
 	[2] = "NMI",
@@ -44,98 +55,98 @@ static const char *const excp_names[] = {
 	[31] = "Intel Reserved"
 };
 
-/* Global variable for save registers on exception */
+/*
+ * Global variable for save registers on exception.
+ * don't change crash_ctx to static.
+ * crash_ctx is for offline analysis when system crashed, not for runtime usage.
+ * as crash_ctx is only be set without being read, compiler will regard
+ * crash_ctx as an useless variable if it is set to static, and will not
+ * generate code for it.
+ */
 struct intr_excp_ctx *crash_ctx;
 
-static void dump_guest_reg(struct vcpu *vcpu)
+static void dump_guest_reg(struct acrn_vcpu *vcpu)
 {
-	struct run_context *cur_context =
-		&vcpu->arch_vcpu.contexts[vcpu->arch_vcpu.cur_context];
-
-	printf("\n\n================================================");
-	printf("================================\n\n");
-	printf("Guest Registers:\r\n");
-	printf("=	VM ID %d ==== vCPU ID %hu ===  pCPU ID %d ===="
+	pr_acrnlog("\n\n================================================");
+	pr_acrnlog("================================\n\n");
+	pr_acrnlog("Guest Registers:\r\n");
+	pr_acrnlog("=	VM ID %d ==== vCPU ID %hu ===  pCPU ID %d ===="
 			"world %d =============\r\n",
-			vcpu->vm->attr.id, vcpu->vcpu_id, vcpu->pcpu_id,
-			vcpu->arch_vcpu.cur_context);
-	printf("=	RIP=0x%016llx  RSP=0x%016llx "
+			vcpu->vm->vm_id, vcpu->vcpu_id, vcpu->pcpu_id,
+			vcpu->arch.cur_context);
+	pr_acrnlog("=	RIP=0x%016llx  RSP=0x%016llx "
 			"RFLAGS=0x%016llx\r\n",
-			cur_context->rip,
-			cur_context->rsp,
-			cur_context->rflags);
-	printf("=	CR0=0x%016llx  CR2=0x%016llx "
+			vcpu_get_rip(vcpu),
+			vcpu_get_gpreg(vcpu, CPU_REG_RSP),
+			vcpu_get_rflags(vcpu));
+	pr_acrnlog("=	CR0=0x%016llx  CR2=0x%016llx "
 			" CR3=0x%016llx\r\n",
-			cur_context->cr0,
-			cur_context->cr2,
-			cur_context->cr3);
-	printf("=	RAX=0x%016llx  RBX=0x%016llx  "
+			vcpu_get_cr0(vcpu),
+			vcpu_get_cr2(vcpu),
+			exec_vmread(VMX_GUEST_CR3));
+	pr_acrnlog("=	RAX=0x%016llx  RBX=0x%016llx  "
 			"RCX=0x%016llx\r\n",
-			cur_context->guest_cpu_regs.regs.rax,
-			cur_context->guest_cpu_regs.regs.rbx,
-			cur_context->guest_cpu_regs.regs.rcx);
-	printf("=	RDX=0x%016llx  RDI=0x%016llx  "
+			vcpu_get_gpreg(vcpu, CPU_REG_RAX),
+			vcpu_get_gpreg(vcpu, CPU_REG_RBX),
+			vcpu_get_gpreg(vcpu, CPU_REG_RCX));
+	pr_acrnlog("=	RDX=0x%016llx  RDI=0x%016llx  "
 			"RSI=0x%016llx\r\n",
-			cur_context->guest_cpu_regs.regs.rdx,
-			cur_context->guest_cpu_regs.regs.rdi,
-			cur_context->guest_cpu_regs.regs.rsi);
-	printf("=	RBP=0x%016llx  R8=0x%016llx  "
+			vcpu_get_gpreg(vcpu, CPU_REG_RDX),
+			vcpu_get_gpreg(vcpu, CPU_REG_RDI),
+			vcpu_get_gpreg(vcpu, CPU_REG_RSI));
+	pr_acrnlog("=	RBP=0x%016llx  R8=0x%016llx  "
 			"R9=0x%016llx\r\n",
-			cur_context->guest_cpu_regs.regs.rbp,
-			cur_context->guest_cpu_regs.regs.r8,
-			cur_context->guest_cpu_regs.regs.r9);
-	printf("=	R10=0x%016llx  R11=0x%016llx  "
+			vcpu_get_gpreg(vcpu, CPU_REG_RBP),
+			vcpu_get_gpreg(vcpu, CPU_REG_R8),
+			vcpu_get_gpreg(vcpu, CPU_REG_R9));
+	pr_acrnlog("=	R10=0x%016llx  R11=0x%016llx  "
 			"R12=0x%016llx\r\n",
-			cur_context->guest_cpu_regs.regs.r10,
-			cur_context->guest_cpu_regs.regs.r11,
-			cur_context->guest_cpu_regs.regs.r12);
-	printf("=	R13=0x%016llx  R14=0x%016llx  "
+			vcpu_get_gpreg(vcpu, CPU_REG_R10),
+			vcpu_get_gpreg(vcpu, CPU_REG_R11),
+			vcpu_get_gpreg(vcpu, CPU_REG_R12));
+	pr_acrnlog("=	R13=0x%016llx  R14=0x%016llx  "
 			"R15=0x%016llx\r\n",
-			cur_context->guest_cpu_regs.regs.r13,
-			cur_context->guest_cpu_regs.regs.r14,
-			cur_context->guest_cpu_regs.regs.r15);
-	printf("\r\n");
+			vcpu_get_gpreg(vcpu, CPU_REG_R13),
+			vcpu_get_gpreg(vcpu, CPU_REG_R14),
+			vcpu_get_gpreg(vcpu, CPU_REG_R15));
+	pr_acrnlog("\r\n");
 }
 
-static void dump_guest_stack(struct vcpu *vcpu)
+static void dump_guest_stack(struct acrn_vcpu *vcpu)
 {
 	uint32_t i;
-	uint64_t tmp[DUMP_STACK_SIZE];
-	struct run_context *cur_context =
-		&vcpu->arch_vcpu.contexts[vcpu->arch_vcpu.cur_context];
-	uint32_t err_code = 0;
+	uint64_t tmp[DUMP_STACK_SIZE], fault_addr;
+	uint32_t err_code = 0U;
 
-	if (copy_from_gva(vcpu, tmp, cur_context->rsp, DUMP_STACK_SIZE,
-		&err_code) < 0) {
-		printf("\r\nUnabled to Copy Guest Stack:\r\n");
+	if (copy_from_gva(vcpu, tmp, vcpu_get_gpreg(vcpu, CPU_REG_RSP),
+		DUMP_STACK_SIZE, &err_code, &fault_addr) < 0) {
+		pr_acrnlog("\r\nUnabled to Copy Guest Stack:\r\n");
 		return;
 	}
 
-	printf("\r\nGuest Stack:\r\n");
-	printf("Dump stack for vcpu %hu, from gva 0x%016llx\r\n",
-			vcpu->vcpu_id, cur_context->rsp);
-	for (i = 0U; i < DUMP_STACK_SIZE/32U; i++) {
-		printf("guest_rsp(0x%llx):  0x%016llx  0x%016llx  "
+	pr_acrnlog("\r\nGuest Stack:\r\n");
+	pr_acrnlog("Dump stack for vcpu %hu, from gva 0x%016llx\r\n",
+			vcpu->vcpu_id, vcpu_get_gpreg(vcpu, CPU_REG_RSP));
+	for (i = 0U; i < (DUMP_STACK_SIZE >> 5U); i++) {
+		pr_acrnlog("guest_rsp(0x%llx):  0x%016llx  0x%016llx  "
 				"0x%016llx  0x%016llx\r\n",
-				(cur_context->rsp+i*32),
-				tmp[i*4], tmp[i*4+1],
-				tmp[i*4+2], tmp[i*4+3]);
+				(vcpu_get_gpreg(vcpu, CPU_REG_RSP)+(i*32U)),
+				tmp[i*4], tmp[(i*4)+1],
+				tmp[(i*4)+2], tmp[(i*4)+3]);
 	}
-	printf("\r\n");
+	pr_acrnlog("\r\n");
 }
 
-static void show_guest_call_trace(struct vcpu *vcpu)
+static void show_guest_call_trace(struct acrn_vcpu *vcpu)
 {
 	uint64_t bp;
 	uint64_t count = 0UL;
-	struct run_context *cur_context =
-		&vcpu->arch_vcpu.contexts[vcpu->arch_vcpu.cur_context];
-	int err;
+	int32_t err;
 	uint32_t err_code;
 
-	bp =  cur_context->guest_cpu_regs.regs.rbp;
-	printf("Guest Call Trace: **************************************\r\n");
-	printf("Maybe the call trace is not accurate, pls check stack!!\r\n");
+	bp = vcpu_get_gpreg(vcpu, CPU_REG_RBP);
+	pr_acrnlog("Guest Call Trace: **************************************\r\n");
+	pr_acrnlog("Maybe the call trace is not accurate, pls check stack!!\r\n");
 	/* if enable compiler option(no-omit-frame-pointer)  the stack layout
 	 * should be like this when call a function for x86_64
 	 *
@@ -149,27 +160,28 @@ static void show_guest_call_trace(struct vcpu *vcpu)
 	 *  try to print out call trace,here can not check if the rbp is valid
 	 *  if the address is invalid, it will cause hv page fault
 	 *  then halt system */
-	while ((count++ < CALL_TRACE_HIERARCHY_MAX) && (bp != 0)) {
-		uint64_t parent_bp = 0UL;
+	while ((count < CALL_TRACE_HIERARCHY_MAX) && (bp != 0UL)) {
+		uint64_t parent_bp = 0UL, fault_addr;
 
 		err_code = 0U;
 		err = copy_from_gva(vcpu, &parent_bp, bp, sizeof(parent_bp),
-			&err_code);
+			&err_code, &fault_addr);
 		if (err < 0) {
-			printf("\r\nUnabled to get Guest parent BP\r\n");
+			pr_acrnlog("\r\nUnabled to get Guest parent BP\r\n");
 			return;
 		}
 
-		printf("BP_GVA(0x%016llx) RIP=0x%016llx\r\n", bp, parent_bp);
+		pr_acrnlog("BP_GVA(0x%016llx) RIP=0x%016llx\r\n", bp, parent_bp);
 		/* Get previous rbp*/
 		bp = parent_bp;
+		count++;
 	}
-	printf("\r\n");
+	pr_acrnlog("\r\n");
 }
 
 static void dump_guest_context(uint16_t pcpu_id)
 {
-	struct vcpu *vcpu;
+	struct acrn_vcpu *vcpu;
 
 	vcpu = per_cpu(vcpu, pcpu_id);
 	if (vcpu != NULL) {
@@ -179,26 +191,23 @@ static void dump_guest_context(uint16_t pcpu_id)
 	}
 }
 
-static void show_host_call_trace(uint64_t rsp, uint64_t rbp, uint16_t pcpu_id)
+static void show_host_call_trace(uint64_t rsp, uint64_t rbp_arg, uint16_t pcpu_id)
 {
+	uint64_t rbp = rbp_arg, return_address;
 	uint32_t i = 0U;
 	uint32_t cb_hierarchy = 0U;
 	uint64_t *sp = (uint64_t *)rsp;
 
-	printf("\r\nHost Stack: CPU_ID = %hu\r\n", pcpu_id);
-	for (i = 0U; i < DUMP_STACK_SIZE/32U; i++) {
-		printf("addr(0x%llx)	0x%016llx  0x%016llx  0x%016llx  "
-			  "0x%016llx\r\n", (rsp+i*32U), sp[i*4U], sp[i*4U+1U],
-			  sp[i*4U+2U], sp[i*4U+3U]);
+	pr_acrnlog("\r\nHost Stack: CPU_ID = %hu\r\n", pcpu_id);
+	for (i = 0U; i < (DUMP_STACK_SIZE >> 5U); i++) {
+		pr_acrnlog("addr(0x%llx)	0x%016llx  0x%016llx  0x%016llx  "
+			"0x%016llx\r\n", (rsp + (i * 32U)), sp[i * 4U],
+			sp[(i * 4U) + 1U], sp[(i * 4U) + 2U],
+			sp[(i * 4U) + 3U]);
 	}
-	printf("\r\n");
+	pr_acrnlog("\r\n");
 
-	printf("Host Call Trace:\r\n");
-	if (rsp >
-	(uint64_t)&per_cpu(stack, pcpu_id)[CONFIG_STACK_SIZE - 1]
-		|| rsp < (uint64_t)&per_cpu(stack, pcpu_id)[0]) {
-		return;
-	}
+	pr_acrnlog("Host Call Trace:\r\n");
 
 	/* if enable compiler option(no-omit-frame-pointer)  the stack layout
 	 * should be like this when call a function for x86_64
@@ -213,69 +222,70 @@ static void show_host_call_trace(uint64_t rsp, uint64_t rbp, uint16_t pcpu_id)
 	 *
 	 *  if the address is invalid, it will cause hv page fault
 	 *  then halt system */
-	while ((rbp <=
-	(uint64_t)&per_cpu(stack, pcpu_id)[CONFIG_STACK_SIZE - 1])
-		&& (rbp >= (uint64_t)&per_cpu(stack, pcpu_id)[0])
-		&& (cb_hierarchy++ < CALL_TRACE_HIERARCHY_MAX)) {
-		printf("----> 0x%016llx\r\n",
-				*(uint64_t *)(rbp + sizeof(uint64_t)));
-		if (*(uint64_t *)(rbp + 2*sizeof(uint64_t))
-				== SP_BOTTOM_MAGIC) {
+	while (cb_hierarchy < CALL_TRACE_HIERARCHY_MAX) {
+		return_address = *(uint64_t *)(rbp + sizeof(uint64_t));
+		if (return_address == SP_BOTTOM_MAGIC) {
 			break;
 		}
+		pr_acrnlog("----> 0x%016llx\r\n",
+				*(uint64_t *)(rbp + sizeof(uint64_t)));
 		rbp = *(uint64_t *)rbp;
+		cb_hierarchy++;
 	}
-	printf("\r\n");
+	pr_acrnlog("\r\n");
 }
 
-void __assert(uint32_t line, const char *file, const char *txt)
+void asm_assert(int32_t line, const char *file, const char *txt)
 {
-	uint16_t pcpu_id = get_cpu_id();
+	uint16_t pcpu_id = get_pcpu_id();
 	uint64_t rsp = cpu_rsp_get();
 	uint64_t rbp = cpu_rbp_get();
 
-	pr_fatal("Assertion failed in file %s,line %u : %s",
+	pr_acrnlog("Assertion failed in file %s,line %d : %s",
 			file, line, txt);
 	show_host_call_trace(rsp, rbp, pcpu_id);
 	dump_guest_context(pcpu_id);
 	do {
-		asm volatile ("pause" ::: "memory");
+		asm_pause();
 	} while (1);
 }
 
-void dump_intr_excp_frame(struct intr_excp_ctx *ctx)
+void dump_intr_excp_frame(const struct intr_excp_ctx *ctx)
 {
 	const char *name = "Not defined";
+	uint64_t cr2_val;
 
-	printf("\n\n================================================");
-	printf("================================\n=\n");
+	pr_acrnlog("\n\n================================================");
+	pr_acrnlog("================================\n=\n");
 	if (ctx->vector < 0x20UL) {
 		name = excp_names[ctx->vector];
-		printf("= Unhandled exception: %d (%s)\n", ctx->vector, name);
+		pr_acrnlog("= Unhandled exception: %d (%s)\n", ctx->vector, name);
 	}
 
 	/* Dump host register*/
-	printf("\r\nHost Registers:\r\n");
-	printf("=  Vector=0x%016llX  RIP=0x%016llX\n",
+	pr_acrnlog("\r\nHost Registers:\r\n");
+	pr_acrnlog("=  Vector=0x%016llX  RIP=0x%016llX\n",
 			ctx->vector, ctx->rip);
-	printf("=     RAX=0x%016llX  RBX=0x%016llX  RCX=0x%016llX\n",
-			ctx->rax, ctx->rbx, ctx->rcx);
-	printf("=     RDX=0x%016llX  RDI=0x%016llX  RSI=0x%016llX\n",
-			ctx->rdx, ctx->rdi, ctx->rsi);
-	printf("=     RSP=0x%016llX  RBP=0x%016llX  RBX=0x%016llX\n",
-			ctx->rsp, ctx->rbp, ctx->rbx);
-	printf("=      R8=0x%016llX   R9=0x%016llX  R10=0x%016llX\n",
-			ctx->r8, ctx->r9, ctx->r10);
-	printf("=     R11=0x%016llX  R12=0x%016llX  R13=0x%016llX\n",
-			ctx->r11, ctx->r12, ctx->r13);
-	printf("=  RFLAGS=0x%016llX  R14=0x%016llX  R15=0x%016llX\n",
-			ctx->rflags, ctx->r14, ctx->r15);
-	printf("= ERRCODE=0x%016llX   CS=0x%016llX   SS=0x%016llX\n",
+	pr_acrnlog("=     RAX=0x%016llX  RBX=0x%016llX  RCX=0x%016llX\n",
+			ctx->gp_regs.rax, ctx->gp_regs.rbx, ctx->gp_regs.rcx);
+	pr_acrnlog("=     RDX=0x%016llX  RDI=0x%016llX  RSI=0x%016llX\n",
+			ctx->gp_regs.rdx, ctx->gp_regs.rdi, ctx->gp_regs.rsi);
+	pr_acrnlog("=     RSP=0x%016llX  RBP=0x%016llX  RBX=0x%016llX\n",
+			ctx->gp_regs.rsp, ctx->gp_regs.rbp, ctx->gp_regs.rbx);
+	pr_acrnlog("=      R8=0x%016llX   R9=0x%016llX  R10=0x%016llX\n",
+			ctx->gp_regs.r8, ctx->gp_regs.r9, ctx->gp_regs.r10);
+	pr_acrnlog("=     R11=0x%016llX  R12=0x%016llX  R13=0x%016llX\n",
+			ctx->gp_regs.r11, ctx->gp_regs.r12, ctx->gp_regs.r13);
+	pr_acrnlog("=  RFLAGS=0x%016llX  R14=0x%016llX  R15=0x%016llX\n",
+			ctx->rflags, ctx->gp_regs.r14, ctx->gp_regs.r15);
+	pr_acrnlog("= ERRCODE=0x%016llX   CS=0x%016llX   SS=0x%016llX\n",
 			ctx->error_code, ctx->cs, ctx->ss);
-	printf("\r\n");
+	asm volatile ("movq %%cr2, %0" : "=r" (cr2_val));
+	pr_acrnlog("= CR2=0x%016llX", cr2_val);
+	pr_acrnlog("\r\n");
 
-	printf("=====================================================");
-	printf("===========================\n");
+	pr_acrnlog("=====================================================");
+	pr_acrnlog("===========================\n");
 }
 
 void dump_exception(struct intr_excp_ctx *ctx, uint16_t pcpu_id)
@@ -283,11 +293,11 @@ void dump_exception(struct intr_excp_ctx *ctx, uint16_t pcpu_id)
 	/* Dump host context */
 	dump_intr_excp_frame(ctx);
 	/* Show host stack */
-	show_host_call_trace(ctx->rsp, ctx->rbp, pcpu_id);
+	show_host_call_trace(ctx->gp_regs.rsp, ctx->gp_regs.rbp, pcpu_id);
 	/* Dump guest context */
 	dump_guest_context(pcpu_id);
 
 	/* Save registers*/
 	crash_ctx = ctx;
-	CACHE_FLUSH_INVALIDATE_ALL();
+	cache_flush_invalidate_all();
 }

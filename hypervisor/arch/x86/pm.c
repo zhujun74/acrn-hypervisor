@@ -2,62 +2,124 @@
  * Copyright (C) <2018> Intel Corporation
  * SPDX-License-Identifier: BSD-3-Clause
  */
-#include <hypervisor.h>
 
-struct run_context cpu_ctx;
+#include <acrn_common.h>
+#include <default_acpi_info.h>
+#include <platform_acpi_info.h>
+#include <per_cpu.h>
+#include <io.h>
+#include <pgtable.h>
+#include <host_pm.h>
+#include <trampoline.h>
+#include <vmx.h>
+#include <console.h>
+#include <ioapic.h>
+#include <vtd.h>
+#include <lapic.h>
+#include <vcpu.h>
 
-/* whether the host enter s3 success */
-uint8_t host_enter_s3_success = 1U;
+struct cpu_context cpu_ctx;
+
+/* The values in this structure should come from host ACPI table */
+static struct pm_s_state_data host_pm_s_state = {
+	.pm1a_evt = {
+		.space_id = PM1A_EVT_SPACE_ID,
+		.bit_width = PM1A_EVT_BIT_WIDTH,
+		.bit_offset = PM1A_EVT_BIT_OFFSET,
+		.access_size = PM1A_EVT_ACCESS_SIZE,
+		.address = PM1A_EVT_ADDRESS
+	},
+	.pm1b_evt = {
+		.space_id = PM1B_EVT_SPACE_ID,
+		.bit_width = PM1B_EVT_BIT_WIDTH,
+		.bit_offset = PM1B_EVT_BIT_OFFSET,
+		.access_size = PM1B_EVT_ACCESS_SIZE,
+		.address = PM1B_EVT_ADDRESS
+	},
+	.pm1a_cnt = {
+		.space_id = PM1A_CNT_SPACE_ID,
+		.bit_width = PM1A_CNT_BIT_WIDTH,
+		.bit_offset = PM1A_CNT_BIT_OFFSET,
+		.access_size = PM1A_CNT_ACCESS_SIZE,
+		.address = PM1A_CNT_ADDRESS
+	},
+	.pm1b_cnt = {
+		.space_id = PM1B_CNT_SPACE_ID,
+		.bit_width = PM1B_CNT_BIT_WIDTH,
+		.bit_offset = PM1B_CNT_BIT_OFFSET,
+		.access_size = PM1B_CNT_ACCESS_SIZE,
+		.address = PM1B_CNT_ADDRESS
+	},
+	.s3_pkg = {
+		.val_pm1a = S3_PKG_VAL_PM1A,
+		.val_pm1b = S3_PKG_VAL_PM1B,
+		.reserved = S3_PKG_RESERVED
+	},
+	.s5_pkg = {
+		.val_pm1a = S5_PKG_VAL_PM1A,
+		.val_pm1b = S5_PKG_VAL_PM1B,
+		.reserved = S5_PKG_RESERVED
+	},
+	.wake_vector_32 = (uint32_t *)WAKE_VECTOR_32,
+	.wake_vector_64 = (uint64_t *)WAKE_VECTOR_64
+};
+
+struct pm_s_state_data *get_host_sstate_data(void)
+{
+	return &host_pm_s_state;
+}
 
 void restore_msrs(void)
 {
 #ifdef STACK_PROTECTOR
-	struct stack_canary *psc = &get_cpu_var(stack_canary);
+	struct stack_canary *psc = &get_cpu_var(stk_canary);
 
 	msr_write(MSR_IA32_FS_BASE, (uint64_t)psc);
 #endif
 }
 
-static void acpi_gas_write(struct acpi_generic_address *gas, uint32_t val)
+static void acpi_gas_write(const struct acpi_generic_address *gas, uint32_t val)
 {
-	if (gas->space_id == SPACE_SYSTEM_MEMORY)
-		mmio_write_word(val, (void *)HPA2HVA(gas->address));
-	else
-		io_write_word(val, gas->address);
+	uint16_t val16 = (uint16_t)val;
+
+	if (gas->space_id == SPACE_SYSTEM_MEMORY) {
+		mmio_write16(val16, hpa2hva(gas->address));
+	} else {
+		pio_write16(val16, (uint16_t)gas->address);
+	}
 }
 
-static uint32_t acpi_gas_read(struct acpi_generic_address *gas)
+static uint32_t acpi_gas_read(const struct acpi_generic_address *gas)
 {
-	uint32_t ret = 0;
+	uint32_t ret = 0U;
 
-	if (gas->space_id == SPACE_SYSTEM_MEMORY)
-		ret = mmio_read_word((void *)HPA2HVA(gas->address));
-	else
-		ret = io_read_word(gas->address);
+	if (gas->space_id == SPACE_SYSTEM_MEMORY) {
+		ret = mmio_read16(hpa2hva(gas->address));
+	} else {
+		ret = pio_read16((uint16_t)gas->address);
+	}
 
 	return ret;
 }
 
-void do_acpi_s3(struct vm *vm, uint32_t pm1a_cnt_val,
-	uint32_t pm1b_cnt_val)
+void do_acpi_s3(struct pm_s_state_data *sstate_data, uint32_t pm1a_cnt_val, uint32_t pm1b_cnt_val)
 {
 	uint32_t s1, s2;
 
-	acpi_gas_write(&vm->pm.sx_state_data->pm1a_cnt, pm1a_cnt_val);
+	acpi_gas_write(&(sstate_data->pm1a_cnt), pm1a_cnt_val);
 
-	if (vm->pm.sx_state_data->pm1b_cnt.address != 0)
-		acpi_gas_write(&vm->pm.sx_state_data->pm1b_cnt, pm1b_cnt_val);
+	if (sstate_data->pm1b_cnt.address != 0U) {
+		acpi_gas_write(&(sstate_data->pm1b_cnt), pm1b_cnt_val);
+	}
 
-	while (1) {
+	do {
 		/* polling PM1 state register to detect wether
 		 * the Sx state enter is interrupted by wakeup event.
 		 */
-		s1 = s2 = 0;
+		s1 = acpi_gas_read(&(sstate_data->pm1a_evt));
 
-		s1 = acpi_gas_read(&vm->pm.sx_state_data->pm1a_evt);
-
-		if (vm->pm.sx_state_data->pm1b_evt.address != 0) {
-			s2 = acpi_gas_read(&vm->pm.sx_state_data->pm1b_evt);
+		if (sstate_data->pm1b_evt.address != 0U) {
+			s2 = acpi_gas_read(&(sstate_data->pm1b_evt));
 			s1 |= s2;
 		}
 
@@ -65,87 +127,58 @@ void do_acpi_s3(struct vm *vm, uint32_t pm1a_cnt_val,
 		 * WAK_STS(bit 15) is set if system will transition to working
 		 * state.
 		 */
-		if ((s1 & (1 << BIT_WAK_STS)) != 0)
-			break;
-	}
+	} while ((s1 & (1U << BIT_WAK_STS)) == 0U);
 }
 
-int enter_s3(struct vm *vm, uint32_t pm1a_cnt_val,
-	uint32_t pm1b_cnt_val)
+void host_enter_s3(struct pm_s_state_data *sstate_data, uint32_t pm1a_cnt_val, uint32_t pm1b_cnt_val)
 {
-	uint32_t pcpu_id;
 	uint64_t pmain_entry_saved;
-	uint32_t guest_wakeup_vec32;
-	uint64_t *pmain_entry;
 
-	/* We assume enter s3 success by default */
-	host_enter_s3_success = 1;
-	if (vm->pm.sx_state_data == NULL) {
-		pr_err("No Sx state info avaiable. No Sx support");
-		host_enter_s3_success = 0;
-		return -1;
-	}
-
-	pause_vm(vm);	/* pause vm0 before suspend system */
-
-	pcpu_id = get_cpu_id();
-
-	/* Save the wakeup vec set by guest. Will return to guest
-	 * with this wakeup vec as entry.
-	 */
-	guest_wakeup_vec32 = *vm->pm.sx_state_data->wake_vector_32;
+	stac();
 
 	/* set ACRN wakeup vec instead */
-	*vm->pm.sx_state_data->wake_vector_32 =
-		(uint32_t) trampoline_start16_paddr;
+	*(sstate_data->wake_vector_32) = (uint32_t)get_trampoline_start16_paddr();
 
+	clac();
 	/* offline all APs */
-	stop_cpus();
+	stop_pcpus();
 
-	/* Trampoline code is relocatable now. We have to calculate
-	 * main_entry address with relocation base address
-	 */
-	pmain_entry =
-		(uint64_t *)(HPA2HVA(trampoline_start16_paddr) +
-		(uint64_t) main_entry);
-
+	stac();
 	/* Save default main entry and we will restore it after
 	 * back from S3. So the AP online could jmp to correct
 	 * main entry.
 	 */
-	pmain_entry_saved = *pmain_entry;
+	pmain_entry_saved = read_trampoline_sym(main_entry);
+
 	/* Set the main entry for resume from S3 state */
-	*pmain_entry = (uint64_t)restore_s3_context;
+	write_trampoline_sym(main_entry, (uint64_t)restore_s3_context);
+	clac();
 
 	CPU_IRQ_DISABLE();
-	vmx_off(pcpu_id);
+	vmx_off();
 
 	suspend_console();
 	suspend_ioapic();
 	suspend_iommu();
 	suspend_lapic();
 
-	__enter_s3(vm, pm1a_cnt_val, pm1b_cnt_val);
-
-	/* release the lock aquired in trampoline code */
-	spinlock_release(&trampoline_spinlock);
+	asm_enter_s3(sstate_data, pm1a_cnt_val, pm1b_cnt_val);
 
 	resume_lapic();
 	resume_iommu();
 	resume_ioapic();
 	resume_console();
 
-	exec_vmxon_instr(pcpu_id);
+	vmx_on();
 	CPU_IRQ_ENABLE();
 
 	/* restore the default main entry */
-	*pmain_entry = pmain_entry_saved;
+	stac();
+	write_trampoline_sym(main_entry, pmain_entry_saved);
+	clac();
 
 	/* online all APs again */
-	start_cpus();
-
-	/* jump back to vm */
-	resume_vm_from_s3(vm, guest_wakeup_vec32);
-
-	return 0;
+	if (!start_pcpus(AP_MASK)) {
+		panic("Failed to start all APs!");
+	}
 }

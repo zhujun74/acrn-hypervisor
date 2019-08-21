@@ -37,7 +37,7 @@
 #define RPMB_SIM_MODE       1
 #define RPMB_BLOCK_SIZE     256
 #define RPMB_FRAME_SIZE     512
-#define RPMB_PHY_PATH_NAME  "/dev/rpmb0"
+#define RPMB_PHY_PATH_NAME  "/dev/rpmbmux"
 #define RPMB_SIM_PATH_NAME  "/data/rpmbfile"
 #define SEQ_CMD_MAX         3	/*support up to 3 cmds*/
 
@@ -188,7 +188,7 @@ int
 rpmb_get_counter(__u8 mode, __u8 *key, __u32 *counter, __u16 *result);
 
 #define RPMB_IOC_REQ_CMD _IOWR(0xB5, 80, struct rpmb_ioc_req_cmd)
-#define RPMB_IOC_SEQ_CMD _IOWR(0xB5, 81, struct rpmb_ioc_seq_cmd)
+#define RPMB_IOC_SEQ_CMD _IOWR(0xB5, 82, struct rpmb_ioc_seq_cmd)
 
 __u16 rpmb_get_blocks(void);
 

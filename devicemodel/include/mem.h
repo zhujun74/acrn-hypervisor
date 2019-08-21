@@ -45,14 +45,14 @@ struct mem_range {
 };
 #define	MEM_F_READ		0x1
 #define	MEM_F_WRITE		0x2
-#define	MEM_F_RW		0x3
+#define	MEM_F_RW		(MEM_F_READ | MEM_F_WRITE)
 #define	MEM_F_IMMUTABLE		0x4	/* mem_range cannot be unregistered */
 
-void	init_mem(void);
 int	emulate_mem(struct vmctx *ctx, struct mmio_request *mmio_req);
 int	register_mem(struct mem_range *memp);
 int	register_mem_fallback(struct mem_range *memp);
 int	unregister_mem(struct mem_range *memp);
 int	unregister_mem_fallback(struct mem_range *memp);
+void	init_mem(void);
 
 #endif	/* _MEM_H_ */

@@ -18,7 +18,11 @@
 #define USB_EP_PID(d) (USB_EP_ADDR(d) & USB_DIR_IN ? TOKEN_IN : TOKEN_OUT)
 #define USB_EP_TYPE(d) (USB_EP_ATTR(d) & 0x3)
 #define USB_EP_NR(d) (USB_EP_ADDR(d) & 0xF)
+#define USB_EP_MAXP(d) ((d)->wMaxPacketSize)
 #define USB_EP_ERR_TYPE 0xFF
+
+#define USB_EP_MAXP_SZ(m) ((m) & 0x7ff)
+#define USB_EP_MAXP_MT(m) (((m) >> 11) & 0x3)
 
 enum {
 	USB_INFO_VERSION,
@@ -32,18 +36,15 @@ enum {
 struct usb_dev_ep {
 	uint8_t pid;
 	uint8_t type;
+	uint16_t maxp;
 };
 
 struct usb_dev {
 	/* physical device info */
+	struct usb_native_devinfo info;
 	int addr;
 	int version;
-	int speed;
 	int configuration;
-	uint8_t port;
-	uint8_t bus;
-	uint8_t pid;
-	uint16_t vid;
 
 	/* interface info */
 	int if_num;
@@ -55,8 +56,7 @@ struct usb_dev {
 	struct usb_dev_ep epo[USB_NUM_ENDPOINT];
 
 	/* libusb data */
-	libusb_device           *ldev;
-	libusb_device_handle    *handle;
+	libusb_device_handle *handle;
 };
 
 /*
@@ -79,7 +79,7 @@ struct usb_dev_req {
 	int     blk_count;
 
 	struct usb_data_xfer *xfer;
-	struct libusb_transfer *libusb_xfer;
+	struct libusb_transfer *trn;
 	struct usb_data_xfer_block *setup_blk;
 };
 
@@ -106,6 +106,10 @@ struct usb_dev_sys_ctx_info {
 	usb_dev_sys_cb disconn_cb;
 	usb_dev_sys_cb notify_cb;
 	usb_dev_sys_cb intr_cb;
+	usb_dev_sys_cb lock_ep_cb;
+	usb_dev_sys_cb unlock_ep_cb;
+
+	libusb_device **devlist;
 
 	/*
 	 * private data from HCD layer
@@ -116,6 +120,8 @@ struct usb_dev_sys_ctx_info {
 /* intialize the usb_dev subsystem and register callbacks for HCD layer */
 int usb_dev_sys_init(usb_dev_sys_cb conn_cb, usb_dev_sys_cb disconn_cb,
 		usb_dev_sys_cb notify_cb, usb_dev_sys_cb intr_cb,
+		usb_dev_sys_cb lock_ep_cb,
+		usb_dev_sys_cb unlock_ep_cb,
 		void *hci_data, int log_level);
 void usb_dev_sys_deinit(void);
 void *usb_dev_init(void *pdata, char *opt);

@@ -44,18 +44,6 @@ static struct {
 	int			ptr_priority;
 } console;
 
-void
-console_init(int w, int h, void *fbaddr)
-{
-	console.gc = gc_init(w, h, fbaddr);
-}
-
-void
-console_set_fbaddr(void *fbaddr)
-{
-	gc_set_fbaddr(console.gc, fbaddr);
-}
-
 struct gfx_ctx_image *
 console_get_image(void)
 {
@@ -64,20 +52,6 @@ console_get_image(void)
 	image = gc_get_image(console.gc);
 
 	return image;
-}
-
-void
-console_fb_register(fb_render_func_t render_cb, void *arg)
-{
-	console.fb_render_cb = render_cb;
-	console.fb_arg = arg;
-}
-
-void
-console_refresh(void)
-{
-	if (console.fb_render_cb)
-		(*console.fb_render_cb)(console.gc, console.fb_arg);
 }
 
 void
@@ -114,18 +88,4 @@ console_ptr_unregister()
 	console.ptr_event_cb = NULL;
 	console.ptr_arg = NULL;
 	console.ptr_priority = 0;
-}
-
-void
-console_key_event(int down, uint32_t keysym)
-{
-	if (console.kbd_event_cb)
-		(*console.kbd_event_cb)(down, keysym, console.kbd_arg);
-}
-
-void
-console_ptr_event(uint8_t button, int x, int y)
-{
-	if (console.ptr_event_cb)
-		(*console.ptr_event_cb)(button, x, y, console.ptr_arg);
 }

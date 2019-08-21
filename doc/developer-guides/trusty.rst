@@ -1,7 +1,7 @@
 .. _trusty_tee:
 
-Trusty TEE on ACRN
-##################
+Trusty TEE
+##########
 
 Introduction
 ************

@@ -64,15 +64,16 @@ static uint16_t get_rpmb_blocks(void)
 	return rpmb_get_blocks();
 }
 
-//TODO: hardcode keybox size. It will be read from keybox header from RPMB.
+/* Common area of RPMB refers to the start area of RPMB
+ * shared among all UOS with RO access.
+ * It's predefined to 32KB in size which contains:
+ * AttKB(up to 16KB), RPMB info header (256B)
+ * and the remaining size for future uasge.
+ */
 static uint16_t get_common_blocks(void)
 {
-	uint16_t kb_blocks;
-	uint32_t kb_size = 15872;
-
-	kb_blocks = (kb_size + (RPMB_BLOCK_SIZE -1)) / RPMB_BLOCK_SIZE;
-	//reserve for simulated rpmb + KBox header + padding
-	return kb_blocks + 1 + 1 + 1;
+	uint16_t common_size = 32 * 1024;
+	return common_size / RPMB_BLOCK_SIZE;
 }
 
 static uint16_t get_accessible_blocks(void)
@@ -180,6 +181,7 @@ static int rpmb_check_frame(const char *cmd_str, int *err,
 {
 	uint32_t i;
 	uint8_t mac[32];
+	size_t len;
 
 	for (i = 0; i < frame_cnt; i++) {
 		if (write_counter && *write_counter != swap32(frames[i].write_counter)) {
@@ -203,7 +205,11 @@ static int rpmb_check_frame(const char *cmd_str, int *err,
 		return -1;
 	}
 
-	if (addr && !memcmp(cmd_str, WRITE_DATA_STR, sizeof(WRITE_DATA_STR))) {
+	len = strnlen(cmd_str, sizeof(WRITE_DATA_STR)) + 1;
+	if (len > sizeof(WRITE_DATA_STR))
+		len = sizeof(WRITE_DATA_STR);
+
+	if (addr && !memcmp(cmd_str, WRITE_DATA_STR, len)) {
 		if (*addr < get_common_blocks()) {
 			*err = RPMB_RES_WRITE_FAILURE;
 			DPRINTF(("%s: Common block is read only\n", cmd_str));

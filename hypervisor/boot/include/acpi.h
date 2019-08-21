@@ -7,6 +7,8 @@
 #ifndef ACPI_H
 #define ACPI_H
 
+#include <vm_configurations.h>
+
 struct acpi_table_header {
 	/* ASCII table signature */
 	char                    signature[4];
@@ -28,7 +30,14 @@ struct acpi_table_header {
 	uint32_t                asl_compiler_revision;
 };
 
-uint16_t parse_madt(uint8_t *lapic_id_base);
+void *get_acpi_tbl(const char *signature);
 
-void *get_dmar_table(void);
+struct ioapic_info;
+uint16_t parse_madt(uint32_t lapic_id_array[CONFIG_MAX_PCPU_NUM]);
+uint16_t parse_madt_ioapic(struct ioapic_info *ioapic_id_array);
+
+#ifdef CONFIG_ACPI_PARSE_ENABLED
+void acpi_fixup(void);
+#endif
+
 #endif /* !ACPI_H */

@@ -35,12 +35,14 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
+#include <string.h>
 #include <pthread.h>
 
 #include "vmm.h"
 #include "mem.h"
 #include "tree.h"
+
+#define MEMNAMESZ (80)
 
 struct mmio_rb_range {
 	RB_ENTRY(mmio_rb_range)	mr_link;	/* RB tree links */
@@ -49,17 +51,15 @@ struct mmio_rb_range {
 	uint64_t                mr_end;
 };
 
-struct mmio_rb_tree;
-RB_PROTOTYPE(mmio_rb_tree, mmio_rb_range, mr_link, mmio_rb_range_compare);
-
-RB_HEAD(mmio_rb_tree, mmio_rb_range) mmio_rb_root, mmio_rb_fallback;
+static RB_HEAD(mmio_rb_tree, mmio_rb_range) mmio_rb_root, mmio_rb_fallback;
+RB_PROTOTYPE_STATIC(mmio_rb_tree, mmio_rb_range, mr_link, mmio_rb_range_compare);
 
 /*
  * Per-VM cache. Since most accesses from a vCPU will be to
  * consecutive addresses in a range, it makes sense to cache the
  * result of a lookup.
  */
-static struct mmio_rb_range	*mmio_hint;
+static struct mmio_rb_range	*mmio_hint __aligned(sizeof(struct mmio_rb_range *));
 
 static pthread_rwlock_t mmio_rwlock;
 
@@ -91,7 +91,6 @@ mmio_rb_lookup(struct mmio_rb_tree *rbt, uint64_t addr,
 	return -1;
 }
 
-__attribute__((unused))
 static int
 mmio_rb_add(struct mmio_rb_tree *rbt, struct mmio_rb_range *new)
 {
@@ -127,9 +126,8 @@ mmio_rb_dump(struct mmio_rb_tree *rbt)
 }
 #endif
 
-RB_GENERATE(mmio_rb_tree, mmio_rb_range, mr_link, mmio_rb_range_compare);
+RB_GENERATE_STATIC(mmio_rb_tree, mmio_rb_range, mr_link, mmio_rb_range_compare);
 
-__attribute__((unused))
 static int
 mem_read(void *ctx, int vcpu, uint64_t gpa, uint64_t *rval, int size, void *arg)
 {
@@ -141,7 +139,6 @@ mem_read(void *ctx, int vcpu, uint64_t gpa, uint64_t *rval, int size, void *arg)
 	return error;
 }
 
-__attribute__((unused))
 static int
 mem_write(void *ctx, int vcpu, uint64_t gpa, uint64_t wval, int size, void *arg)
 {
@@ -158,28 +155,30 @@ emulate_mem(struct vmctx *ctx, struct mmio_request *mmio_req)
 {
 	uint64_t paddr = mmio_req->address;
 	int size = mmio_req->size;
-	struct mmio_rb_range *entry = NULL;
+	struct mmio_rb_range *hint, *entry = NULL;
 	int err;
 
 	pthread_rwlock_rdlock(&mmio_rwlock);
+
 	/*
 	 * First check the per-VM cache
 	 */
-	if (mmio_hint && paddr >= mmio_hint->mr_base &&
-			paddr <= mmio_hint->mr_end)
-		entry = mmio_hint;
+	hint = mmio_hint;
 
-	if (entry == NULL) {
-		if (mmio_rb_lookup(&mmio_rb_root, paddr, &entry) == 0)
-			/* Update the per-VMU cache */
-			mmio_hint = entry;
-		else if (mmio_rb_lookup(&mmio_rb_fallback, paddr, &entry)) {
-			pthread_rwlock_unlock(&mmio_rwlock);
-			return -ESRCH;
-		}
+	if (hint && paddr >= hint->mr_base && paddr <= hint->mr_end)
+		entry = hint;
+	else if (mmio_rb_lookup(&mmio_rb_root, paddr, &entry) == 0)
+		/* Update the per-VM cache */
+		mmio_hint = entry;
+	else if (mmio_rb_lookup(&mmio_rb_fallback, paddr, &entry)) {
+		pthread_rwlock_unlock(&mmio_rwlock);
+		return -ESRCH;
 	}
 
-	assert(entry != NULL);
+	pthread_rwlock_unlock(&mmio_rwlock);
+
+	if (entry == NULL)
+		return -EINVAL;
 
 	if (mmio_req->direction == REQUEST_READ)
 		err = mem_read(ctx, 0, paddr, (uint64_t *)&mmio_req->value,
@@ -187,8 +186,6 @@ emulate_mem(struct vmctx *ctx, struct mmio_request *mmio_req)
 	else
 		err = mem_write(ctx, 0, paddr, mmio_req->value,
 				size, &entry->mr_param);
-
-	pthread_rwlock_unlock(&mmio_rwlock);
 
 	return err;
 }
@@ -199,7 +196,7 @@ register_mem_int(struct mmio_rb_tree *rbt, struct mem_range *memp)
 	struct mmio_rb_range *entry, *mrp;
 	int err;
 
-	err = 0;
+	err = -1;
 
 	mrp = malloc(sizeof(struct mmio_rb_range));
 
@@ -213,8 +210,7 @@ register_mem_int(struct mmio_rb_tree *rbt, struct mem_range *memp)
 		pthread_rwlock_unlock(&mmio_rwlock);
 		if (err)
 			free(mrp);
-	} else
-		err = -1;
+	}
 
 	return err;
 }
@@ -231,25 +227,28 @@ register_mem_fallback(struct mem_range *memp)
 	return register_mem_int(&mmio_rb_fallback, memp);
 }
 
-int
-unregister_mem_fallback(struct mem_range *memp)
+static int
+unregister_mem_int(struct mmio_rb_tree *rbt, struct mem_range *memp)
 {
 	struct mem_range *mr;
 	struct mmio_rb_range *entry = NULL;
 	int err;
 
 	pthread_rwlock_wrlock(&mmio_rwlock);
-	err = mmio_rb_lookup(&mmio_rb_fallback, memp->base, &entry);
+	err = mmio_rb_lookup(rbt, memp->base, &entry);
 	if (err == 0) {
 		mr = &entry->mr_param;
-		assert(mr->name == memp->name);
-		assert(mr->base == memp->base && mr->size == memp->size);
-		assert((mr->flags & MEM_F_IMMUTABLE) == 0);
-		RB_REMOVE(mmio_rb_tree, &mmio_rb_fallback, entry);
+		if (strncmp(mr->name, memp->name, MEMNAMESZ)
+			|| (mr->base != memp->base) || (mr->size != memp->size)
+			|| ((mr->flags & MEM_F_IMMUTABLE) != 0)) {
+			err = -1;
+		} else {
+			RB_REMOVE(mmio_rb_tree, rbt, entry);
 
-		/* flush Per-VM cache */
-		if (mmio_hint == entry)
-			mmio_hint = NULL;
+			/* flush Per-VM cache */
+			if (mmio_hint == entry)
+				mmio_hint = NULL;
+		}
 	}
 	pthread_rwlock_unlock(&mmio_rwlock);
 
@@ -262,29 +261,13 @@ unregister_mem_fallback(struct mem_range *memp)
 int
 unregister_mem(struct mem_range *memp)
 {
-	struct mem_range *mr;
-	struct mmio_rb_range *entry = NULL;
-	int err;
+	return unregister_mem_int(&mmio_rb_root, memp);
+}
 
-	pthread_rwlock_wrlock(&mmio_rwlock);
-	err = mmio_rb_lookup(&mmio_rb_root, memp->base, &entry);
-	if (err == 0) {
-		mr = &entry->mr_param;
-		assert(mr->name == memp->name);
-		assert(mr->base == memp->base && mr->size == memp->size);
-		assert((mr->flags & MEM_F_IMMUTABLE) == 0);
-		RB_REMOVE(mmio_rb_tree, &mmio_rb_root, entry);
-
-		/* flush Per-VM cache */
-		if (mmio_hint == entry)
-			mmio_hint = NULL;
-	}
-	pthread_rwlock_unlock(&mmio_rwlock);
-
-	if (entry)
-		free(entry);
-
-	return err;
+int
+unregister_mem_fallback(struct mem_range *memp)
+{
+	return unregister_mem_int(&mmio_rb_fallback, memp);
 }
 
 void

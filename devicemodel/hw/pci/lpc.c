@@ -31,13 +31,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <sys/errno.h>
 
+#include "dm.h"
 #include "vmmapi.h"
 #include "acpi.h"
 #include "inout.h"
 #include "pci_core.h"
 #include "irq.h"
 #include "lpc.h"
+#include "pit.h"
 #include "uart_core.h"
 
 #define	IO_ICU1		0x20
@@ -49,9 +52,6 @@ SET_DECLARE(lpc_sysres_set, struct lpc_sysres);
 #define	ELCR_PORT	0x4d0
 SYSRES_IO(ELCR_PORT, 2);
 
-#define	IO_TIMER1_PORT	0x40
-
-#define	NMISC_PORT	0x61
 SYSRES_IO(NMISC_PORT, 1);
 
 static struct pci_vdev *lpc_bridge;
@@ -103,12 +103,15 @@ lpc_uart_intr_assert(void *arg)
 {
 	struct lpc_uart_vdev *lpc_uart = arg;
 
-	assert(lpc_uart->irq >= 0);
+	if (lpc_uart->irq < 0) {
+		pr_warn("%s: Invalid irq pin lpc_uart\n", __func__);
+		return;
+	}
 
 	if (lpc_bridge)
-		vm_isa_pulse_irq(lpc_bridge->vmctx,
+		vm_set_gsi_irq(lpc_bridge->vmctx,
 				 lpc_uart->irq,
-				 lpc_uart->irq);
+				 GSI_RAISING_PULSE);
 }
 
 static void
@@ -176,7 +179,6 @@ lpc_deinit(struct vmctx *ctx)
 		unregister_inout(&iop);
 
 		uart_release_backend(lpc_uart->uart, lpc_uart->opts);
-		uart_deinit(lpc_uart->uart);
 		uart_legacy_dealloc(unit);
 		lpc_uart->uart = NULL;
 		lpc_uart->enabled = 0;
@@ -206,18 +208,9 @@ lpc_init(struct vmctx *ctx)
 		}
 		pci_irq_reserve(lpc_uart->irq);
 
-		lpc_uart->uart = uart_init(lpc_uart_intr_assert,
-				    lpc_uart_intr_deassert, lpc_uart);
-
-		if (lpc_uart->uart < 0) {
-			uart_legacy_dealloc(unit);
-			goto init_failed;
-		}
-
-		if (uart_set_backend(lpc_uart->uart, lpc_uart->opts) != 0) {
-			fprintf(stderr, "Unable to initialize backend '%s' "
-			    "for LPC device %s\n", lpc_uart->opts, name);
-			uart_deinit(lpc_uart->uart);
+		lpc_uart->uart = uart_set_backend(lpc_uart_intr_assert, lpc_uart_intr_deassert,
+			lpc_uart, lpc_uart->opts);
+		if (lpc_uart->uart == NULL) {
 			uart_legacy_dealloc(unit);
 			goto init_failed;
 		}
@@ -231,7 +224,8 @@ lpc_init(struct vmctx *ctx)
 		iop.arg = lpc_uart;
 
 		error = register_inout(&iop);
-		assert(error == 0);
+		if (error)
+			goto init_failed;
 		lpc_uart->enabled = 1;
 	}
 
@@ -273,20 +267,21 @@ pci_lpc_write_dsdt(struct pci_vdev *dev)
 		ldp->handler();
 	}
 
-	dsdt_line("");
-	dsdt_line("Device (PIC)");
-	dsdt_line("{");
-	dsdt_line("  Name (_HID, EisaId (\"PNP0000\"))");
-	dsdt_line("  Name (_CRS, ResourceTemplate ()");
-	dsdt_line("  {");
-	dsdt_indent(2);
-	dsdt_fixed_ioport(IO_ICU1, 2);
-	dsdt_fixed_ioport(IO_ICU2, 2);
-	dsdt_fixed_irq(2);
-	dsdt_unindent(2);
-	dsdt_line("  })");
-	dsdt_line("}");
-
+	if(!is_rtvm) {
+		dsdt_line("");
+		dsdt_line("Device (PIC)");
+		dsdt_line("{");
+		dsdt_line("  Name (_HID, EisaId (\"PNP0000\"))");
+		dsdt_line("  Name (_CRS, ResourceTemplate ()");
+		dsdt_line("  {");
+		dsdt_indent(2);
+		dsdt_fixed_ioport(IO_ICU1, 2);
+		dsdt_fixed_ioport(IO_ICU2, 2);
+		dsdt_fixed_irq(2);
+		dsdt_unindent(2);
+		dsdt_line("  })");
+		dsdt_line("}");
+	}
 	dsdt_line("");
 	dsdt_line("Device (TIMR)");
 	dsdt_line("{");

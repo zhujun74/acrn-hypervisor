@@ -20,6 +20,9 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('.'))
 
+RELEASE = ""
+if "RELEASE" in os.environ:
+   RELEASE = os.environ["RELEASE"]
 
 # -- General configuration ------------------------------------------------
 
@@ -32,7 +35,14 @@ sys.path.insert(0, os.path.abspath('.'))
 # ones.
 
 sys.path.insert(0, os.path.join(os.path.abspath('.'), 'extensions'))
-extensions = ['breathe', 'sphinx.ext.graphviz', 'kerneldoc']
+extensions = ['breathe', 'sphinx.ext.graphviz', 'sphinx.ext.extlinks',
+              'kerneldoc', 'eager_only', 'html_redirects']
+
+# extlinks provides a macro template
+
+extlinks = {'acrn-commit': ('https://github.com/projectacrn/acrn-hypervisor/commit/%s', ''),
+            'acrn-issue': ('https://github.com/projectacrn/acrn-hypervisor/issues/%s', '')
+           }
 
 # kernel-doc extension configuration for running Sphinx directly (e.g. by Read
 # the Docs). In a normal build, these are supplied from the Makefile via command
@@ -62,7 +72,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Project ACRN™'
-copyright = u'2018, Project ACRN'
+copyright = u'2019, Project ACRN'
 author = u'Project ARCN developers'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -79,7 +89,7 @@ try:
     version_major = None
     version_minor = None
     version_rc = None
-    for line in open(os.path.normpath("../hypervisor/Makefile")) :
+    for line in open(os.path.normpath("../VERSION")) :
         # remove comments
         line = line.split('#', 1)[0]
         line = line.rstrip()
@@ -89,19 +99,19 @@ try:
               version_major = val
            if key == 'MINOR_VERSION':
               version_minor = val
-           if key == 'RC_VERSION':
+           if key == 'EXTRA_VERSION':
               version_rc = val
            if version_major and version_minor and version_rc :
               break
 except:
     pass
 finally:
-    if version_major and version_minor and version_rc :
+    if version_major and version_minor :
         version = release = "v " + version_major + '.' + version_minor
-        if int(version_rc) > 0 :
-           version = release = version + '-rc' + version_rc
+        if version_rc :
+          version = release = version + version_rc
     else:
-        sys.stderr.write('Warning: Could not extract hypervisor version from Makefile\n')
+        sys.stderr.write('Warning: Could not extract hypervisor version from VERSION file\n')
         version = release = "unknown"
 
 
@@ -122,7 +132,7 @@ language = None
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This patterns also effect to html_static_path and html_extra_path
-exclude_patterns = ['_build' ]
+exclude_patterns = ['_build', 'misc/README.rst' ]
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = 'sphinx'
@@ -171,13 +181,18 @@ else:
 
 if tags.has('release'):
    current_version = version
+   if RELEASE:
+      version = current_version = RELEASE
 else:
    version = current_version = "latest"
 
 html_context = {
    'current_version': current_version,
    'versions': ( ("latest", "/latest/"),
-#                 ("0.1-rc4", "/0.1-rc4/"),
+                 ("1.2", "/1.2/"),
+                 ("1.1", "/1.1/"),
+                 ("1.0", "/1.0/"),
+                 ("0.8", "/0.8/"),
                )
     }
 
@@ -202,6 +217,7 @@ html_static_path = ['static']
 
 def setup(app):
    app.add_stylesheet("acrn-custom.css")
+   app.add_javascript("acrn-custom.js")
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -285,3 +301,19 @@ breathe_projects = {
 }
 breathe_default_project = "Project ACRN"
 breathe_default_members = ('members', 'undoc-members', 'content-only')
+
+
+# Custom added feature to allow redirecting old URLs (caused by
+# reorganizing doc directories)
+#
+# list of tuples (old_url, new_url) for pages to redirect
+#
+# URLs must be relative to document root (with NO leading slash),
+# and without the html extension)
+html_redirect_pages = [
+   ('developer-guides/index', 'contribute'),
+   ('getting-started/index', 'try'),
+   ('user-guides/index', 'develop'),
+   ('hardware', 'reference/hardware'),
+   ('release_notes', 'release_notes/index')
+   ]

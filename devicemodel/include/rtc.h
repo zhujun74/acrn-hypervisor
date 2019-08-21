@@ -33,16 +33,19 @@
 
 #define IO_RTC	0x070	/* RTC */
 
+#define	RTC_LMEM_LSB	0x34
+#define	RTC_LMEM_MSB	0x35
+#define	RTC_HMEM_LSB	0x5b
+#define	RTC_HMEM_SB	0x5c
+#define	RTC_HMEM_MSB	0x5d
+
 struct vrtc;
 struct vmctx;
 
 int vrtc_init(struct vmctx *ctx);
 void vrtc_enable_localtime(int l_time);
 void vrtc_deinit(struct vmctx *ctx);
-void vrtc_reset(struct vrtc *vrtc);
-time_t vrtc_get_time(struct vrtc *vrtc);
 int vrtc_set_time(struct vrtc *vrtc, time_t secs);
-int vrtc_nvram_read(struct vrtc *vrtc, int offset, uint8_t *retval);
 int vrtc_nvram_write(struct vrtc *vrtc, int offset, uint8_t value);
 int vrtc_addr_handler(struct vmctx *ctx, int vcpu, int in, int port,
 		      int bytes, uint32_t *eax, void *arg);

@@ -24,30 +24,43 @@
 /*
  * IO request
  */
-#define VHM_REQUEST_MAX 16
+#define VHM_REQUEST_MAX 16U
 
-#define REQ_STATE_PENDING	0
-#define REQ_STATE_SUCCESS	1
-#define REQ_STATE_PROCESSING	2
-#define REQ_STATE_FAILED	-1
+#define REQ_STATE_FREE          3U
+#define REQ_STATE_PENDING	0U
+#define REQ_STATE_COMPLETE	1U
+#define REQ_STATE_PROCESSING	2U
 
-#define REQ_PORTIO	0
-#define REQ_MMIO	1
-#define REQ_PCICFG	2
-#define REQ_WP		3
+#define REQ_PORTIO	0U
+#define REQ_MMIO	1U
+#define REQ_PCICFG	2U
+#define REQ_WP		3U
 
-#define REQUEST_READ	0
-#define REQUEST_WRITE	1
+#define REQUEST_READ	0U
+#define REQUEST_WRITE	1U
 
 /* IOAPIC device model info */
 #define VIOAPIC_RTE_NUM	48U  /* vioapic pins */
 
-#if VIOAPIC_RTE_NUM < 24
+#if VIOAPIC_RTE_NUM < 24U
 #error "VIOAPIC_RTE_NUM must be larger than 23"
 #endif
 
 /* Generic VM flags from guest OS */
-#define SECURE_WORLD_ENABLED    (1UL<<0)  /* Whether secure world is enabled */
+#define GUEST_FLAG_SECURE_WORLD_ENABLED		(1UL << 0U)	/* Whether secure world is enabled */
+#define GUEST_FLAG_LAPIC_PASSTHROUGH		(1UL << 1U)  	/* Whether LAPIC is passed through */
+#define GUEST_FLAG_IO_COMPLETION_POLLING	(1UL << 2U)  	/* Whether need hypervisor poll IO completion */
+#define GUEST_FLAG_CLOS_REQUIRED		(1UL << 3U)     /* Whether CLOS is required */
+#define GUEST_FLAG_HIDE_MTRR			(1UL << 4U)  	/* Whether hide MTRR from VM */
+#define GUEST_FLAG_RT				(1UL << 5U)     /* Whether the vm is RT-VM */
+#define GUEST_FLAG_HIGHEST_SEVERITY		(1UL << 6U)     /* Whether has the highest severity */
+
+/* TODO: We may need to get this addr from guest ACPI instead of hardcode here */
+#define VIRTUAL_PM1A_CNT_ADDR		0x404U
+#define	VIRTUAL_PM1A_SCI_EN		0x0001
+#define VIRTUAL_PM1A_SLP_TYP		0x1c00U
+#define VIRTUAL_PM1A_SLP_EN		0x2000U
+#define	VIRTUAL_PM1A_ALWAYS_ZERO	0xc003
 
 /**
  * @brief Hypercall
@@ -56,61 +69,266 @@
  * @{
  */
 
+/**
+ * @brief Representation of a MMIO request
+ */
 struct mmio_request {
+	/**
+	 * @brief Direction of the access
+	 *
+	 * Either \p REQUEST_READ or \p REQUEST_WRITE.
+	 */
 	uint32_t direction;
+
+	/**
+	 * @brief reserved
+	 */
 	uint32_t reserved;
-	int64_t address;
-	int64_t size;
-	int64_t value;
+
+	/**
+	 * @brief Address of the I/O access
+	 */
+	uint64_t address;
+
+	/**
+	 * @brief Width of the I/O access in byte
+	 */
+	uint64_t size;
+
+	/**
+	 * @brief The value read for I/O reads or to be written for I/O writes
+	 */
+	uint64_t value;
 } __aligned(8);
 
+/**
+ * @brief Representation of a port I/O request
+ */
 struct pio_request {
+	/**
+	 * @brief Direction of the access
+	 *
+	 * Either \p REQUEST_READ or \p REQUEST_WRITE.
+	 */
 	uint32_t direction;
+
+	/**
+	 * @brief reserved
+	 */
 	uint32_t reserved;
-	int64_t address;
-	int64_t size;
-	int32_t value;
+
+	/**
+	 * @brief Port address of the I/O access
+	 */
+	uint64_t address;
+
+	/**
+	 * @brief Width of the I/O access in byte
+	 */
+	uint64_t size;
+
+	/**
+	 * @brief The value read for I/O reads or to be written for I/O writes
+	 */
+	uint32_t value;
 } __aligned(8);
 
+/**
+ * @brief Representation of a PCI configuration space access
+ */
 struct pci_request {
+	/**
+	 * @brief Direction of the access
+	 *
+	 * Either \p REQUEST_READ or \p REQUEST_WRITE.
+	 */
 	uint32_t direction;
+
+	/**
+	 * @brief Reserved
+	 */
 	uint32_t reserved[3];/* need keep same header fields with pio_request */
+
+	/**
+	 * @brief Width of the I/O access in byte
+	 */
 	int64_t size;
+
+	/**
+	 * @brief The value read for I/O reads or to be written for I/O writes
+	 */
 	int32_t value;
+
+	/**
+	 * @brief The \p bus part of the BDF of the device
+	 */
 	int32_t bus;
+
+	/**
+	 * @brief The \p device part of the BDF of the device
+	 */
 	int32_t dev;
+
+	/**
+	 * @brief The \p function part of the BDF of the device
+	 */
 	int32_t func;
+
+	/**
+	 * @brief The register to be accessed in the configuration space
+	 */
 	int32_t reg;
 } __aligned(8);
 
-/* vhm_request are 256Bytes aligned */
+union vhm_io_request {
+	struct pio_request pio;
+	struct pci_request pci;
+	struct mmio_request mmio;
+	int64_t reserved1[8];
+};
+
+/**
+ * @brief 256-byte VHM requests
+ *
+ * The state transitions of a VHM request are:
+ *
+ *    FREE -> PENDING -> PROCESSING -> COMPLETE -> FREE -> ...
+ *
+ * When a request is in COMPLETE or FREE state, the request is owned by the
+ * hypervisor. SOS (VHM or DM) shall not read or write the internals of the
+ * request except the state.
+ *
+ * When a request is in PENDING or PROCESSING state, the request is owned by
+ * SOS. The hypervisor shall not read or write the request other than the state.
+ *
+ * Based on the rules above, a typical VHM request lifecycle should looks like
+ * the following.
+ *
+ * @verbatim embed:rst:leading-asterisk
+ *
+ * +-----------------------+-------------------------+----------------------+
+ * | SOS vCPU 0            | SOS vCPU x              | UOS vCPU y           |
+ * +=======================+=========================+======================+
+ * |                       |                         | Hypervisor:          |
+ * |                       |                         |                      |
+ * |                       |                         | - Fill in type,      |
+ * |                       |                         |   addr, etc.         |
+ * |                       |                         | - Pause UOS vCPU y   |
+ * |                       |                         | - Set state to       |
+ * |                       |                         |   PENDING (a)        |
+ * |                       |                         | - Fire upcall to     |
+ * |                       |                         |   SOS vCPU 0         |
+ * |                       |                         |                      |
+ * +-----------------------+-------------------------+----------------------+
+ * | VHM:                  |                         |                      |
+ * |                       |                         |                      |
+ * | - Scan for pending    |                         |                      |
+ * |   requests            |                         |                      |
+ * | - Set state to        |                         |                      |
+ * |   PROCESSING (b)      |                         |                      |
+ * | - Assign requests to  |                         |                      |
+ * |   clients (c)         |                         |                      |
+ * |                       |                         |                      |
+ * +-----------------------+-------------------------+----------------------+
+ * |                       | Client:                 |                      |
+ * |                       |                         |                      |
+ * |                       | - Scan for assigned     |                      |
+ * |                       |   requests              |                      |
+ * |                       | - Handle the            |                      |
+ * |                       |   requests (d)          |                      |
+ * |                       | - Set state to COMPLETE |                      |
+ * |                       | - Notify the hypervisor |                      |
+ * |                       |                         |                      |
+ * +-----------------------+-------------------------+----------------------+
+ * |                       | Hypervisor:             |                      |
+ * |                       |                         |                      |
+ * |                       | - resume UOS vCPU y     |                      |
+ * |                       |   (e)                   |                      |
+ * |                       |                         |                      |
+ * +-----------------------+-------------------------+----------------------+
+ * |                       |                         | Hypervisor:          |
+ * |                       |                         |                      |
+ * |                       |                         | - Post-work (f)      |
+ * |                       |                         | - set state to FREE  |
+ * |                       |                         |                      |
+ * +-----------------------+-------------------------+----------------------+
+ *
+ * @endverbatim
+ *
+ * Note that the following shall hold.
+ *
+ *   1. (a) happens before (b)
+ *   2. (c) happens before (d)
+ *   3. (e) happens before (f)
+ *   4. One vCPU cannot trigger another I/O request before the previous one has
+ *      completed (i.e. the state switched to FREE)
+ *
+ * Accesses to the state of a vhm_request shall be atomic and proper barriers
+ * are needed to ensure that:
+ *
+ *   1. Setting state to PENDING is the last operation when issuing a request in
+ *      the hypervisor, as the hypervisor shall not access the request any more.
+ *
+ *   2. Due to similar reasons, setting state to COMPLETE is the last operation
+ *      of request handling in VHM or clients in SOS.
+ */
 struct vhm_request {
-	/* offset: 0bytes - 63bytes */
+	/**
+	 * @brief Type of this request.
+	 *
+	 * Byte offset: 0.
+	 */
 	uint32_t type;
-	int32_t reserved0[15];
 
-	/* offset: 64bytes-127bytes */
-	union {
-		struct pio_request pio_request;
-		struct pci_request pci_request;
-		struct mmio_request mmio_request;
-		int64_t reserved1[8];
-	} reqs;
+	/**
+	 * @brief Hypervisor will poll completion if set.
+	 *
+	 * Byte offset: 4.
+	 */
+	uint32_t completion_polling;
 
-	/* True: valid req which need VHM to process.
-	 * ACRN write, VHM read only
-	 **/
-	int32_t valid;
+	/**
+	 * @brief Reserved.
+	 *
+	 * Byte offset: 8.
+	 */
+	uint32_t reserved0[14];
 
-	/* the client which is distributed to handle this request */
+	/**
+	 * @brief Details about this request.
+	 *
+	 * For REQ_PORTIO, this has type
+	 * pio_request. For REQ_MMIO and REQ_WP, this has type mmio_request. For
+	 * REQ_PCICFG, this has type pci_request.
+	 *
+	 * Byte offset: 64.
+	 */
+	union vhm_io_request reqs;
+
+	/**
+	 * @brief Reserved.
+	 *
+	 * Byte offset: 128.
+	 */
+	uint32_t reserved1;
+
+	/**
+	 * @brief The client which is distributed to handle this request.
+	 *
+	 * Accessed by VHM only.
+	 *
+	 * Byte offset: 132.
+	 */
 	int32_t client;
 
-	/* 1: VHM had processed and success
-	 *  0: VHM had not yet processed
-	 * -1: VHM failed to process. Invalid request
-	 * VHM write, ACRN read only
+	/**
+	 * @brief The status of this request.
+	 *
+	 * Taking REQ_STATE_xxx as values.
+	 *
+	 * Byte offset: 136.
 	 */
-	int32_t processed;
+	uint32_t processed;
 } __aligned(256);
 
 union vhm_request_buffer {
@@ -123,22 +341,31 @@ union vhm_request_buffer {
  */
 struct acrn_create_vm {
 	/** created vmid return to VHM. Keep it first field */
-	int32_t vmid;
+	uint16_t vmid;
+
+	/** Reserved */
+	uint16_t reserved0;
 
 	/** VCPU numbers this VM want to create */
-	uint32_t vcpu_num;
+	uint16_t vcpu_num;
 
-	/** the GUID of this VM */
-	uint8_t	 GUID[16];
+	/** Reserved */
+	uint16_t reserved1;
+
+	/** the UUID of this VM */
+	uint8_t	 uuid[16];
 
 	/* VM flag bits from Guest OS, now used
-	 *  SECURE_WORLD_ENABLED          (1UL<<0)
+	 *  GUEST_FLAG_SECURE_WORLD_ENABLED          (1UL<<0)
 	 */
 	uint64_t vm_flag;
 
+	uint64_t req_buf;
+
 	/** Reserved for future use*/
-	uint8_t  reserved[24];
+	uint8_t  reserved2[16];
 } __aligned(8);
+
 
 /**
  * @brief Info to create a VCPU
@@ -153,6 +380,88 @@ struct acrn_create_vcpu {
 	uint16_t pcpu_id;
 } __aligned(8);
 
+/* General-purpose register layout aligned with the general-purpose register idx
+ * when vmexit, such as vmexit due to CR access, refer to SMD Vol.3C 27-6.
+ */
+struct acrn_gp_regs {
+	uint64_t rax;
+	uint64_t rcx;
+	uint64_t rdx;
+	uint64_t rbx;
+	uint64_t rsp;
+	uint64_t rbp;
+	uint64_t rsi;
+	uint64_t rdi;
+	uint64_t r8;
+	uint64_t r9;
+	uint64_t r10;
+	uint64_t r11;
+	uint64_t r12;
+	uint64_t r13;
+	uint64_t r14;
+	uint64_t r15;
+};
+
+/* struct to define how the descriptor stored in memory.
+ * Refer SDM Vol3 3.5.1 "Segment Descriptor Tables"
+ * Figure 3-11
+ */
+struct acrn_descriptor_ptr {
+	uint16_t limit;
+	uint64_t base;
+	uint16_t reserved[3];   /* align struct size to 64bit */
+} __packed;
+
+/**
+ * @brief registers info for vcpu.
+ */
+struct acrn_vcpu_regs {
+	struct acrn_gp_regs gprs;
+	struct acrn_descriptor_ptr gdt;
+	struct acrn_descriptor_ptr idt;
+
+	uint64_t        rip;
+	uint64_t        cs_base;
+	uint64_t        cr0;
+	uint64_t        cr4;
+	uint64_t        cr3;
+	uint64_t        ia32_efer;
+	uint64_t        rflags;
+	uint64_t        reserved_64[4];
+
+	uint32_t        cs_ar;
+	uint32_t        cs_limit;
+	uint32_t        reserved_32[3];
+
+	/* don't change the order of following sel */
+	uint16_t        cs_sel;
+	uint16_t        ss_sel;
+	uint16_t        ds_sel;
+	uint16_t        es_sel;
+	uint16_t        fs_sel;
+	uint16_t        gs_sel;
+	uint16_t        ldt_sel;
+	uint16_t        tr_sel;
+
+	uint16_t        reserved_16[4];
+};
+
+/**
+ * @brief Info to set vcpu state
+ *
+ * the pamameter for HC_SET_VCPU_STATE
+ */
+struct acrn_set_vcpu_regs {
+	/** the virtual CPU ID for the VCPU to set state */
+	uint16_t vcpu_id;
+
+	/** reserved space to make cpu_state aligned to 8 bytes */
+	uint16_t reserved0[3];
+
+	/** the structure to hold vcpu state */
+	struct acrn_vcpu_regs vcpu_regs;
+} __aligned(8);
+
 /**
  * @brief Info to set ioreq buffer for a created VM
  *
@@ -163,32 +472,20 @@ struct acrn_set_ioreq_buffer {
 	uint64_t req_buf;
 } __aligned(8);
 
-/** Interrupt type for acrn_irqline: inject interrupt to IOAPIC */
-#define	ACRN_INTR_TYPE_ISA	0
-
-/** Interrupt type for acrn_irqline: inject interrupt to both PIC and IOAPIC */
-#define	ACRN_INTR_TYPE_IOAPIC	1
+/** Operation types for setting IRQ line */
+#define GSI_SET_HIGH		0U
+#define GSI_SET_LOW		1U
+#define GSI_RAISING_PULSE	2U
+#define GSI_FALLING_PULSE	3U
 
 /**
- * @brief Info to assert/deassert/pulse a virtual IRQ line for a VM
+ * @brief Info to Set/Clear/Pulse a virtual IRQ line for a VM
  *
- * the parameter for HC_ASSERT_IRQLINE/HC_DEASSERT_IRQLINE/HC_PULSE_IRQLINE
- * hypercall
+ * the parameter for HC_SET_IRQLINE hypercall
  */
-struct acrn_irqline {
-	/** interrupt type which could be IOAPIC or ISA */
-	uint32_t intr_type;
-
-	/** reserved for alignment padding */
-	uint32_t reserved;
-
-	/** pic IRQ for ISA type */
-	uint64_t pic_irq;
-
-	/** ioapic IRQ for IOAPIC & ISA TYPE,
-	 *  if -1 then this IRQ will not be injected
-	 */
-	uint64_t ioapic_irq;
+struct acrn_irqline_ops {
+	uint32_t gsi;
+	uint32_t op;
 } __aligned(8);
 
 /**
@@ -209,7 +506,13 @@ struct acrn_msi_entry {
  */
 struct acrn_nmi_entry {
 	/** virtual CPU ID to inject */
-	int64_t vcpu_id;
+	uint16_t vcpu_id;
+
+	/** Reserved */
+	uint16_t reserved0;
+
+	/** Reserved */
+	uint32_t reserved1;
 } __aligned(8);
 
 /**
@@ -248,25 +551,13 @@ struct acrn_vm_pci_msix_remap {
 	/** if the pass-through PCI device is MSI-X, this field contains
 	 *  the MSI-X entry table index
 	 */
-	int32_t msix_entry_index;
+	uint32_t msix_entry_index;
 
 	/** if the pass-through PCI device is MSI-X, this field contains
 	 *  Vector Control for MSI-X Entry, field defined in MSI-X spec
 	 */
 	uint32_t vector_ctl;
 } __aligned(8);
-
-/**
- * @brief The guest config pointer offset.
- *
- * It's designed to support passing DM config data pointer, based on it,
- * hypervisor would parse then pass DM defined configuration to GUEST VCPU
- * when booting guest VM.
- * the address 0xd0000 here is designed by DM, as it arranged all memory
- * layout below 1M, DM should make sure there is no overlap for the address
- * 0xd0000 usage.
- */
-#define GUEST_CFG_OFFSET	0xd0000
 
 /**
  * @brief Info The power state data of a VCPU.
@@ -287,14 +578,14 @@ struct acpi_generic_address {
 	uint8_t 	bit_offset;
 	uint8_t 	access_size;
 	uint64_t	address;
-} __attribute__((aligned(8)));
+} __aligned(8);
 
 struct cpu_cx_data {
 	struct acpi_generic_address cx_reg;
 	uint8_t 	type;
 	uint32_t	latency;
 	uint64_t	power;
-} __attribute__((aligned(8)));
+} __aligned(8);
 
 struct cpu_px_data {
 	uint64_t core_frequency;	/* megahertz */
@@ -303,13 +594,13 @@ struct cpu_px_data {
 	uint64_t bus_master_latency;	/* microseconds */
 	uint64_t control;		/* control value */
 	uint64_t status;		/* success indicator */
-} __attribute__((aligned(8)));
+} __aligned(8);
 
 struct acpi_sx_pkg {
 	uint8_t		val_pm1a;
 	uint8_t		val_pm1b;
 	uint16_t	reserved;
-} __attribute__((aligned(8)));
+} __aligned(8);
 
 struct pm_s_state_data {
 	struct acpi_generic_address pm1a_evt;
@@ -320,14 +611,7 @@ struct pm_s_state_data {
 	struct acpi_sx_pkg s5_pkg;
 	uint32_t *wake_vector_32;
 	uint64_t *wake_vector_64;
-}__attribute__((aligned(8)));
-
-struct acpi_info {
-	int16_t			x86_family;
-	int16_t			x86_model;
-	struct pm_s_state_data	pm_s_state;
-	/* TODO: we can add more acpi info field here if needed. */
-};
+} __aligned(8);
 
 /**
  * @brief Info PM command from DM/VHM.
@@ -342,9 +626,9 @@ struct acpi_info {
 #define PMCMD_STATE_NUM_MASK	0x0000ff00U
 #define PMCMD_TYPE_MASK		0x000000ffU
 
-#define PMCMD_VMID_SHIFT	24
-#define PMCMD_VCPUID_SHIFT	16
-#define PMCMD_STATE_NUM_SHIFT	8
+#define PMCMD_VMID_SHIFT	24U
+#define PMCMD_VCPUID_SHIFT	16U
+#define PMCMD_STATE_NUM_SHIFT	8U
 
 enum pm_cmd_type {
 	PMCMD_GET_PX_CNT,
@@ -352,6 +636,26 @@ enum pm_cmd_type {
 	PMCMD_GET_CX_CNT,
 	PMCMD_GET_CX_DATA,
 };
+
+/**
+ * @brief Info to get a VM interrupt count data
+ *
+ * the parameter for HC_VM_INTR_MONITOR hypercall
+ */
+#define MAX_PTDEV_NUM 24U
+struct acrn_intr_monitor {
+	/** sub command for intr monitor */
+	uint32_t cmd;
+	/** the count of this buffer to save */
+	uint32_t buf_cnt;
+
+	/** the buffer which save each interrupt count */
+	uint64_t buffer[MAX_PTDEV_NUM * 2];
+} __aligned(8);
+
+/** cmd for intr monitor **/
+#define INTR_CMD_GET_DATA 0U
+#define INTR_CMD_DELAY_INT 1U
 
 /**
  * @}

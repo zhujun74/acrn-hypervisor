@@ -55,7 +55,7 @@ enum {
 	XHCI_ST_EPCTX_ERROR
 };
 
-#define	XHCI_MAX_DEVICES	MIN(USB_MAX_DEVICES, 128)
+#define	XHCI_MAX_VIRT_PORTS	MIN(USB_MAX_DEVICES, 128)
 #define	XHCI_MAX_ENDPOINTS	32	/* hardcoded - do not change */
 #define	XHCI_MAX_SCRATCHPADS	32
 #define	XHCI_MAX_EVENTS		(16 * 13)
@@ -217,7 +217,7 @@ struct xhci_dev_ctx {
 		struct xhci_slot_ctx	u_slot;
 		struct xhci_endp_ctx	u_ep[XHCI_MAX_ENDPOINTS];
 	} ctx_dev_slep;
-} __attribute__((aligned(XHCI_DEV_CTX_ALIGN)));
+} __aligned(XHCI_DEV_CTX_ALIGN);
 #define	ctx_slot	ctx_dev_slep.u_slot
 #define	ctx_ep		ctx_dev_slep.u_ep
 
@@ -364,7 +364,7 @@ struct xhci_trb {
 #define	XHCI_TRB_ERROR_INVALID_SID	0x22
 #define	XHCI_TRB_ERROR_SEC_BW		0x23
 #define	XHCI_TRB_ERROR_SPLIT_XACT	0x24
-} __attribute__((aligned(4)));
+} __aligned(8);
 
 struct xhci_dev_endpoint_trbs {
 	struct xhci_trb		trb[(XHCI_MAX_STREAMS *

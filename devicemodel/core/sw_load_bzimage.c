@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+#include "dm.h"
 #include "vmmapi.h"
 #include "sw_load.h"
 
@@ -48,6 +49,8 @@
  * +-----------------------------------------------------+
  * | ...                                                 |
  * +-----------------------------------------------------+
+ * | offset: lowmem - 4MB - 2K (kernel gdt)              |
+ * +-----------------------------------------------------+
  * | offset: lowmem - 4MB (ramdisk image)                |
  * +-----------------------------------------------------+
  * | offset: lowmem - 8K (bootargs)                      |
@@ -59,6 +62,7 @@
  */
 
 /* Check default e820 table in sw_load_common.c for info about ctx->lowmem */
+#define	GDT_LOAD_OFF(ctx)	(ctx->lowmem - 4*MB - 2* KB)
 #define RAMDISK_LOAD_OFF(ctx)	(ctx->lowmem - 4*MB)
 #define BOOTARGS_LOAD_OFF(ctx)	(ctx->lowmem - 8*KB)
 #define KERNEL_ENTRY_OFF(ctx)	(ctx->lowmem - 6*KB)
@@ -93,8 +97,8 @@ static char ramdisk_path[STR_LEN];
 static char kernel_path[STR_LEN];
 static int with_ramdisk;
 static int with_kernel;
-static int ramdisk_size;
-static int kernel_size;
+static size_t ramdisk_size;
+static size_t kernel_size;
 
 static int
 acrn_get_bzimage_setup_size(struct vmctx *ctx)
@@ -125,15 +129,17 @@ acrn_get_bzimage_setup_size(struct vmctx *ctx)
 int
 acrn_parse_kernel(char *arg)
 {
-	size_t len = strlen(arg);
+	size_t len = strnlen(arg, STR_LEN);
 
 	if (len < STR_LEN) {
 		strncpy(kernel_path, arg, len + 1);
-		if (check_image(kernel_path) != 0){
+		if (check_image(kernel_path, 0, &kernel_size) != 0){
 			fprintf(stderr, "SW_LOAD: check_image failed for '%s'\n",
 				kernel_path);
 			exit(10); /* Non-zero */
 		}
+		kernel_file_name = kernel_path;
+
 		with_kernel = 1;
 		printf("SW_LOAD: get kernel path %s\n", kernel_path);
 		return 0;
@@ -144,11 +150,11 @@ acrn_parse_kernel(char *arg)
 int
 acrn_parse_ramdisk(char *arg)
 {
-	size_t len = strlen(arg);
+	size_t len = strnlen(arg, STR_LEN);
 
 	if (len < STR_LEN) {
 		strncpy(ramdisk_path, arg, len + 1);
-		if (check_image(ramdisk_path) != 0){
+		if (check_image(ramdisk_path, 0, &ramdisk_size) != 0){
 			fprintf(stderr, "SW_LOAD: check_image failed for '%s'\n",
 				ramdisk_path);
 			exit(11); /* Non-zero */
@@ -165,7 +171,8 @@ static int
 acrn_prepare_ramdisk(struct vmctx *ctx)
 {
 	FILE *fp;
-	int len, read;
+	long len;
+	size_t read;
 
 	fp = fopen(ramdisk_path, "r");
 	if (fp == NULL) {
@@ -176,26 +183,33 @@ acrn_prepare_ramdisk(struct vmctx *ctx)
 
 	fseek(fp, 0, SEEK_END);
 	len = ftell(fp);
+
+	if (len != ramdisk_size) {
+		fprintf(stderr,
+			"SW_LOAD ERR: ramdisk file changed\n");
+		fclose(fp);
+		return -1;
+	}
+
 	if (len > (BOOTARGS_LOAD_OFF(ctx) - RAMDISK_LOAD_OFF(ctx))) {
 		printf("SW_LOAD ERR: the size of ramdisk file is too big"
-				" file len=0x%x, limit is 0x%lx\n", len,
+				" file len=0x%lx, limit is 0x%lx\n", len,
 				BOOTARGS_LOAD_OFF(ctx) - RAMDISK_LOAD_OFF(ctx));
 		fclose(fp);
 		return -1;
 	}
-	ramdisk_size = len;
 
 	fseek(fp, 0, SEEK_SET);
 	read = fread(ctx->baseaddr + RAMDISK_LOAD_OFF(ctx),
 			sizeof(char), len, fp);
 	if (read < len) {
 		printf("SW_LOAD ERR: could not read the whole ramdisk file,"
-				" file len=%d, read %d\n", len, read);
+				" file len=%ld, read %lu\n", len, read);
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: ramdisk %s size %d copied to guest 0x%lx\n",
+	printf("SW_LOAD: ramdisk %s size %lu copied to guest 0x%lx\n",
 			ramdisk_path, ramdisk_size, RAMDISK_LOAD_OFF(ctx));
 
 	return 0;
@@ -205,7 +219,8 @@ static int
 acrn_prepare_kernel(struct vmctx *ctx)
 {
 	FILE *fp;
-	int len, read;
+	long len;
+	size_t read;
 
 	fp = fopen(kernel_path, "r");
 	if (fp == NULL) {
@@ -216,24 +231,31 @@ acrn_prepare_kernel(struct vmctx *ctx)
 
 	fseek(fp, 0, SEEK_END);
 	len = ftell(fp);
+
+	if (len != kernel_size) {
+		fprintf(stderr,
+			"SW_LOAD ERR: kernel file changed\n");
+		fclose(fp);
+		return -1;
+	}
+
 	if ((len + KERNEL_LOAD_OFF(ctx)) > RAMDISK_LOAD_OFF(ctx)) {
 		printf("SW_LOAD ERR: need big system memory to fit image\n");
 		fclose(fp);
 		return -1;
 	}
-	kernel_size = len;
 
 	fseek(fp, 0, SEEK_SET);
 	read = fread(ctx->baseaddr + KERNEL_LOAD_OFF(ctx),
 			sizeof(char), len, fp);
 	if (read < len) {
 		printf("SW_LOAD ERR: could not read the whole kernel file,"
-				" file len=%d, read %d\n", len, read);
+				" file len=%ld, read %lu\n", len, read);
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: kernel %s size %d copied to guest 0x%lx\n",
+	printf("SW_LOAD: kernel %s size %lu copied to guest 0x%lx\n",
 			kernel_path, kernel_size, KERNEL_LOAD_OFF(ctx));
 
 	return 0;
@@ -280,16 +302,23 @@ acrn_prepare_zeropage(struct vmctx *ctx, int setup_size)
 	return 0;
 }
 
+static const uint64_t bzimage_init_gdt[] = {
+	0x0UL,
+	0x0UL,
+	0x00CF9B000000FFFFUL,	/* Linear Code */
+	0x00CF93000000FFFFUL,	/* Linear Data */
+};
+
 int
 acrn_sw_load_bzimage(struct vmctx *ctx)
 {
 	int ret, setup_size;
-	uint64_t *cfg_offset = (uint64_t *)(ctx->baseaddr + GUEST_CFG_OFFSET);
 
-	*cfg_offset = ctx->lowmem;
+	memset(&ctx->bsp_regs, 0, sizeof(struct acrn_set_vcpu_regs));
+	ctx->bsp_regs.vcpu_id = 0;
 
 	if (with_bootargs) {
-		strcpy(ctx->baseaddr + BOOTARGS_LOAD_OFF(ctx), get_bootargs());
+		strncpy(ctx->baseaddr + BOOTARGS_LOAD_OFF(ctx), get_bootargs(), STR_LEN);
 		printf("SW_LOAD: bootargs copied to guest 0x%lx\n",
 				BOOTARGS_LOAD_OFF(ctx));
 	}
@@ -301,25 +330,43 @@ acrn_sw_load_bzimage(struct vmctx *ctx)
 	}
 
 	if (with_kernel) {
-		uint64_t *kernel_entry_addr =
-			(uint64_t *)(ctx->baseaddr + KERNEL_ENTRY_OFF(ctx));
-
 		ret = acrn_prepare_kernel(ctx);
 		if (ret)
 			return ret;
 		setup_size = acrn_get_bzimage_setup_size(ctx);
 		if (setup_size <= 0)
 			return -1;
-		*kernel_entry_addr = (uint64_t)
+
+		ctx->bsp_regs.vcpu_regs.rip = (uint64_t)
 			(KERNEL_LOAD_OFF(ctx) + setup_size);
+
 		ret = acrn_prepare_zeropage(ctx, setup_size);
 		if (ret)
 			return ret;
 
 		printf("SW_LOAD: zeropage prepared @ 0x%lx, "
 				"kernel_entry_addr=0x%lx\n",
-				ZEROPAGE_LOAD_OFF(ctx), *kernel_entry_addr);
+				ZEROPAGE_LOAD_OFF(ctx),
+				(KERNEL_LOAD_OFF(ctx) + setup_size));
 	}
+
+	memcpy(ctx->baseaddr + GDT_LOAD_OFF(ctx), &bzimage_init_gdt,
+			sizeof(bzimage_init_gdt));
+	ctx->bsp_regs.vcpu_regs.gdt.limit = sizeof(bzimage_init_gdt) - 1;
+	ctx->bsp_regs.vcpu_regs.gdt.base = GDT_LOAD_OFF(ctx);
+
+	/* CR0_ET | CR0_NE | CR0_PE */
+	ctx->bsp_regs.vcpu_regs.cr0 = 0x31U;
+
+	ctx->bsp_regs.vcpu_regs.cs_sel = 0x10U;
+	ctx->bsp_regs.vcpu_regs.cs_ar = 0xC09BU;
+	ctx->bsp_regs.vcpu_regs.cs_limit = 0xFFFFFFFFU;
+
+	ctx->bsp_regs.vcpu_regs.ds_sel = 0x18U;
+	ctx->bsp_regs.vcpu_regs.ss_sel = 0x18U;
+	ctx->bsp_regs.vcpu_regs.es_sel = 0x18U;
+
+	ctx->bsp_regs.vcpu_regs.gprs.rsi = ZEROPAGE_LOAD_OFF(ctx);
 
 	return 0;
 }

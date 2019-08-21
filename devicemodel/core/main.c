@@ -33,7 +33,6 @@
 #include <errno.h>
 #include <libgen.h>
 #include <unistd.h>
-#include <assert.h>
 #include <pthread.h>
 #include <sysexits.h>
 #include <stdbool.h>
@@ -53,16 +52,26 @@
 #include "pci_core.h"
 #include "irq.h"
 #include "lpc.h"
-#include "smbiostbl.h"
 #include "rtc.h"
+#include "pit.h"
+#include "hpet.h"
 #include "version.h"
 #include "sw_load.h"
 #include "monitor.h"
 #include "ioc.h"
+#include "pm.h"
+#include "atomic.h"
+#include "tpm.h"
+#include "virtio.h"
+#include "log.h"
 
 #define GUEST_NIO_PORT		0x488	/* guest upcalls via i/o port */
 
-typedef int (*vmexit_handler_t)(struct vmctx *,
+/* Values returned for reads on invalid I/O requests. */
+#define VHM_REQ_PIO_INVAL	(~0U)
+#define VHM_REQ_MMIO_INVAL	(~0UL)
+
+typedef void (*vmexit_handler_t)(struct vmctx *,
 		struct vhm_request *, int *vcpu);
 
 char *vmname;
@@ -70,14 +79,19 @@ char *vmname;
 int guest_ncpus;
 char *guest_uuid_str;
 char *vsbl_file_name;
+char *ovmf_file_name;
+char *kernel_file_name;
+char *elf_file_name;
 uint8_t trusty_enabled;
+char *mac_seed;
 bool stdio_in_use;
+bool lapic_pt;
+bool is_rtvm;
+bool skip_pci_mem64bar_workaround = false;
 
-static int guest_vmexit_on_hlt, guest_vmexit_on_pause;
 static int virtio_msix = 1;
-static int x2apic_mode;	/* default is xAPIC */
-
-static int strictmsr = 1;
+static bool debugexit_enabled;
+static char mac_seed_str[50];
 
 static int acpi;
 
@@ -88,9 +102,7 @@ static cpuset_t cpumask;
 
 static void vm_loop(struct vmctx *ctx);
 
-static int quit_vm_loop;
-
-static char vhm_request_page[4096] __attribute__ ((aligned(4096)));
+static char vhm_request_page[4096] __aligned(4096);
 
 static struct vhm_request *vhm_req_buf =
 				(struct vhm_request *)&vhm_request_page;
@@ -120,43 +132,53 @@ static void
 usage(int code)
 {
 	fprintf(stderr,
-		"Usage: %s [-abehuwxACHPSTWY] [-c vcpus] [-g <gdb port>] [-l <lpc>]\n"
-		"       %*s [-m mem] [-p vcpu:hostcpu] [-s <pci>] [-U uuid] \n"
-		"       %*s [--vsbl vsbl_file_name] [--part_info part_info_name]\n"
-		"       %*s [--enable_trusty] <vm>\n"
-		"       -a: local apic is in xAPIC mode (deprecated)\n"
+		"Usage: %s [-hAWYv] [-B bootargs] [-c vcpus] [-E elf_image_path]\n"
+		"       %*s [-G GVT_args] [-i ioc_mediator_parameters] [-k kernel_image_path]\n"
+		"       %*s [-l lpc] [-m mem] [-p vcpu:hostcpu] [-r ramdisk_image_path]\n"
+		"       %*s [-s pci] [-U uuid] [--vsbl vsbl_file_name] [--ovmf ovmf_file_path]\n"
+		"       %*s [--part_info part_info_name] [--enable_trusty] [--intr_monitor param_setting]\n"
+		"       %*s [--vtpm2 sock_path] [--virtio_poll interval] [--mac_seed seed_string]\n"
+		"       %*s [--vmcfg sub_options] [--dump vm_idx] [--ptdev_no_reset] [--debugexit] \n"
+		"       %*s [--logger-setting param_setting] <vm>\n"
 		"       -A: create ACPI tables\n"
-		"       -b: enable bvmcons\n"
+		"       -B: bootargs for kernel\n"
 		"       -c: # cpus (default 1)\n"
-		"       -C: include guest memory in core file\n"
-		"       -e: exit on unhandled I/O access\n"
-		"       -g: gdb port\n"
+		"       -E: elf image path\n"
+		"       -G: GVT args: low_gm_size, high_gm_size, fence_sz\n"
 		"       -h: help\n"
-		"       -H: vmexit from the guest on hlt\n"
+		"       -i: ioc boot parameters\n"
+		"       -k: kernel image path\n"
 		"       -l: LPC device configuration\n"
 		"       -m: memory size in MB\n"
 		"       -p: pin 'vcpu' to 'hostcpu'\n"
-		"       -P: vmexit from the guest on pause\n"
-		"       -s: <slot,driver,configinfo> PCI slot config\n"
-		"       -S: guest memory cannot be swapped\n"
-		"       -u: RTC keeps UTC time\n"
-		"       -U: uuid\n"
-		"       -w: ignore unimplemented MSRs\n"
-		"       -W: force virtio to use single-vector MSI\n"
-		"       -x: local apic is in x2APIC mode\n"
-		"       -Y: disable MPtable generation\n"
-		"       -k: kernel image path\n"
 		"       -r: ramdisk image path\n"
-		"       -B: bootargs for kernel\n"
-		"       -G: GVT args: low_gm_size, high_gm_size, fence_sz\n"
+		"       -s: <slot,driver,configinfo> PCI slot config\n"
+		"       -U: uuid\n"
 		"       -v: version\n"
-		"       -i: ioc boot parameters\n"
+		"       -W: force virtio to use single-vector MSI\n"
+		"       -Y: disable MPtable generation\n"
+		"       --mac_seed: set a platform unique string as a seed for generate mac address\n"
+#ifdef CONFIG_VM_CFG
+		"       --vmcfg: build-in VM configurations\n"
+		"       --dump: show build-in VM configurations\n"
+#endif
 		"       --vsbl: vsbl file path\n"
+		"       --ovmf: ovmf file path\n"
 		"       --part_info: guest partition info file path\n"
 		"       --enable_trusty: enable trusty for guest\n"
-		"       --ptdev_no_reset: disable reset check for ptdev\n",
-		progname, (int)strlen(progname), "", (int)strlen(progname), "",
-		(int)strlen(progname), "");
+		"       --ptdev_no_reset: disable reset check for ptdev\n"
+		"       --debugexit: enable debug exit function\n"
+		"       --intr_monitor: enable interrupt storm monitor\n"
+		"            its params: threshold/s,probe-period(s),delay_time(ms),delay_duration(ms)\n"
+		"       --virtio_poll: enable virtio poll mode with poll interval with ns\n"
+		"       --vtpm2: Virtual TPM2 args: sock_path=$PATH_OF_SWTPM_SOCKET\n"
+		"       --lapic_pt: enable local apic passthrough\n"
+		"       --rtvm: indicate that the guest is rtvm\n"
+		"       --logger_setting: params like console,level=4;kmsg,level=3\n",
+		progname, (int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
+		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
+		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
+		(int)strnlen(progname, PATH_MAX), "");
 
 	exit(code);
 }
@@ -164,14 +186,9 @@ usage(int code)
 static void
 print_version(void)
 {
-	if (DM_RC_VERSION)
-		fprintf(stderr, "DM version is: %d.%d-%d-%s, build by %s@%s\n",
-			DM_MAJOR_VERSION, DM_MINOR_VERSION, DM_RC_VERSION,
-			DM_BUILD_VERSION, DM_BUILD_USER, DM_BUILD_TIME);
-	else
-		fprintf(stderr, "DM version is: %d.%d-%s, build by %s@%s\n",
-			DM_MAJOR_VERSION, DM_MINOR_VERSION, DM_BUILD_VERSION,
-			DM_BUILD_USER, DM_BUILD_TIME);
+	fprintf(stdout, "DM version is: %s-%s (daily tag:%s), build by %s@%s\n",
+			DM_FULL_VERSION,
+			DM_BUILD_VERSION, DM_DAILY_TAG, DM_BUILD_USER, DM_BUILD_TIME);
 
 	exit(0);
 }
@@ -180,8 +197,10 @@ static int
 pincpu_parse(const char *opt)
 {
 	int vcpu, pcpu;
+	char *cp;
 
-	if (sscanf(opt, "%d:%d", &vcpu, &pcpu) != 2) {
+	if (dm_strtoi(opt, &cp, 10, &vcpu) || *cp != ':' ||
+		dm_strtoi(cp + 1, &cp, 10, &pcpu)) {
 		fprintf(stderr, "invalid format: %s\n", opt);
 		return -1;
 	}
@@ -211,22 +230,36 @@ pincpu_parse(const char *opt)
 	return 0;
 }
 
+/**
+ * @brief Convert guest physical address to host virtual address
+ *
+ * @param ctx Pointer to to struct vmctx representing VM context.
+ * @param gaddr Guest physical address base.
+ * @param len Guest physical address length.
+ *
+ * @return NULL on convert failed and host virtual address on successful.
+ */
 void *
 paddr_guest2host(struct vmctx *ctx, uintptr_t gaddr, size_t len)
 {
 	return vm_map_gpa(ctx, gaddr, len);
 }
 
-void *
-dm_gpa2hva(uint64_t gpa, size_t size)
-{
-	return vm_map_gpa(_ctx, gpa, size);
-}
-
 int
 virtio_uses_msix(void)
 {
 	return virtio_msix;
+}
+
+size_t
+high_bios_size(void)
+{
+	size_t size = 0;
+
+	if (ovmf_file_name)
+		size = ovmf_image_size();
+
+	return roundup2(size, 2 * MB);
 }
 
 static void *
@@ -267,6 +300,8 @@ add_cpu(struct vmctx *ctx, int guest_ncpus)
 		mt_vmm_info[i].mt_vcpu = i;
 	}
 
+	vm_set_vcpu_regs(ctx, &ctx->bsp_regs);
+
 	error = pthread_create(&mt_vmm_info[0].mt_thr, NULL,
 	    start_thread, &mt_vmm_info[0]);
 
@@ -281,85 +316,92 @@ delete_cpu(struct vmctx *ctx, int vcpu)
 		exit(1);
 	}
 
-	/* wait for vm_loop cleanup */
-	quit_vm_loop = 1;
 	vm_destroy_ioreq_client(ctx);
-	while (quit_vm_loop)
-		usleep(10000);
+	pthread_join(mt_vmm_info[0].mt_thr, NULL);
 
 	CPU_CLR_ATOMIC(vcpu, &cpumask);
 	return CPU_EMPTY(&cpumask);
 }
 
-static int
+#ifdef DM_DEBUG
+void
+notify_vmloop_thread(void)
+{
+	pthread_kill(mt_vmm_info[0].mt_thr, SIGCONT);
+	return;
+}
+#endif
+
+static void
 vmexit_inout(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
 {
 	int error;
 	int bytes, port, in;
 
-	port = vhm_req->reqs.pio_request.address;
-	bytes = vhm_req->reqs.pio_request.size;
-	in = (vhm_req->reqs.pio_request.direction == REQUEST_READ);
+	port = vhm_req->reqs.pio.address;
+	bytes = vhm_req->reqs.pio.size;
+	in = (vhm_req->reqs.pio.direction == REQUEST_READ);
 
-	error = emulate_inout(ctx, pvcpu, &vhm_req->reqs.pio_request);
+	error = emulate_inout(ctx, pvcpu, &vhm_req->reqs.pio);
 	if (error) {
 		fprintf(stderr, "Unhandled %s%c 0x%04x\n",
 				in ? "in" : "out",
 				bytes == 1 ? 'b' : (bytes == 2 ? 'w' : 'l'),
 				port);
-		return VMEXIT_ABORT;
-	} else {
-		return VMEXIT_CONTINUE;
+
+		if (in) {
+			vhm_req->reqs.pio.value = VHM_REQ_PIO_INVAL;
+		}
 	}
 }
 
-static int
+static void
 vmexit_mmio_emul(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
 {
 	int err;
 
 	stats.vmexit_mmio_emul++;
-	err = emulate_mem(ctx, &vhm_req->reqs.mmio_request);
+	err = emulate_mem(ctx, &vhm_req->reqs.mmio);
 
 	if (err) {
 		if (err == -ESRCH)
 			fprintf(stderr, "Unhandled memory access to 0x%lx\n",
-				vhm_req->reqs.mmio_request.address);
+				vhm_req->reqs.mmio.address);
 
 		fprintf(stderr, "Failed to emulate instruction [");
 		fprintf(stderr, "mmio address 0x%lx, size %ld",
-				vhm_req->reqs.mmio_request.address,
-				vhm_req->reqs.mmio_request.size);
-		vhm_req->processed = REQ_STATE_FAILED;
-		return VMEXIT_ABORT;
+				vhm_req->reqs.mmio.address,
+				vhm_req->reqs.mmio.size);
+
+		if (vhm_req->reqs.mmio.direction == REQUEST_READ) {
+			vhm_req->reqs.mmio.value = VHM_REQ_MMIO_INVAL;
+		}
 	}
-	vhm_req->processed = REQ_STATE_SUCCESS;
-	return VMEXIT_CONTINUE;
 }
 
-static int
+static void
 vmexit_pci_emul(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
 {
-	int err, in = (vhm_req->reqs.pci_request.direction == REQUEST_READ);
+	int err, in = (vhm_req->reqs.pci.direction == REQUEST_READ);
 
 	err = emulate_pci_cfgrw(ctx, *pvcpu, in,
-			vhm_req->reqs.pci_request.bus,
-			vhm_req->reqs.pci_request.dev,
-			vhm_req->reqs.pci_request.func,
-			vhm_req->reqs.pci_request.reg,
-			vhm_req->reqs.pci_request.size,
-			&vhm_req->reqs.pci_request.value);
+			vhm_req->reqs.pci.bus,
+			vhm_req->reqs.pci.dev,
+			vhm_req->reqs.pci.func,
+			vhm_req->reqs.pci.reg,
+			vhm_req->reqs.pci.size,
+			&vhm_req->reqs.pci.value);
 	if (err) {
 		fprintf(stderr, "Unhandled pci cfg rw at %x:%x.%x reg 0x%x\n",
-			vhm_req->reqs.pci_request.bus,
-			vhm_req->reqs.pci_request.dev,
-			vhm_req->reqs.pci_request.func,
-			vhm_req->reqs.pci_request.reg);
-		return VMEXIT_ABORT;
-	}
+			vhm_req->reqs.pci.bus,
+			vhm_req->reqs.pci.dev,
+			vhm_req->reqs.pci.func,
+			vhm_req->reqs.pci.reg);
 
-	vhm_req->processed = REQ_STATE_SUCCESS;
-	return VMEXIT_CONTINUE;
+		if (in) {
+			vhm_req->reqs.pio.value = VHM_REQ_PIO_INVAL;
+		}
+	}
 }
 
 #define	DEBUG_EPT_MISCONFIG
@@ -372,66 +414,15 @@ vmexit_pci_emul(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
 
 #endif	/* #ifdef DEBUG_EPT_MISCONFIG */
 
-static int
-vmexit_bogus(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
-{
-	stats.vmexit_bogus++;
-
-	return VMEXIT_CONTINUE;
-}
-
-static int
-vmexit_reqidle(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
-{
-	stats.vmexit_reqidle++;
-
-	return VMEXIT_CONTINUE;
-}
-
-static int
-vmexit_hlt(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
-{
-	stats.vmexit_hlt++;
-
-	/*
-	 * Just continue execution with the next instruction. We use
-	 * the HLT VM exit as a way to be friendly with the host
-	 * scheduler.
-	 */
-	return VMEXIT_CONTINUE;
-}
-
-static int
-vmexit_pause(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
-{
-	stats.vmexit_pause++;
-
-	return VMEXIT_CONTINUE;
-}
-
-static int
-vmexit_mtrap(struct vmctx *ctx, struct vhm_request *vhm_req, int *pvcpu)
-{
-	stats.vmexit_mtrap++;
-
-	return VMEXIT_CONTINUE;
-}
-
 static vmexit_handler_t handler[VM_EXITCODE_MAX] = {
 	[VM_EXITCODE_INOUT]  = vmexit_inout,
 	[VM_EXITCODE_MMIO_EMUL] = vmexit_mmio_emul,
 	[VM_EXITCODE_PCI_CFG] = vmexit_pci_emul,
-	[VM_EXITCODE_BOGUS]  = vmexit_bogus,
-	[VM_EXITCODE_REQIDLE] = vmexit_reqidle,
-	[VM_EXITCODE_MTRAP]  = vmexit_mtrap,
-	[VM_EXITCODE_HLT]  = vmexit_hlt,
-	[VM_EXITCODE_PAUSE]  = vmexit_pause,
 };
 
 static void
 handle_vmexit(struct vmctx *ctx, struct vhm_request *vhm_req, int vcpu)
 {
-	int rc;
 	enum vm_exitcode exitcode;
 
 	exitcode = vhm_req->type;
@@ -441,17 +432,19 @@ handle_vmexit(struct vmctx *ctx, struct vhm_request *vhm_req, int vcpu)
 		exit(1);
 	}
 
-	rc = (*handler[exitcode])(ctx, vhm_req, &vcpu);
-	switch (rc) {
-	case VMEXIT_CONTINUE:
-		vhm_req->processed = REQ_STATE_SUCCESS;
-		break;
-	case VMEXIT_ABORT:
-		vhm_req->processed = REQ_STATE_FAILED;
-		abort();
-	default:
-		exit(1);
-	}
+	(*handler[exitcode])(ctx, vhm_req, &vcpu);
+
+	/* We cannot notify the VHM/hypervisor on the request completion at this
+	 * point if the UOS is in suspend or system reset mode, as the VM is
+	 * still not paused and a notification can kick off the vcpu to run
+	 * again. Postpone the notification till vm_system_reset() or
+	 * vm_suspend_resume() for resetting the ioreq states in the VHM and
+	 * hypervisor.
+	 */
+	if ((VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) ||
+		(VM_SUSPEND_SUSPEND == vm_get_suspend_mode()))
+		return;
+
 	vm_notify_request_done(ctx, vcpu);
 }
 
@@ -476,8 +469,18 @@ vm_init_vdevs(struct vmctx *ctx)
 	if (ret < 0)
 		goto vrtc_fail;
 
+	ret = vpit_init(ctx);
+	if (ret < 0)
+		goto vpit_fail;
+
+	ret = vhpet_init(ctx);
+	if (ret < 0)
+		goto vhpet_fail;
+
 	sci_init(ctx);
-	init_bvmcons();
+
+	if (debugexit_enabled)
+		init_debugexit();
 
 	ret = monitor_init(ctx);
 	if (ret < 0)
@@ -487,11 +490,20 @@ vm_init_vdevs(struct vmctx *ctx)
 	if (ret < 0)
 		goto pci_fail;
 
+	init_vtpm2(ctx);
+
 	return 0;
+
 pci_fail:
 	monitor_close();
 monitor_fail:
-	deinit_bvmcons();
+	if (debugexit_enabled)
+		deinit_debugexit();
+
+	vhpet_deinit(ctx);
+vhpet_fail:
+	vpit_deinit(ctx);
+vpit_fail:
 	vrtc_deinit(ctx);
 vrtc_fail:
 	ioc_deinit(ctx);
@@ -504,14 +516,147 @@ vrtc_fail:
 static void
 vm_deinit_vdevs(struct vmctx *ctx)
 {
+	/*
+	 * Write ovmf NV storage back to the original file from guest
+	 * memory before deinit operations.
+	 */
+	acrn_writeback_ovmf_nvstorage(ctx);
+
 	deinit_pci(ctx);
 	monitor_close();
-	deinit_bvmcons();
+
+	if (debugexit_enabled)
+		deinit_debugexit();
+
+	vhpet_deinit(ctx);
+	vpit_deinit(ctx);
 	vrtc_deinit(ctx);
 	ioc_deinit(ctx);
 	atkbdc_deinit(ctx);
 	pci_irq_deinit(ctx);
 	ioapic_deinit();
+	deinit_vtpm2(ctx);
+}
+
+static void
+vm_reset_vdevs(struct vmctx *ctx)
+{
+	/*
+	 * Write ovmf NV storage back to the original file from guest
+	 * memory before deinit operations.
+	 */
+	acrn_writeback_ovmf_nvstorage(ctx);
+
+	/*
+	 * The current virtual devices doesn't define virtual
+	 * device reset function. So we call vdev deinit/init
+	 * pairing to emulate the device reset operation.
+	 *
+	 * pci/ioapic deinit/init is needed because of dependency
+	 * of pci irq allocation/free.
+	 *
+	 * acpi build is necessary because irq for each vdev
+	 * could be assigned with different number after reset.
+	 */
+	atkbdc_deinit(ctx);
+
+	if (debugexit_enabled)
+		deinit_debugexit();
+
+	vhpet_deinit(ctx);
+	vpit_deinit(ctx);
+	vrtc_deinit(ctx);
+
+	deinit_pci(ctx);
+	pci_irq_deinit(ctx);
+	ioapic_deinit();
+
+	pci_irq_init(ctx);
+	atkbdc_init(ctx);
+	vrtc_init(ctx);
+	vpit_init(ctx);
+	vhpet_init(ctx);
+
+	if (debugexit_enabled)
+		init_debugexit();
+
+	ioapic_init(ctx);
+	init_pci(ctx);
+
+	if (acpi) {
+		acpi_build(ctx, guest_ncpus);
+	}
+}
+
+static void
+vm_system_reset(struct vmctx *ctx)
+{
+	/*
+	 * If we get system reset request, we don't want to exit the
+	 * vcpu_loop/vm_loop/mevent_loop. So we do:
+	 *   1. pause VM
+	 *   2. flush and clear ioreqs
+	 *   3. reset virtual devices
+	 *   4. load software for UOS
+	 *   5. hypercall reset vm
+	 *   6. reset suspend mode to VM_SUSPEND_NONE
+	 */
+
+	vm_pause(ctx);
+
+	/*
+	 * After vm_pause, there should be no new coming ioreq.
+	 *
+	 * Unless under emergency mode, the vcpu writing to the ACPI PM
+	 * CR should be the only vcpu of that VM that is still
+	 * running. In this case there should be only one completed
+	 * request which is the APIC PM CR write. VM reset will reset it
+	 *
+	 * When handling emergency mode triggered by one vcpu without
+	 * offlining any other vcpus, there can be multiple VHM requests
+	 * with various states. We should be careful on potential races
+	 * when resetting especially in SMP SOS. vm_clear_ioreq can be used
+	 * to clear all ioreq status in VHM after VM pause, then let VM
+	 * reset in hypervisor reset all ioreqs.
+	 */
+	vm_clear_ioreq(ctx);
+
+	vm_reset_vdevs(ctx);
+	vm_reset(ctx);
+	vm_set_suspend_mode(VM_SUSPEND_NONE);
+
+	/* set the BSP init state */
+	acrn_sw_load(ctx);
+	vm_set_vcpu_regs(ctx, &ctx->bsp_regs);
+	vm_run(ctx);
+}
+
+static void
+vm_suspend_resume(struct vmctx *ctx)
+{
+	/*
+	 * If we get warm reboot request, we don't want to exit the
+	 * vcpu_loop/vm_loop/mevent_loop. So we do:
+	 *   1. pause VM
+	 *   2. flush and clear ioreqs
+	 *   3. stop vm watchdog
+	 *   4. wait for resume signal
+	 *   5. reset vm watchdog
+	 *   6. hypercall restart vm
+	 */
+	vm_pause(ctx);
+
+	vm_clear_ioreq(ctx);
+	vm_stop_watchdog(ctx);
+	wait_for_resume(ctx);
+
+	pm_backto_wakeup(ctx);
+	vm_reset_watchdog(ctx);
+	vm_reset(ctx);
+
+	/* set the BSP init state */
+	vm_set_vcpu_regs(ctx, &ctx->bsp_regs);
+	vm_run(ctx);
 }
 
 static void
@@ -520,28 +665,44 @@ vm_loop(struct vmctx *ctx)
 	int error;
 
 	ctx->ioreq_client = vm_create_ioreq_client(ctx);
-	assert(ctx->ioreq_client > 0);
+	if (ctx->ioreq_client <= 0) {
+		pr_err("%s, failed to create IOREQ.\n", __func__);
+		return;
+	}
 
-	error = vm_run(ctx);
-	assert(error == 0);
+	if (vm_run(ctx) != 0) {
+		pr_err("%s, failed to run VM.\n", __func__);
+		return;
+	}
 
 	while (1) {
-		int vcpu;
+		int vcpu_id;
 		struct vhm_request *vhm_req;
 
 		error = vm_attach_ioreq_client(ctx);
 		if (error)
 			break;
 
-		for (vcpu = 0; vcpu < 4; vcpu++) {
-			vhm_req = &vhm_req_buf[vcpu];
-			if (vhm_req->valid
-				&& (vhm_req->processed == REQ_STATE_PROCESSING)
+		for (vcpu_id = 0; vcpu_id < 4; vcpu_id++) {
+			vhm_req = &vhm_req_buf[vcpu_id];
+			if ((atomic_load(&vhm_req->processed) == REQ_STATE_PROCESSING)
 				&& (vhm_req->client == ctx->ioreq_client))
-				handle_vmexit(ctx, vhm_req, vcpu);
+				handle_vmexit(ctx, vhm_req, vcpu_id);
+		}
+
+		if (VM_SUSPEND_FULL_RESET == vm_get_suspend_mode() ||
+		    VM_SUSPEND_POWEROFF == vm_get_suspend_mode()) {
+			break;
+		}
+
+		if (VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) {
+			vm_system_reset(ctx);
+		}
+
+		if (VM_SUSPEND_SUSPEND == vm_get_suspend_mode()) {
+			vm_suspend_resume(ctx);
 		}
 	}
-	quit_vm_loop = 0;
 	printf("VM loop exit\n");
 }
 
@@ -554,28 +715,6 @@ num_vcpus_allowed(struct vmctx *ctx)
 	return VM_MAXCPU;
 }
 
-static struct vmctx *
-do_open(const char *vmname)
-{
-	struct vmctx *ctx;
-	int error;
-
-	error = vm_create(vmname);
-	if (error) {
-		perror("vm_create");
-		exit(1);
-
-	}
-
-	ctx = vm_open(vmname);
-	if (ctx == NULL) {
-		perror("vm_open");
-		exit(1);
-	}
-
-	return ctx;
-}
-
 static void
 sig_handler_term(int signo)
 {
@@ -586,30 +725,33 @@ sig_handler_term(int signo)
 
 enum {
 	CMD_OPT_VSBL = 1000,
+	CMD_OPT_OVMF,
 	CMD_OPT_PART_INFO,
 	CMD_OPT_TRUSTY_ENABLE,
+	CMD_OPT_VIRTIO_POLL_ENABLE,
+	CMD_OPT_MAC_SEED,
 	CMD_OPT_PTDEV_NO_RESET,
+	CMD_OPT_DEBUGEXIT,
+	CMD_OPT_VMCFG,
+	CMD_OPT_DUMP,
+	CMD_OPT_INTR_MONITOR,
+	CMD_OPT_VTPM2,
+	CMD_OPT_LAPIC_PT,
+	CMD_OPT_RTVM,
+	CMD_OPT_LOGGER_SETTING,
 };
 
 static struct option long_options[] = {
-	{"no_x2apic_mode",	no_argument,		0, 'a' },
 	{"acpi",		no_argument,		0, 'A' },
-	{"bvmcons",		no_argument,		0, 'b' },
 	{"pincpu",		required_argument,	0, 'p' },
 	{"ncpus",		required_argument,	0, 'c' },
-	{"memflags_incore",	no_argument,		0, 'C' },
-	{"gdb_port",		required_argument,	0, 'g' },
+	{"elf_file",		required_argument,	0, 'E' },
+	{"ioc_node",		required_argument,	0, 'i' },
 	{"lpc",			required_argument,	0, 'l' },
 	{"pci_slot",		required_argument,	0, 's' },
-	{"memflags_wired",	no_argument,		0, 'S' },
 	{"memsize",		required_argument,	0, 'm' },
-	{"ioapic",		no_argument,		0, 'I' },
-	{"vmexit_pause",	no_argument,		0, 'P' },
-	{"rtc_localtime",	no_argument,		0, 'u' },
 	{"uuid",		required_argument,	0, 'U' },
-	{"strictmsr",		no_argument,		0, 'w' },
 	{"virtio_msix",		no_argument,		0, 'W' },
-	{"x2apic_mode",		no_argument,		0, 'x' },
 	{"mptgen",		no_argument,		0, 'Y' },
 	{"kernel",		required_argument,	0, 'k' },
 	{"ramdisk",		required_argument,	0, 'r' },
@@ -619,68 +761,76 @@ static struct option long_options[] = {
 	{"help",		no_argument,		0, 'h' },
 
 	/* Following cmd option only has long option */
+#ifdef CONFIG_VM_CFG
+#endif
 	{"vsbl",		required_argument,	0, CMD_OPT_VSBL},
+	{"ovmf",		required_argument,	0, CMD_OPT_OVMF},
 	{"part_info",		required_argument,	0, CMD_OPT_PART_INFO},
 	{"enable_trusty",	no_argument,		0,
 					CMD_OPT_TRUSTY_ENABLE},
+	{"virtio_poll",		required_argument,	0, CMD_OPT_VIRTIO_POLL_ENABLE},
+	{"mac_seed",		required_argument,	0, CMD_OPT_MAC_SEED},
 	{"ptdev_no_reset",	no_argument,		0,
 		CMD_OPT_PTDEV_NO_RESET},
+	{"debugexit",		no_argument,		0, CMD_OPT_DEBUGEXIT},
+	{"intr_monitor",	required_argument,	0, CMD_OPT_INTR_MONITOR},
+	{"vtpm2",		required_argument,	0, CMD_OPT_VTPM2},
+	{"lapic_pt",		no_argument,		0, CMD_OPT_LAPIC_PT},
+	{"rtvm",		no_argument,		0, CMD_OPT_RTVM},
+	{"logger_setting",	required_argument,	0, CMD_OPT_LOGGER_SETTING},
 	{0,			0,			0,  0  },
 };
+
+static char optstr[] = "hAWYvE:k:r:B:p:c:s:m:l:U:G:i:";
 
 int
 main(int argc, char *argv[])
 {
-	int c, error, gdb_port, err;
-	int max_vcpus, mptgen, memflags;
+	int c, error, ret=1;
+	int max_vcpus, mptgen;
 	struct vmctx *ctx;
 	size_t memsize;
-	char *optstr;
 	int option_idx = 0;
 
 	progname = basename(argv[0]);
-	gdb_port = 0;
 	guest_ncpus = 1;
 	memsize = 256 * MB;
 	mptgen = 1;
-	memflags = 0;
-	quit_vm_loop = 0;
 
 	if (signal(SIGHUP, sig_handler_term) == SIG_ERR)
 		fprintf(stderr, "cannot register handler for SIGHUP\n");
 	if (signal(SIGINT, sig_handler_term) == SIG_ERR)
 		fprintf(stderr, "cannot register handler for SIGINT\n");
+	/*
+	 * Ignore SIGPIPE signal and handle the error directly when write()
+	 * function fails. this will help us to catch the write failure rather
+	 * than crashing the UOS.
+	 */
+	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+		fprintf(stderr, "cannot register handler for SIGPIPE\n");
 
-	optstr = "abehuwxACHIPSWYvk:r:B:p:g:c:s:m:l:U:G:i:";
 	while ((c = getopt_long(argc, argv, optstr, long_options,
 			&option_idx)) != -1) {
 		switch (c) {
-		case 'a':
-			x2apic_mode = 0;
-			break;
 		case 'A':
 			acpi = 1;
-			break;
-		case 'b':
-			enable_bvmcons();
 			break;
 		case 'p':
 			if (pincpu_parse(optarg) != 0) {
 				errx(EX_USAGE,
-				"invalid vcpu pinning configuration '%s'",
-				optarg);
+					"invalid vcpu pinning configuration '%s'",
+					optarg);
 			}
 			break;
 		case 'c':
-			guest_ncpus = atoi(optarg);
+			dm_strtoi(optarg, NULL, 0, &guest_ncpus);
 			break;
-		case 'C':
-			memflags |= VM_MEM_F_INCORE;
+		case 'E':
+			if (acrn_parse_elf(optarg) != 0)
+				exit(1);
+			else
+				break;
 			break;
-		case 'g':
-			gdb_port = atoi(optarg);
-			break;
-
 		case 'i':
 			ioc_parse(optarg);
 			break;
@@ -697,43 +847,15 @@ main(int argc, char *argv[])
 				exit(1);
 			else
 				break;
-		case 'S':
-			memflags |= VM_MEM_F_WIRED;
-			break;
 		case 'm':
-			error = vm_parse_memsize(optarg, &memsize);
-			if (error)
+			if (vm_parse_memsize(optarg, &memsize) != 0)
 				errx(EX_USAGE, "invalid memsize '%s'", optarg);
-			break;
-		case 'H':
-			guest_vmexit_on_hlt = 1;
-			break;
-		case 'I':
-			/*
-			 * The "-I" option was used to add an ioapic to the
-			 * virtual machine.
-			 *
-			 * An ioapic is now provided unconditionally for each
-			 * virtual machine and this option is now deprecated.
-			 */
-			break;
-		case 'P':
-			guest_vmexit_on_pause = 1;
-			break;
-		case 'u':
-			vrtc_enable_localtime(0);
 			break;
 		case 'U':
 			guest_uuid_str = optarg;
 			break;
-		case 'w':
-			strictmsr = 0;
-			break;
 		case 'W':
 			virtio_msix = 0;
-			break;
-		case 'x':
-			x2apic_mode = 1;
 			break;
 		case 'Y':
 			mptgen = 0;
@@ -755,33 +877,65 @@ main(int argc, char *argv[])
 				break;
 			break;
 		case 'G':
-			if (acrn_parse_gvtargs(optarg) != 0) {
+			if (acrn_parse_gvtargs(optarg) != 0)
 				errx(EX_USAGE, "invalid GVT param %s", optarg);
-				exit(1);
-			}
 			break;
 		case 'v':
 			print_version();
 			break;
 		case CMD_OPT_VSBL:
-			if (acrn_parse_vsbl(optarg) != 0) {
+			if (high_bios_size() == 0 && acrn_parse_vsbl(optarg) != 0)
 				errx(EX_USAGE, "invalid vsbl param %s", optarg);
-				exit(1);
-			}
+			break;
+		case CMD_OPT_OVMF:
+			if (!vsbl_file_name && acrn_parse_ovmf(optarg) != 0)
+				errx(EX_USAGE, "invalid ovmf param %s", optarg);
+			skip_pci_mem64bar_workaround = true;
 			break;
 		case CMD_OPT_PART_INFO:
 			if (acrn_parse_guest_part_info(optarg) != 0) {
 				errx(EX_USAGE,
 					"invalid guest partition info param %s",
 					optarg);
-				exit(1);
 			}
 			break;
 		case CMD_OPT_TRUSTY_ENABLE:
 			trusty_enabled = 1;
 			break;
+		case CMD_OPT_VIRTIO_POLL_ENABLE:
+			if (acrn_parse_virtio_poll_interval(optarg) != 0) {
+				errx(EX_USAGE,
+					"invalid virtio poll interval %s",
+					optarg);
+			}
+			break;
+		case CMD_OPT_MAC_SEED:
+			strncpy(mac_seed_str, optarg, sizeof(mac_seed_str));
+			mac_seed_str[sizeof(mac_seed_str) - 1] = '\0';
+			mac_seed = mac_seed_str;
+			break;
 		case CMD_OPT_PTDEV_NO_RESET:
 			ptdev_no_reset(true);
+			break;
+		case CMD_OPT_DEBUGEXIT:
+			debugexit_enabled = true;
+			break;
+		case CMD_OPT_LAPIC_PT:
+			lapic_pt = true;
+		case CMD_OPT_RTVM:
+			is_rtvm = true;
+			break;
+		case CMD_OPT_VTPM2:
+			if (acrn_parse_vtpm2(optarg) != 0)
+				errx(EX_USAGE, "invalid vtpm2 param %s", optarg);
+			break;
+		case CMD_OPT_INTR_MONITOR:
+			if (acrn_parse_intr_monitor(optarg) != 0)
+				errx(EX_USAGE, "invalid intr-monitor params %s", optarg);
+			break;
+		case CMD_OPT_LOGGER_SETTING:
+			if (init_logger_setting(optarg) != 0)
+				errx(EX_USAGE, "invalid logger setting params %s", optarg);
 			break;
 		case 'h':
 			usage(0);
@@ -795,53 +949,53 @@ main(int argc, char *argv[])
 	if (argc != 1)
 		usage(1);
 
-	if (!check_hugetlb_support()) {
-		fprintf(stderr, "check_hugetlb_support failed\n");
+	vmname = argv[0];
+	if (strnlen(vmname, MAX_VMNAME_LEN) >= MAX_VMNAME_LEN) {
+		pr_err("vmname size exceed %u\n", MAX_VMNAME_LEN);
 		exit(1);
 	}
 
-	vmname = argv[0];
+	if (!init_hugetlb()) {
+		pr_err("init_hugetlb failed\n");
+		exit(1);
+	}
 
 	for (;;) {
-		ctx = do_open(vmname);
-
-		/* set IOReq buffer page */
-		error = vm_set_shared_io_page(ctx, (unsigned long)vhm_req_buf);
-		if (error)
-			goto fail;
+		pr_notice("vm_create: %s\n", vmname);
+		ctx = vm_create(vmname, (unsigned long)vhm_req_buf);
+		if (!ctx) {
+			pr_err("vm_create failed");
+			goto create_fail;
+		}
 
 		if (guest_ncpus < 1) {
-			fprintf(stderr, "Invalid guest vCPUs (%d)\n",
-				guest_ncpus);
+			pr_err("Invalid guest vCPUs (%d)\n", guest_ncpus);
 			goto fail;
 		}
 
 		max_vcpus = num_vcpus_allowed(ctx);
 		if (guest_ncpus > max_vcpus) {
-			fprintf(stderr, "%d vCPUs requested but %d available\n",
+			pr_err("%d vCPUs requested but %d available\n",
 				guest_ncpus, max_vcpus);
 			goto fail;
 		}
 
-		vm_set_memflags(ctx, memflags);
-		err = vm_setup_memory(ctx, memsize);
-		if (err) {
-			fprintf(stderr, "Unable to setup memory (%d)\n", errno);
+		pr_notice("vm_setup_memory: size=0x%lx\n", memsize);
+		error = vm_setup_memory(ctx, memsize);
+		if (error) {
+			pr_err("Unable to setup memory (%d)\n", errno);
 			goto fail;
 		}
 
-		err = mevent_init();
-		if (err) {
-			fprintf(stderr, "Unable to initialize mevent (%d)\n",
-				errno);
+		error = mevent_init();
+		if (error) {
+			pr_err("Unable to initialize mevent (%d)\n", errno);
 			goto mevent_fail;
 		}
 
-		if (gdb_port != 0)
-			fprintf(stderr, "dbgport not supported\n");
-
+		pr_notice("vm_init_vdevs\n");
 		if (vm_init_vdevs(ctx) < 0) {
-			fprintf(stderr, "Unable to init vdev (%d)\n", errno);
+			pr_err("Unable to init vdev (%d)\n", errno);
 			goto dev_fail;
 		}
 
@@ -855,19 +1009,20 @@ main(int argc, char *argv[])
 			}
 		}
 
-		error = smbios_build(ctx);
-		if (error)
-			goto vm_fail;
-
 		if (acpi) {
 			error = acpi_build(ctx, guest_ncpus);
-			if (error)
+			if (error) {
+				pr_err("acpi_build failed, error=%d\n", error);
 				goto vm_fail;
+			}
 		}
 
+		pr_notice("acrn_sw_load\n");
 		error = acrn_sw_load(ctx);
-		if (error)
+		if (error) {
+			pr_err("acrn_sw_load failed, error=%d\n", error);
 			goto vm_fail;
+		}
 
 		/*
 		 * Change the proc title to include the VM name.
@@ -877,9 +1032,12 @@ main(int argc, char *argv[])
 		/*
 		 * Add CPU 0
 		 */
+		pr_notice("add_cpu\n");
 		error = add_cpu(ctx, guest_ncpus);
-		if (error)
+		if (error) {
+			pr_err("add_cpu failed, error=%d\n", error);
 			goto vm_fail;
+		}
 
 		/* Make a copy for ctx */
 		_ctx = ctx;
@@ -892,14 +1050,15 @@ main(int argc, char *argv[])
 		vm_pause(ctx);
 		delete_cpu(ctx, BSP);
 
-		if (vm_get_suspend_mode() != VM_SUSPEND_RESET)
+		if (vm_get_suspend_mode() != VM_SUSPEND_FULL_RESET){
+			ret = 0;
 			break;
+		}
 
 		vm_deinit_vdevs(ctx);
 		mevent_deinit();
 		vm_unsetup_memory(ctx);
 		vm_destroy(ctx);
-		vm_close(ctx);
 		_ctx = 0;
 
 		vm_set_suspend_mode(VM_SUSPEND_NONE);
@@ -913,6 +1072,8 @@ mevent_fail:
 	vm_unsetup_memory(ctx);
 fail:
 	vm_destroy(ctx);
-	vm_close(ctx);
-	exit(0);
+create_fail:
+	uninit_hugetlb();
+	deinit_loggers();
+	exit(ret);
 }

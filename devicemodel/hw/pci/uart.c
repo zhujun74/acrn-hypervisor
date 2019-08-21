@@ -27,6 +27,7 @@
  */
 
 #include <stdio.h>
+#include <sys/errno.h>
 
 #include "pci_core.h"
 #include "uart_core.h"
@@ -59,30 +60,24 @@ static void
 pci_uart_write(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 	       int baridx, uint64_t offset, int size, uint64_t value)
 {
-	assert(baridx == 0);
-	assert(size == 1);
-
-	uart_write(dev->arg, offset, value);
+	if (baridx == 0 && size == 1)
+		uart_write(dev->arg, offset, value);
 }
 
 uint64_t
 pci_uart_read(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 	      int baridx, uint64_t offset, int size)
 {
-	uint8_t val;
+	uint8_t val = 0xff;
 
-	assert(baridx == 0);
-	assert(size == 1);
-
-	val = uart_read(dev->arg, offset);
+	if (baridx == 0 && size == 1)
+		val = uart_read(dev->arg, offset);
 	return val;
 }
 
 static int
 pci_uart_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
-	struct uart_vdev *uart;
-
 	pci_emul_alloc_bar(dev, 0, PCIBAR_IO, UART_IO_BAR_SIZE);
 	pci_lintr_request(dev);
 
@@ -91,10 +86,8 @@ pci_uart_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_set_cfgdata16(dev, PCIR_VENDOR, COM_VENDOR);
 	pci_set_cfgdata8(dev, PCIR_CLASS, PCIC_SIMPLECOMM);
 
-	uart = uart_init(pci_uart_intr_assert, pci_uart_intr_deassert, dev);
-	dev->arg = uart;
-
-	if (uart_set_backend(uart, opts) != 0) {
+	dev->arg = uart_set_backend(pci_uart_intr_assert, pci_uart_intr_deassert, dev, opts);
+	if (dev->arg == NULL) {
 		fprintf(stderr, "Unable to initialize backend '%s' for "
 		    "pci uart at %d:%d\n", opts, dev->slot, dev->func);
 		return -1;
@@ -112,7 +105,6 @@ pci_uart_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		return;
 
 	uart_release_backend(uart, opts);
-	uart_deinit(uart);
 }
 
 struct pci_vdev_ops pci_ops_com = {

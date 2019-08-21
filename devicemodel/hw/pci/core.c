@@ -35,6 +35,7 @@
 #include <assert.h>
 #include <stdbool.h>
 
+#include "dm.h"
 #include "vmmapi.h"
 #include "acpi.h"
 #include "inout.h"
@@ -44,6 +45,7 @@
 #include "irq.h"
 #include "lpc.h"
 #include "sw_load.h"
+#include "log.h"
 
 #define CONF1_ADDR_PORT    0x0cf8
 #define CONF1_DATA_PORT    0x0cfc
@@ -87,23 +89,22 @@ static uint64_t pci_emul_iobase;
 static uint64_t pci_emul_membase32;
 static uint64_t pci_emul_membase64;
 
+extern bool skip_pci_mem64bar_workaround;
+
 #define	PCI_EMUL_IOBASE		0x2000
 #define	PCI_EMUL_IOLIMIT	0x10000
 
-#define	PCI_EMUL_ECFG_BASE	0xE0000000		    /* 3.5GB */
 #define	PCI_EMUL_ECFG_SIZE	(MAXBUSES * 1024 * 1024)    /* 1MB per bus */
 SYSRES_MEM(PCI_EMUL_ECFG_BASE, PCI_EMUL_ECFG_SIZE);
 
 #define	PCI_EMUL_MEMLIMIT32	PCI_EMUL_ECFG_BASE
-
-#define	PCI_EMUL_MEMBASE64	0x7000000000UL
-#define	PCI_EMUL_MEMLIMIT64	0x8D00000000UL
 
 static struct pci_vdev_ops *pci_emul_finddev(char *name);
 static void pci_lintr_route(struct pci_vdev *dev);
 static void pci_lintr_update(struct pci_vdev *dev);
 static void pci_cfgrw(struct vmctx *ctx, int vcpu, int in, int bus, int slot,
 		      int func, int coff, int bytes, uint32_t *val);
+static void pci_emul_free_msixcap(struct pci_vdev *pdi);
 
 static inline void
 CFGWRITE(struct pci_vdev *dev, int coff, uint32_t val, int bytes)
@@ -125,6 +126,15 @@ CFGREAD(struct pci_vdev *dev, int coff, int bytes)
 		return pci_get_cfgdata16(dev, coff);
 	else
 		return pci_get_cfgdata32(dev, coff);
+}
+
+static inline int
+is_pci_gvt(struct pci_vdev *dev)
+{
+	if (dev == NULL || strncmp(dev->dev_ops->class_name, "pci-gvt",7))
+		return 0;
+	else
+		return 1;
 }
 
 /*
@@ -153,6 +163,39 @@ pci_parse_slot_usage(char *aopt)
 }
 
 int
+parse_bdf(char *s, int *bus, int *dev, int *func, int base)
+{
+	char *s_bus, *s_dev, *s_func;
+	char *str, *cp;
+	int ret = 0;
+
+	str = cp = strdup(s);
+	bus ? *bus = 0 : 0;
+	dev ? *dev = 0 : 0;
+	func ? *func = 0 : 0;
+	s_bus = s_dev = s_func = NULL;
+	s_dev = strsep(&cp, ":/.");
+	if (cp) {
+		s_func = strsep(&cp, ":/.");
+		if (cp) {
+			s_bus = s_dev;
+			s_dev = s_func;
+			s_func = strsep(&cp, ":/.");
+		}
+	}
+
+	if (s_dev && dev)
+		ret |= dm_strtoi(s_dev, &s_dev, base, dev);
+	if (s_func && func)
+		ret |= dm_strtoi(s_func, &s_func, base, func);
+	if (s_bus && bus)
+		ret |= dm_strtoi(s_bus, &s_bus, base, bus);
+	free(str);
+
+	return ret;
+}
+
+int
 pci_parse_slot(char *opt)
 {
 	struct businfo *bi;
@@ -168,41 +211,22 @@ pci_parse_slot(char *opt)
 	}
 
 	emul = config = NULL;
-	cp = strchr(str, ',');
-	if (cp != NULL) {
-		*cp = '\0';
-		emul = cp + 1;
-		cp = strchr(emul, ',');
-		if (cp != NULL) {
-			*cp = '\0';
-			config = cp + 1;
-			if (*config == 'b') {
-				b = config;
-				cp = config + 1;
-				if (*cp == ',') {
-					*cp = '\0';
-					config = cp + 1;
-				} else {
-					b = NULL;
-				}
-			}
-		}
+	cp = str;
+	str = strsep(&cp, ",");
+	if (cp) {
+		emul = strsep(&cp, ",");
+		/* for boot device */
+		if (cp && *cp == 'b' && *(cp+1) == ',')
+			b = strsep(&cp, ",");
+		config = cp;
 	} else {
 		pci_parse_slot_usage(opt);
 		goto done;
 	}
 
 	/* <bus>:<slot>:<func> */
-	if (sscanf(str, "%d:%d:%d", &bnum, &snum, &fnum) != 3) {
-		bnum = 0;
-		/* <slot>:<func> */
-		if (sscanf(str, "%d:%d", &snum, &fnum) != 2) {
-			fnum = 0;
-			/* <slot> */
-			if (sscanf(str, "%d", &snum) != 1)
-				snum = -1;
-		}
-	}
+	if (parse_bdf(str, &bnum, &snum, &fnum, 10) != 0)
+		snum = -1;
 
 	if (bnum < 0 || bnum >= MAXBUSES || snum < 0 || snum >= MAXSLOTS ||
 	    fnum < 0 || fnum >= MAXFUNCS) {
@@ -355,6 +379,17 @@ pci_msix_pba_bar(struct pci_vdev *dev)
 		return -1;
 }
 
+static inline uint64_t
+bar_value(int size, uint64_t val)
+{
+	uint64_t mask;
+
+	assert(size == 1 || size == 2 || size == 4 || size == 8);
+	mask = (size < 8 ? 1UL << (size * 8) : 0UL) - 1;
+
+	return val & mask;
+}
+
 static int
 pci_emul_io_handler(struct vmctx *ctx, int vcpu, int in, int port, int bytes,
 		    uint32_t *eax, void *arg)
@@ -369,12 +404,13 @@ pci_emul_io_handler(struct vmctx *ctx, int vcpu, int in, int port, int bytes,
 		    port >= pdi->bar[i].addr &&
 		    port + bytes <= pdi->bar[i].addr + pdi->bar[i].size) {
 			offset = port - pdi->bar[i].addr;
-			if (in)
+			if (in) {
 				*eax = (*ops->vdev_barread)(ctx, vcpu, pdi, i,
-							 offset, bytes);
-			else
+				                            offset, bytes);
+				*eax = bar_value(bytes, *eax);
+			} else
 				(*ops->vdev_barwrite)(ctx, vcpu, pdi, i, offset,
-						   bytes, *eax);
+				                      bytes, bar_value(bytes, *eax));
 			return 0;
 		}
 	}
@@ -390,11 +426,10 @@ pci_emul_mem_handler(struct vmctx *ctx, int vcpu, int dir, uint64_t addr,
 	uint64_t offset;
 	int bidx = (int) arg2;
 
-	assert(bidx <= PCI_BARMAX);
-	assert(pdi->bar[bidx].type == PCIBAR_MEM32 ||
-	       pdi->bar[bidx].type == PCIBAR_MEM64);
-	assert(addr >= pdi->bar[bidx].addr &&
-	       addr + size <= pdi->bar[bidx].addr + pdi->bar[bidx].size);
+	if (addr + size > pdi->bar[bidx].addr + pdi->bar[bidx].size) {
+		pr_err("%s, Out of emulated memory range\n", __func__);
+		return -ESRCH;
+	}
 
 	offset = addr - pdi->bar[bidx].addr;
 
@@ -406,17 +441,24 @@ pci_emul_mem_handler(struct vmctx *ctx, int vcpu, int dir, uint64_t addr,
 					   4, *val >> 32);
 		} else {
 			(*ops->vdev_barwrite)(ctx, vcpu, pdi, bidx, offset,
-					   size, *val);
+					   size, bar_value(size, *val));
 		}
 	} else {
 		if (size == 8) {
-			*val = (*ops->vdev_barread)(ctx, vcpu, pdi, bidx,
-						 offset, 4);
-			*val |= (*ops->vdev_barread)(ctx, vcpu, pdi, bidx,
-						  offset + 4, 4) << 32;
+			uint64_t val_lo, val_hi;
+
+			val_lo = (*ops->vdev_barread)(ctx, vcpu, pdi, bidx,
+			                              offset, 4);
+			val_lo = bar_value(4, val_lo);
+
+			val_hi = (*ops->vdev_barread)(ctx, vcpu, pdi, bidx,
+			                              offset + 4, 4);
+
+			*val = val_lo | (val_hi << 32);
 		} else {
 			*val = (*ops->vdev_barread)(ctx, vcpu, pdi, bidx,
-						 offset, size);
+			                            offset, size);
+			*val = bar_value(size, *val);
 		}
 	}
 
@@ -430,7 +472,10 @@ pci_emul_alloc_resource(uint64_t *baseptr, uint64_t limit, uint64_t size,
 {
 	uint64_t base;
 
-	assert((size & (size - 1)) == 0);	/* must be a power of 2 */
+	if ((size & (size - 1)) != 0) {	/* must be a power of 2 */
+		pr_err("%s: Cannot alloc invalid size %lld resource\n", __func__, size);
+		return -1;
+	}
 
 	base = roundup2(*baseptr, size);
 
@@ -453,13 +498,27 @@ pci_emul_alloc_bar(struct pci_vdev *pdi, int idx, enum pcibar_type type,
  * Register (or unregister) the MMIO or I/O region associated with the BAR
  * register 'idx' of an emulated pci device.
  */
-static void
+static int
 modify_bar_registration(struct pci_vdev *dev, int idx, int registration)
 {
 	int error;
 	struct inout_port iop;
 	struct mem_range mr;
 
+	if (is_pci_gvt(dev)) {
+		/* GVT device is the only one who traps the pci bar access and
+		 * intercepts the corresponding contents in kernel. It needs
+		 * register pci resource only, but no need to register the
+		 * region.
+		 *
+		 * FIXME: This is a short term solution. This patch will be
+		 * obsoleted with the migration of using OVMF to do bar
+		 * addressing and generate ACPI PCI resource from using
+		 * acrn-dm.
+		 */
+		printf("modify_bar_registration: bypass for pci-gvt\n");
+		return 0;
+	}
 	switch (dev->bar[idx].type) {
 	case PCIBAR_IO:
 		bzero(&iop, sizeof(struct inout_port));
@@ -493,7 +552,8 @@ modify_bar_registration(struct pci_vdev *dev, int idx, int registration)
 		error = EINVAL;
 		break;
 	}
-	assert(error == 0);
+
+	return error;
 }
 
 static void
@@ -509,25 +569,25 @@ register_bar(struct pci_vdev *dev, int idx)
 }
 
 /* Are we decoding i/o port accesses for the emulated pci device? */
-static int
+static bool
 porten(struct pci_vdev *dev)
 {
 	uint16_t cmd;
 
 	cmd = pci_get_cfgdata16(dev, PCIR_COMMAND);
 
-	return (cmd & PCIM_CMD_PORTEN);
+	return (cmd & PCIM_CMD_PORTEN) != 0;
 }
 
 /* Are we decoding memory accesses for the emulated pci device? */
-static int
+static bool
 memen(struct pci_vdev *dev)
 {
 	uint16_t cmd;
 
 	cmd = pci_get_cfgdata16(dev, PCIR_COMMAND);
 
-	return (cmd & PCIM_CMD_MEMEN);
+	return (cmd & PCIM_CMD_MEMEN) != 0;
 }
 
 /*
@@ -537,14 +597,18 @@ memen(struct pci_vdev *dev)
  * the address range decoded by the BAR register.
  */
 static void
-update_bar_address(struct  pci_vdev *dev, uint64_t addr, int idx, int type)
+update_bar_address(struct vmctx *ctx, struct pci_vdev *dev, uint64_t addr,
+	int idx, int type, bool ignore_reg_unreg)
 {
-	int decode;
+	bool decode = false;
+	uint64_t orig_addr = dev->bar[idx].addr;
 
-	if (dev->bar[idx].type == PCIBAR_IO)
-		decode = porten(dev);
-	else
-		decode = memen(dev);
+	if (!ignore_reg_unreg) {
+		if (dev->bar[idx].type == PCIBAR_IO)
+			decode = porten(dev);
+		else
+			decode = memen(dev);
+	}
 
 	if (decode)
 		unregister_bar(dev, idx);
@@ -563,11 +627,16 @@ update_bar_address(struct  pci_vdev *dev, uint64_t addr, int idx, int type)
 		dev->bar[idx].addr |= addr;
 		break;
 	default:
-		assert(0);
+		pr_err("%s: invalid bar type %d\n", __func__, type);
+		return;
 	}
 
 	if (decode)
 		register_bar(dev, idx);
+
+	/* update bar mapping */
+	if (dev->dev_ops->vdev_update_bar_map && decode)
+		dev->dev_ops->vdev_update_bar_map(ctx, dev, idx, orig_addr);
 }
 
 int
@@ -576,8 +645,6 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 {
 	int error;
 	uint64_t *baseptr, limit, addr, mask, lobits, bar;
-
-	assert(idx >= 0 && idx <= PCI_BARMAX);
 
 	if ((size & (size - 1)) != 0)
 		size = 1UL << flsl(size);	/* round up to a power of 2 */
@@ -603,31 +670,37 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 		lobits = PCIM_BAR_IO_SPACE;
 		break;
 	case PCIBAR_MEM64:
+		if (idx + 1 > PCI_BARMAX) {
+			pr_err("%s: invalid bar number %d for MEM64 type\n", __func__, idx);
+			return -1;
+		}
 		/*
-		 * XXX
+		 * FIXME
 		 * Some drivers do not work well if the 64-bit BAR is allocated
 		 * above 4GB. Allow for this by allocating small requests under
 		 * 4GB unless then allocation size is larger than some arbitrary
-		 * number (32MB currently).
+		 * number (32MB currently). If guest booted by ovmf, then skip the
+		 * workaround.
 		 */
-		if (size > 32 * 1024 * 1024) {
-			/*
-			 * XXX special case for device requiring peer-peer DMA
-			 */
-			if (size == 0x100000000UL)
-				baseptr = &hostbase;
-			else
-				baseptr = &pci_emul_membase64;
-			limit = PCI_EMUL_MEMLIMIT64;
+		if (!skip_pci_mem64bar_workaround && (size <= 32 * 1024 * 1024)) {
+			baseptr = &pci_emul_membase32;
+			limit = PCI_EMUL_MEMLIMIT32;
 			mask = PCIM_BAR_MEM_BASE;
-			lobits = PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_64 |
-				 PCIM_BAR_MEM_PREFETCH;
+			lobits = PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_64;
 			break;
 		}
-		baseptr = &pci_emul_membase32;
-		limit = PCI_EMUL_MEMLIMIT32;
+
+		/*
+		 * XXX special case for device requiring peer-peer DMA
+		 */
+		if (size == 0x100000000UL)
+			baseptr = &hostbase;
+		else
+			baseptr = &pci_emul_membase64;
+		limit = PCI_EMUL_MEMLIMIT64;
 		mask = PCIM_BAR_MEM_BASE;
-		lobits = PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_64;
+		lobits = PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_64 |
+			PCIM_BAR_MEM_PREFETCH;
 		break;
 	case PCIBAR_MEM32:
 		baseptr = &pci_emul_membase32;
@@ -636,8 +709,8 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 		lobits = PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_32;
 		break;
 	default:
-		printf("pci_emul_alloc_base: invalid bar type %d\n", type);
-		assert(0);
+		pr_err("%s: invalid bar type %d\n", __func__, type);
+		return -1;
 	}
 
 	if (baseptr != NULL) {
@@ -655,7 +728,6 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 	pci_set_cfgdata32(pdi, PCIR_BAR(idx), bar);
 
 	if (type == PCIBAR_MEM64) {
-		assert(idx + 1 <= PCI_BARMAX);
 		pdi->bar[idx + 1].type = PCIBAR_MEMHI64;
 		pci_set_cfgdata32(pdi, PCIR_BAR(idx + 1), bar >> 32);
 	}
@@ -669,11 +741,23 @@ void
 pci_emul_free_bars(struct pci_vdev *pdi)
 {
 	int i;
+	bool enabled;
 
 	for (i = 0; i < PCI_BARMAX; i++) {
 		if ((pdi->bar[i].type != PCIBAR_NONE) &&
 			(pdi->bar[i].type != PCIBAR_MEMHI64)){
-			unregister_bar(pdi, i);
+			/*
+			 * Check whether the bar is enabled or not,
+			 * if it is disabled then it should have been
+			 * unregistered in pci_emul_cmdsts_write.
+			 */
+			if (pdi->bar[i].type == PCIBAR_IO)
+				enabled = porten(pdi);
+			else
+				enabled = memen(pdi);
+
+			if (enabled)
+				unregister_bar(pdi, i);
 			pdi->bar[i].type = PCIBAR_NONE;
 		}
 	}
@@ -685,8 +769,6 @@ pci_emul_add_capability(struct pci_vdev *dev, u_char *capdata, int caplen)
 {
 	int i, capoff, reallen;
 	uint16_t sts;
-
-	assert(caplen > 0);
 
 	reallen = roundup2(caplen, 4);		/* dword aligned */
 
@@ -827,24 +909,31 @@ pci_emul_deinit(struct vmctx *ctx, struct pci_vdev_ops *ops, int bus, int slot,
 		free(fi->fi_param);
 
 	if (fi->fi_devi) {
+		pci_lintr_release(fi->fi_devi);
 		pci_emul_free_bars(fi->fi_devi);
+		pci_emul_free_msixcap(fi->fi_devi);
 		free(fi->fi_devi);
 	}
 }
 
-void
+int
 pci_populate_msicap(struct msicap *msicap, int msgnum, int nextptr)
 {
 	int mmc;
 
 	/* Number of msi messages must be a power of 2 between 1 and 32 */
-	assert((msgnum & (msgnum - 1)) == 0 && msgnum >= 1 && msgnum <= 32);
+	if (((msgnum & (msgnum - 1)) != 0) || msgnum < 1 || msgnum > 32) {
+		pr_err("%s: invalid number of msi messages!\n", __func__);
+		return -1;
+	}
 	mmc = ffs(msgnum) - 1;
 
 	bzero(msicap, sizeof(struct msicap));
 	msicap->capid = PCIY_MSI;
 	msicap->nextptr = nextptr;
 	msicap->msgctrl = PCIM_MSICTRL_64BIT | (mmc << 1);
+
+	return 0;
 }
 
 int
@@ -852,17 +941,14 @@ pci_emul_add_msicap(struct pci_vdev *dev, int msgnum)
 {
 	struct msicap msicap;
 
-	pci_populate_msicap(&msicap, msgnum, 0);
-
-	return pci_emul_add_capability(dev, (u_char *)&msicap, sizeof(msicap));
+	return pci_populate_msicap(&msicap, msgnum, 0) ||
+		pci_emul_add_capability(dev, (u_char *)&msicap, sizeof(msicap));
 }
 
 static void
 pci_populate_msixcap(struct msixcap *msixcap, int msgnum, int barnum,
 		     uint32_t msix_tab_size)
 {
-
-	assert(msix_tab_size % 4096 == 0);
 
 	bzero(msixcap, sizeof(struct msixcap));
 	msixcap->capid = PCIY_MSIX;
@@ -883,22 +969,23 @@ pci_populate_msixcap(struct msixcap *msixcap, int msgnum, int barnum,
 	msixcap->pba_info = msix_tab_size | (barnum & PCIM_MSIX_BIR_MASK);
 }
 
-static void
+static int
 pci_msix_table_init(struct pci_vdev *dev, int table_entries)
 {
 	int i, table_size;
 
-	assert(table_entries > 0);
-	assert(table_entries <= MAX_MSIX_TABLE_ENTRIES);
-
 	table_size = table_entries * MSIX_TABLE_ENTRY_SIZE;
 	dev->msix.table = calloc(1, table_size);
-
-	assert(dev->msix.table != NULL);
+	if (!dev->msix.table) {
+		pr_err("%s: Cannot alloc memory!\n", __func__);
+		return -1;
+	}
 
 	/* set mask bit of vector control register */
 	for (i = 0; i < table_entries; i++)
 		dev->msix.table[i].vector_control |= PCIM_MSIX_VCTRL_MASK;
+
+	return 0;
 }
 
 int
@@ -907,8 +994,10 @@ pci_emul_add_msixcap(struct pci_vdev *dev, int msgnum, int barnum)
 	uint32_t tab_size;
 	struct msixcap msixcap;
 
-	assert(msgnum >= 1 && msgnum <= MAX_MSIX_TABLE_ENTRIES);
-	assert(barnum >= 0 && barnum <= PCIR_MAX_BAR_0);
+	if (msgnum > MAX_MSIX_TABLE_ENTRIES) {
+		pr_err("%s: Too many entries!\n", __func__);
+		return -1;
+	}
 
 	tab_size = msgnum * MSIX_TABLE_ENTRY_SIZE;
 
@@ -922,7 +1011,8 @@ pci_emul_add_msixcap(struct pci_vdev *dev, int msgnum, int barnum)
 	dev->msix.pba_offset = tab_size;
 	dev->msix.pba_size = PBA_SIZE(msgnum);
 
-	pci_msix_table_init(dev, msgnum);
+	if (pci_msix_table_init(dev, msgnum) != 0)
+		return -1;
 
 	pci_populate_msixcap(&msixcap, msgnum, barnum, tab_size);
 
@@ -933,6 +1023,16 @@ pci_emul_add_msixcap(struct pci_vdev *dev, int msgnum, int barnum)
 	return (pci_emul_add_capability(dev, (u_char *)&msixcap,
 					sizeof(msixcap)));
 }
+
+static void
+pci_emul_free_msixcap(struct pci_vdev *pdi)
+{
+	if (pdi->msix.table) {
+		free(pdi->msix.table);
+		pdi->msix.table = NULL;
+	}
+}
+
 
 void
 msixcap_cfgwrite(struct pci_vdev *dev, int capoff, int offset,
@@ -1052,7 +1152,6 @@ pci_emul_capwrite(struct pci_vdev *dev, int offset, int bytes, uint32_t val)
 
 		capoff = nextoff;
 	}
-	assert(offset >= capoff);
 
 	/*
 	 * Capability ID and Next Capability Pointer are readonly.
@@ -1130,12 +1229,6 @@ pci_emul_ecfg_handler(struct vmctx *ctx, int vcpu, int dir, uint64_t addr,
 	return 0;
 }
 
-uint64_t
-pci_ecfg_base(void)
-{
-	return PCI_EMUL_ECFG_BASE;
-}
-
 #define	BUSIO_ROUNDUP		32
 #define	BUSMEM_ROUNDUP		(1024 * 1024)
 
@@ -1149,6 +1242,7 @@ init_pci(struct vmctx *ctx)
 	struct funcinfo *fi;
 	size_t lowmem;
 	int bus, slot, func;
+	int success_cnt = 0;
 	int error;
 
 	pci_emul_iobase = PCI_EMUL_IOBASE;
@@ -1176,11 +1270,18 @@ init_pci(struct vmctx *ctx)
 				if (fi->fi_name == NULL)
 					continue;
 				ops = pci_emul_finddev(fi->fi_name);
-				assert(ops != NULL);
+				if (!ops) {
+					pr_warn("No driver for device [%s]\n", fi->fi_name);
+					continue;
+				}
+				pr_notice("pci init %s\r\n", fi->fi_name);
 				error = pci_emul_init(ctx, ops, bus, slot,
 				    func, fi);
-				if (error)
-					return error;
+				if (error) {
+					pr_err("pci %s init failed\n", fi->fi_name);
+					goto pci_emul_init_fail;
+				}
+				success_cnt++;
 			}
 		}
 
@@ -1206,7 +1307,7 @@ init_pci(struct vmctx *ctx)
 
 	error = check_gsi_sharing_violation();
 	if (error < 0)
-		return error;
+		goto pci_emul_init_fail;
 
 	/*
 	 * PCI backends are initialized before routing INTx interrupts
@@ -1236,12 +1337,13 @@ init_pci(struct vmctx *ctx)
 
 	/*
 	 * The guest physical memory map looks like the following:
-	 * [0,		    lowmem)		guest system memory
-	 * [lowmem,	    lowmem_limit)	memory hole (may be absent)
-	 * [lowmem_limit,   0xE0000000)		PCI hole (32-bit BAR allocation)
-	 * [0xE0000000,	    0xF0000000)		PCI extended config window
-	 * [0xF0000000,	    4GB)		LAPIC, IOAPIC, HPET, firmware
-	 * [4GB,	    4GB + highmem)
+	 * [0,              lowmem)         guest system memory
+	 * [lowmem,         lowmem_limit)   memory hole (may be absent)
+	 * [lowmem_limit,   0xE0000000)     PCI hole (32-bit BAR allocation)
+	 * [0xE0000000,     0xF0000000)     PCI extended config window
+	 * [0xF0000000,     4GB)            LAPIC, IOAPIC, HPET, firmware
+	 * [4GB,            5GB)            PCI hole (64-bit BAR allocation)
+	 * [5GB,            5GB + highmem)  guest system memory
 	 */
 
 	/*
@@ -1250,13 +1352,25 @@ init_pci(struct vmctx *ctx)
 	 */
 	lowmem = vm_get_lowmem_size(ctx);
 	bzero(&mr, sizeof(struct mem_range));
-	mr.name = "PCI hole";
+	mr.name = "PCI hole (32-bit)";
 	mr.flags = MEM_F_RW;
 	mr.base = lowmem;
 	mr.size = (4ULL * 1024 * 1024 * 1024) - lowmem;
 	mr.handler = pci_emul_fallback_handler;
 	error = register_mem_fallback(&mr);
-	assert(error == 0);
+	if (error != 0)
+		goto pci_emul_init_fail;
+
+	/* ditto for the 64-bit PCI host aperture */
+	bzero(&mr, sizeof(struct mem_range));
+	mr.name = "PCI hole (64-bit)";
+	mr.flags = MEM_F_RW;
+	mr.base = PCI_EMUL_MEMBASE64;
+	mr.size = PCI_EMUL_MEMLIMIT64 - PCI_EMUL_MEMBASE64;
+	mr.handler = pci_emul_fallback_handler;
+	error = register_mem_fallback(&mr);
+	if (error != 0)
+		goto pci_emul_init_fail;
 
 	/* PCI extended config space */
 	bzero(&mr, sizeof(struct mem_range));
@@ -1266,9 +1380,36 @@ init_pci(struct vmctx *ctx)
 	mr.size = PCI_EMUL_ECFG_SIZE;
 	mr.handler = pci_emul_ecfg_handler;
 	error = register_mem(&mr);
-	assert(error == 0);
+	if (error != 0)
+		goto pci_emul_init_fail;
 
 	return 0;
+
+pci_emul_init_fail:
+	for (bus = 0; bus < MAXBUSES && success_cnt > 0; bus++) {
+		bi = pci_businfo[bus];
+		if (bi == NULL)
+			continue;
+		for (slot = 0; slot < MAXSLOTS && success_cnt > 0; slot++) {
+			si = &bi->slotinfo[slot];
+			for (func = 0; func < MAXFUNCS; func++) {
+				fi = &si->si_funcs[func];
+				if (fi->fi_name == NULL)
+					continue;
+				if (success_cnt-- <= 0)
+					break;
+				ops = pci_emul_finddev(fi->fi_name);
+				if (!ops) {
+					pr_warn("No driver for device [%s]\n", fi->fi_name);
+					continue;
+				}
+				pci_emul_deinit(ctx, ops, bus, slot,
+				    func, fi);
+			}
+		}
+	}
+
+	return error;
 }
 
 void
@@ -1292,9 +1433,16 @@ deinit_pci(struct vmctx *ctx)
 	/* Release PCI hole space */
 	lowmem = vm_get_lowmem_size(ctx);
 	bzero(&mr, sizeof(struct mem_range));
-	mr.name = "PCI hole";
+	mr.name = "PCI hole (32-bit)";
 	mr.base = lowmem;
 	mr.size = (4ULL * 1024 * 1024 * 1024) - lowmem;
+	unregister_mem_fallback(&mr);
+
+	/* ditto for the 64-bit PCI host aperture */
+	bzero(&mr, sizeof(struct mem_range));
+	mr.name = "PCI hole (64-bit)";
+	mr.base = PCI_EMUL_MEMBASE64;
+	mr.size = PCI_EMUL_MEMLIMIT64 - PCI_EMUL_MEMBASE64;
 	unregister_mem_fallback(&mr);
 
 	for (bus = 0; bus < MAXBUSES; bus++) {
@@ -1309,7 +1457,11 @@ deinit_pci(struct vmctx *ctx)
 				if (fi->fi_name == NULL)
 					continue;
 				ops = pci_emul_finddev(fi->fi_name);
-				assert(ops != NULL);
+				if (!ops) {
+					pr_warn("No driver for device [%s]\n", fi->fi_name);
+					continue;
+				}
+				pr_notice("pci deinit %s\n", fi->fi_name);
 				pci_emul_deinit(ctx, ops, bus, slot,
 				    func, fi);
 			}
@@ -1425,7 +1577,6 @@ pci_bus_write_dsdt(int bus)
 			goto done;
 		}
 	}
-	assert(bi != NULL);
 
 	/* i/o window */
 	dsdt_line("      WordIO (ResourceProducer, MinFixed, MaxFixed, "
@@ -1464,29 +1615,31 @@ pci_bus_write_dsdt(int bus)
 	dsdt_line("        ,, , AddressRangeMemory, TypeStatic)");
 	dsdt_line("    })");
 
-	count = pci_count_lintr(bus);
-	if (count != 0) {
-		dsdt_indent(2);
-		dsdt_line("Name (PPRT, Package ()");
-		dsdt_line("{");
-		pci_walk_lintr(bus, pci_pirq_prt_entry, NULL);
-		dsdt_line("})");
-		dsdt_line("Name (APRT, Package ()");
-		dsdt_line("{");
-		pci_walk_lintr(bus, pci_apic_prt_entry, NULL);
-		dsdt_line("})");
-		dsdt_line("Method (_PRT, 0, NotSerialized)");
-		dsdt_line("{");
-		dsdt_line("  If (PICM)");
-		dsdt_line("  {");
-		dsdt_line("    Return (APRT)");
-		dsdt_line("  }");
-		dsdt_line("  Else");
-		dsdt_line("  {");
-		dsdt_line("    Return (PPRT)");
-		dsdt_line("  }");
-		dsdt_line("}");
-		dsdt_unindent(2);
+	if (!is_rtvm) {
+		count = pci_count_lintr(bus);
+		if (count != 0) {
+			dsdt_indent(2);
+			dsdt_line("Name (PPRT, Package ()");
+			dsdt_line("{");
+			pci_walk_lintr(bus, pci_pirq_prt_entry, NULL);
+			dsdt_line("})");
+			dsdt_line("Name (APRT, Package ()");
+			dsdt_line("{");
+			pci_walk_lintr(bus, pci_apic_prt_entry, NULL);
+			dsdt_line("})");
+			dsdt_line("Method (_PRT, 0, NotSerialized)");
+			dsdt_line("{");
+			dsdt_line("  If (PICM)");
+			dsdt_line("  {");
+			dsdt_line("    Return (APRT)");
+			dsdt_line("  }");
+			dsdt_line("  Else");
+			dsdt_line("  {");
+			dsdt_line("    Return (PPRT)");
+			dsdt_line("  }");
+			dsdt_line("}");
+			dsdt_unindent(2);
+		}
 	}
 
 	dsdt_indent(2);
@@ -1527,7 +1680,6 @@ pci_write_dsdt(void)
 int
 pci_bus_configured(int bus)
 {
-	assert(bus >= 0 && bus < MAXBUSES);
 	return (pci_businfo[bus] != NULL);
 }
 
@@ -1552,6 +1704,14 @@ pci_msix_enabled(struct pci_vdev *dev)
 	return (dev->msix.enabled && !dev->msi.enabled);
 }
 
+/**
+ * @brief Generate a MSI-X interrupt to guest
+ *
+ * @param dev Pointer to struct pci_vdev representing virtual PCI device.
+ * @param index MSIx table entry index.
+ *
+ * @return None
+ */
 void
 pci_generate_msix(struct pci_vdev *dev, int index)
 {
@@ -1573,6 +1733,14 @@ pci_generate_msix(struct pci_vdev *dev, int index)
 	}
 }
 
+/**
+ * @brief Generate a MSI interrupt to guest
+ *
+ * @param dev Pointer to struct pci_vdev representing virtual PCI device.
+ * @param index Message data index.
+ *
+ * @return None
+ */
 void
 pci_generate_msi(struct pci_vdev *dev, int index)
 {
@@ -1600,7 +1768,10 @@ pci_lintr_request(struct pci_vdev *dev)
 	int bestpin, bestcount, pin;
 
 	bi = pci_businfo[dev->bus];
-	assert(bi != NULL);
+	if (bi == NULL) {
+		pr_err("%s: pci [%s] has wrong bus %d info!\n", __func__, dev->name, dev->bus);
+		return;
+	}
 
 	/*
 	 * Just allocate a pin from our slot.  The pin will be
@@ -1621,6 +1792,28 @@ pci_lintr_request(struct pci_vdev *dev)
 	pci_set_cfgdata8(dev, PCIR_INTPIN, bestpin + 1);
 }
 
+void
+pci_lintr_release(struct pci_vdev *dev)
+{
+	struct businfo *bi;
+	struct slotinfo *si;
+	int pin;
+
+	bi = pci_businfo[dev->bus];
+	if (bi == NULL) {
+		pr_err("%s: pci [%s] has wrong bus %d info!\n", __func__, dev->name, dev->bus);
+		return;
+	}
+
+	si = &bi->slotinfo[dev->slot];
+
+	for (pin = 1; pin < 4; pin++) {
+		si->si_intpins[pin].ii_count = 0;
+		si->si_intpins[pin].ii_pirq_pin = 0;
+		si->si_intpins[pin].ii_ioapic_irq = 0;
+	}
+}
+
 static void
 pci_lintr_route(struct pci_vdev *dev)
 {
@@ -1631,7 +1824,10 @@ pci_lintr_route(struct pci_vdev *dev)
 		return;
 
 	bi = pci_businfo[dev->bus];
-	assert(bi != NULL);
+	if (bi == NULL) {
+		pr_err("%s: pci [%s] has wrong bus %d info!\n", __func__, dev->name, dev->bus);
+		return;
+	}
 	ii = &bi->slotinfo[dev->slot].si_intpins[dev->lintr.pin - 1];
 
 	/*
@@ -1640,7 +1836,6 @@ pci_lintr_route(struct pci_vdev *dev)
 	 */
 	if (ii->ii_ioapic_irq == 0)
 		ii->ii_ioapic_irq = ioapic_pci_alloc_irq(dev);
-	assert(ii->ii_ioapic_irq > 0);
 
 	/*
 	 * Attempt to allocate a PIRQ pin for this intpin if one is
@@ -1648,17 +1843,26 @@ pci_lintr_route(struct pci_vdev *dev)
 	 */
 	if (ii->ii_pirq_pin == 0)
 		ii->ii_pirq_pin = pirq_alloc_pin(dev);
-	assert(ii->ii_pirq_pin > 0);
 
 	dev->lintr.ioapic_irq = ii->ii_ioapic_irq;
 	dev->lintr.pirq_pin = ii->ii_pirq_pin;
 	pci_set_cfgdata8(dev, PCIR_INTLINE, pirq_irq(ii->ii_pirq_pin));
 }
 
+/**
+ * @brief Assert INTx pin of virtual PCI device
+ *
+ * @param dev Pointer to struct pci_vdev representing virtual PCI device.
+ *
+ * @return None
+ */
 void
 pci_lintr_assert(struct pci_vdev *dev)
 {
-	assert(dev->lintr.pin > 0);
+	if (dev->lintr.pin <= 0) {
+		pr_warn("%s: Invalid intr pin on dev [%s]\n", __func__, dev->name);
+		return;
+	}
 
 	pthread_mutex_lock(&dev->lintr.lock);
 	if (dev->lintr.state == IDLE) {
@@ -1671,10 +1875,20 @@ pci_lintr_assert(struct pci_vdev *dev)
 	pthread_mutex_unlock(&dev->lintr.lock);
 }
 
+/**
+ * @brief Deassert INTx pin of virtual PCI device
+ *
+ * @param dev Pointer to struct pci_vdev representing virtual PCI device.
+ *
+ * @return None
+ */
 void
 pci_lintr_deassert(struct pci_vdev *dev)
 {
-	assert(dev->lintr.pin > 0);
+	if (dev->lintr.pin <= 0) {
+		pr_warn("%s: Invalid intr pin on dev [%s]\n", __func__, dev->name);
+		return;
+	}
 
 	pthread_mutex_lock(&dev->lintr.lock);
 	if (dev->lintr.state == ASSERTED) {
@@ -1843,10 +2057,11 @@ pci_emul_cmdsts_write(struct pci_vdev *dev, int coff, uint32_t new, int bytes)
 					register_bar(dev, i);
 				else
 					unregister_bar(dev, i);
-				}
+			}
 			break;
 		default:
-			assert(0);
+			pr_err("%s: invalid bar type %d\n", __func__, dev->bar[i].type);
+			return;
 		}
 	}
 
@@ -1867,6 +2082,7 @@ pci_cfgrw(struct vmctx *ctx, int vcpu, int in, int bus, int slot, int func,
 	struct pci_vdev_ops *ops;
 	int idx, needcfg;
 	uint64_t addr, bar, mask;
+	bool decode, ignore_reg_unreg = false;
 
 	bi = pci_businfo[bus];
 	if (bi != NULL) {
@@ -1949,6 +2165,30 @@ pci_cfgrw(struct vmctx *ctx, int vcpu, int in, int bus, int slot, int func,
 				return;
 			idx = (coff - PCIR_BAR(0)) / 4;
 			mask = ~(dev->bar[idx].size - 1);
+
+			if (dev->bar[idx].type == PCIBAR_IO)
+				decode = porten(dev);
+			else
+				decode = memen(dev);
+
+			/* Some driver does not disable the decode of BAR
+			 * register via the command register before sizing a
+			 * BAR. This will lead to a overlay of the BAR
+			 * addresses when trying to register the intermediate
+			 * BAR address via register_bar. A stateful variable
+			 * sizing is used to keep track of such kind of BAR
+			 * address changes and workaroud this violation.
+			 */
+			if (decode) {
+				if (!dev->bar[idx].sizing && (*eax == ~0U)) {
+					dev->bar[idx].sizing = true;
+					ignore_reg_unreg = true;
+				} else if (dev->bar[idx].sizing && (*eax != ~0U)) {
+					dev->bar[idx].sizing = false;
+					ignore_reg_unreg = true;
+				}
+			}
+
 			switch (dev->bar[idx].type) {
 			case PCIBAR_NONE:
 				dev->bar[idx].addr = bar = 0;
@@ -1961,16 +2201,18 @@ pci_cfgrw(struct vmctx *ctx, int vcpu, int in, int bus, int slot, int func,
 				 * Register the new BAR value for interception
 				 */
 				if (addr != dev->bar[idx].addr) {
-					update_bar_address(dev, addr, idx,
-							   PCIBAR_IO);
+					update_bar_address(ctx, dev, addr, idx,
+							   PCIBAR_IO,
+							   ignore_reg_unreg);
 				}
 				break;
 			case PCIBAR_MEM32:
 				addr = bar = *eax & mask;
 				bar |= PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_32;
 				if (addr != dev->bar[idx].addr) {
-					update_bar_address(dev, addr, idx,
-							   PCIBAR_MEM32);
+					update_bar_address(ctx, dev, addr, idx,
+							   PCIBAR_MEM32,
+							   ignore_reg_unreg);
 				}
 				break;
 			case PCIBAR_MEM64:
@@ -1978,22 +2220,24 @@ pci_cfgrw(struct vmctx *ctx, int vcpu, int in, int bus, int slot, int func,
 				bar |= PCIM_BAR_MEM_SPACE | PCIM_BAR_MEM_64 |
 				       PCIM_BAR_MEM_PREFETCH;
 				if (addr != (uint32_t)dev->bar[idx].addr) {
-					update_bar_address(dev, addr, idx,
-							   PCIBAR_MEM64);
+					update_bar_address(ctx, dev, addr, idx,
+							   PCIBAR_MEM64,
+							   ignore_reg_unreg);
 				}
 				break;
 			case PCIBAR_MEMHI64:
-				assert(idx >= 1);
 				mask = ~(dev->bar[idx - 1].size - 1);
 				addr = ((uint64_t)*eax << 32) & mask;
 				bar = addr >> 32;
 				if (bar != dev->bar[idx - 1].addr >> 32) {
-					update_bar_address(dev, addr, idx - 1,
-							   PCIBAR_MEMHI64);
+					update_bar_address(ctx, dev, addr, idx - 1,
+							   PCIBAR_MEMHI64,
+							   ignore_reg_unreg);
 				}
 				break;
 			default:
-				assert(0);
+				pr_err("%s: invalid bar type %d\n", __func__, dev->bar[idx].type);
+				return;
 			}
 			pci_set_cfgdata32(dev, coff, bar);
 
@@ -2047,7 +2291,8 @@ pci_emul_cfgdata(struct vmctx *ctx, int vcpu, int in, int port, int bytes,
 {
 	int coff;
 
-	assert(bytes == 1 || bytes == 2 || bytes == 4);
+	if ((bytes != 1) && (bytes != 2) && (bytes != 4))
+		return -1;
 
 	coff = cfgoff + (port - CONF1_DATA_PORT);
 	if (cfgenable) {
@@ -2093,7 +2338,6 @@ struct pci_emul_dummy {
 static int
 pci_emul_dinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
-	int error;
 	struct pci_emul_dummy *dummy;
 
 	dummy = calloc(1, sizeof(struct pci_emul_dummy));
@@ -2104,19 +2348,10 @@ pci_emul_dinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_set_cfgdata16(dev, PCIR_VENDOR, 0x10DD);
 	pci_set_cfgdata8(dev, PCIR_CLASS, 0x02);
 
-	error = pci_emul_add_msicap(dev, PCI_EMUL_MSI_MSGS);
-	assert(error == 0);
-
-	error = pci_emul_alloc_bar(dev, 0, PCIBAR_IO, DIOSZ);
-	assert(error == 0);
-
-	error = pci_emul_alloc_bar(dev, 1, PCIBAR_MEM32, DMEMSZ);
-	assert(error == 0);
-
-	error = pci_emul_alloc_bar(dev, 2, PCIBAR_MEM32, DMEMSZ);
-	assert(error == 0);
-
-	return 0;
+	return pci_emul_add_msicap(dev, PCI_EMUL_MSI_MSGS) ||
+		pci_emul_alloc_bar(dev, 0, PCIBAR_IO, DIOSZ) ||
+		pci_emul_alloc_bar(dev, 1, PCIBAR_MEM32, DMEMSZ) ||
+		pci_emul_alloc_bar(dev, 2, PCIBAR_MEM32, DMEMSZ);
 }
 
 static void
@@ -2243,6 +2478,26 @@ pci_emul_dior(struct vmctx *ctx, int vcpu, struct pci_vdev *dev, int baridx,
 	}
 
 	return value;
+}
+
+struct pci_vdev*
+pci_get_vdev_info(int slot)
+{
+	struct businfo *bi;
+	struct slotinfo *si;
+	struct pci_vdev *dev = NULL;
+
+	bi = pci_businfo[0];
+	if (bi == NULL)
+		return NULL;
+
+	si = &bi->slotinfo[slot];
+	if (si != NULL)
+		dev = si->si_funcs[0].fi_devi;
+	else
+		fprintf(stderr, "slot=%d is empty!\n", slot);
+
+	return dev;
 }
 
 struct pci_vdev_ops pci_dummy = {

@@ -11,7 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <assert.h>
 
 #include "dm.h"
 #include "pci_core.h"
@@ -39,7 +38,7 @@ struct pci_gvt {
 	int host_config_fd;
 	FILE *gvt_file;
 	/* PCI config space */
-	uint8_t *host_config;
+	uint8_t host_config[PCI_REGMAX+1];
 	int instance_created;
 };
 
@@ -52,10 +51,11 @@ int guest_domid = 1;
 int
 acrn_parse_gvtargs(char *arg)
 {
-	if (sscanf(arg, " %d %d %d", &gvt_low_gm_sz,
-			&gvt_high_gm_sz, &gvt_fence_sz) != 3) {
+	if (dm_strtoi(arg, &arg, 10, &gvt_low_gm_sz) != 0 ||
+		dm_strtoi(arg, &arg, 10, &gvt_high_gm_sz) != 0 ||
+		dm_strtoi(arg, &arg, 10, &gvt_fence_sz) != 0)
 		return -1;
-	}
+
 	printf("passed gvt-g optargs low_gm %d, high_gm %d, fence %d\n",
 		gvt_low_gm_sz, gvt_high_gm_sz, gvt_fence_sz);
 
@@ -86,15 +86,11 @@ pci_gvt_read(struct vmctx *ctx, int vcpu, struct pci_vdev *pi,
 static int
 gvt_init_config(struct pci_gvt *gvt)
 {
-	int ret, len;
+	int ret;
 	char name[PATH_MAX];
 	uint8_t cap_ptr = 0;
-
-	gvt->host_config = calloc(1, 256);
-	if (!gvt->host_config) {
-		perror("gvt:calloc host config failed\n");
-		return -1;
-	}
+	uint8_t aperture_size_reg;
+	uint16_t aperture_size = 256;
 
 	snprintf(name, sizeof(name),
 		"/sys/bus/pci/devices/%04x:%02x:%02x.%x/config",
@@ -106,12 +102,13 @@ gvt_init_config(struct pci_gvt *gvt)
 		return -1;
 	}
 
-	len = 256;
-	ret = pread(gvt->host_config_fd, gvt->host_config, len, 0);
-	if (ret < len) {
-		ret = ret < 0 ? -errno : -EFAULT;
-		perror("failed to read host device config space");
-		return ret;
+	ret = pread(gvt->host_config_fd, gvt->host_config, PCI_REGMAX+1, 0);
+
+	close(gvt->host_config_fd);
+
+	if (ret <= PCI_REGMAX) {
+		perror("failed to read host device config space\n");
+		return -1;
 	}
 
 	/* initialize config space */
@@ -144,18 +141,56 @@ gvt_init_config(struct pci_gvt *gvt)
 	/* processor graphics control register */
 	pci_set_cfgdata16(gvt->gvt_pi, 0x52, gvt->host_config[0x52]);
 
+	/* Alloc resource only and no need to register bar for gvt */
 	ret = pci_emul_alloc_bar(gvt->gvt_pi, 0, PCIBAR_MEM32,
 		16 * 1024 * 1024);
-	assert(ret == 0);
+	if (ret != 0) {
+		fprintf(stderr,
+			"allocate gvt pci bar[0] failed\n");
+		return -1;
+	}
+
 	/* same as host, but guest only use partition of it by ballon */
+	aperture_size_reg = gvt->host_config[0x62];
+	switch(aperture_size_reg & 0b1111){
+		case 0b00000:
+			aperture_size = 128;
+			break;
+		case 0b00001:
+			aperture_size = 256;
+			break;
+		case 0b00011:
+			aperture_size = 512;
+			break;
+		case 0b00111:
+			aperture_size = 1024;
+			break;
+		case 0b01111:
+			aperture_size = 2048;
+			break;
+		case 0b11111:
+			aperture_size = 4096;
+			break;
+		default:
+			aperture_size = 256;
+			break;
+	}
+
 	ret = pci_emul_alloc_bar(gvt->gvt_pi, 2, PCIBAR_MEM32,
-		256 * 1024 * 1024);
-	assert(ret == 0);
+		aperture_size * 1024 * 1024);
+	if (ret != 0) {
+		fprintf(stderr,
+			"allocate gvt pci bar[2] failed\n");
+		return -1;
+	}
+
 	/* same as host, lagecy vga usage */
 	ret = pci_emul_alloc_bar(gvt->gvt_pi, 4, PCIBAR_IO, 64);
-	assert(ret == 0);
-
-	close(gvt->host_config_fd);
+	if (ret != 0) {
+		fprintf(stderr,
+			"allocate gvt pci bar[4] failed\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -169,7 +204,7 @@ gvt_create_instance(struct pci_gvt *gvt)
 	gvt->gvt_file = fopen(path, "w");
 	if (gvt->gvt_file == NULL) {
 		WPRINTF(("GVT: open %s failed\n", path));
-		return errno;
+		return -errno;
 	}
 
 	DPRINTF(("GVT: %s: domid=%d, low_gm_sz=%dMB, high_gm_sz=%dMB, "
@@ -178,7 +213,8 @@ gvt_create_instance(struct pci_gvt *gvt)
 
 	if (gvt_low_gm_sz <= 0 || gvt_high_gm_sz <= 0 || gvt_fence_sz <= 0) {
 		WPRINTF(("GVT: %s failed: invalid parameters!\n", __func__));
-		abort();
+		fclose(gvt->gvt_file);
+		return -EINVAL;
 	}
 
 	/* The format of the string is:
@@ -188,10 +224,10 @@ gvt_create_instance(struct pci_gvt *gvt)
 	 */
 	if (fprintf(gvt->gvt_file, "%d,%u,%u,%u\n", guest_domid,
 			gvt_low_gm_sz, gvt_high_gm_sz, gvt_fence_sz) < 0)
-		ret = errno;
+		ret = -errno;
 
 	if (fclose(gvt->gvt_file) != 0)
-		return errno;
+		return -errno;
 
 	if (!ret)
 		gvt->instance_created = 1;
@@ -209,17 +245,17 @@ gvt_destroy_instance(struct pci_gvt *gvt)
 	gvt->gvt_file = fopen(path, "w");
 	if (gvt->gvt_file == NULL) {
 		WPRINTF(("gvt: error: open %s failed", path));
-		return errno;
+		return -errno;
 	}
 
 	/* -domid means we want the gvt driver to free the gvt instance
 	 * of Domain domid.
 	 **/
 	if (fprintf(gvt->gvt_file, "%d\n", -guest_domid) < 0)
-		ret = errno;
+		ret = -errno;
 
 	if (fclose(gvt->gvt_file) != 0)
-		return errno;
+		return -errno;
 
 	if (!ret)
 		gvt->instance_created = 0;
@@ -239,6 +275,7 @@ pci_gvt_init(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
 		return -1;
 	}
 
+	gvt->instance_created = 0;
 	gvt->addr.domain = 0;
 	gvt->addr.bus = pi->bus;
 	gvt->addr.slot = pi->slot;
@@ -250,20 +287,34 @@ pci_gvt_init(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
 
 	ret = gvt_init_config(gvt);
 
+	if (ret)
+		goto fail;
+
 	ret = gvt_create_instance(gvt);
 
-	return ret;
+	if(!ret)
+		return ret;
+fail:
+	perror("GVT: init failed\n");
+	free(gvt);
+	return -1;
 }
 
 void
 pci_gvt_deinit(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
 {
-	int ret;
 	struct pci_gvt *gvt = pi->arg;
+	int ret = 0;
 
-	ret = gvt_destroy_instance(gvt);
-	if (ret)
-		WPRINTF(("GVT: %s: failed: errno=%d\n", __func__, ret));
+	if (gvt) {
+		if (gvt->instance_created)
+			ret = gvt_destroy_instance(gvt);
+		if (ret)
+			WPRINTF(("GVT: %s: failed: errno=%d\n", __func__, ret));
+
+		free(gvt);
+		pi->arg = NULL;
+	}
 }
 
 struct pci_vdev_ops pci_ops_gvt = {
