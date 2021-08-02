@@ -29,6 +29,8 @@
 #ifndef _ACPI_H_
 #define _ACPI_H_
 
+#include "hsm_ioctl_defs.h"
+
 #define	SCI_INT			9
 
 #define	SMI_CMD			0xb2
@@ -39,9 +41,29 @@
 
 #define	IO_PMTMR		0x0	/* PM Timer is disabled in ACPI */
 
+struct acpi_table_hdr {
+	/* ASCII table signature */
+	char                    signature[4];
+	/* Length of table in bytes, including this header */
+	uint32_t                length;
+	/* ACPI Specification minor version number */
+	uint8_t                 revision;
+	/* To make sum of entire table == 0 */
+	uint8_t                 checksum;
+	/* ASCII OEM identification */
+	char                    oem_id[6];
+	/* ASCII OEM table identification */
+	char                    oem_table_id[8];
+	/* OEM revision number */
+	uint32_t                oem_revision;
+	/* ASCII ASL compiler vendor ID */
+	char                    asl_compiler_id[4];
+	/* ASL compiler version */
+	uint32_t                asl_compiler_revision;
+} __attribute__((packed));
+
 /* All dynamic table entry no. */
 #define NHLT_ENTRY_NO		8
-#define PSDS_ENTRY_NO		10
 
 void acpi_table_enable(int num);
 uint32_t get_acpi_base(void);
@@ -59,5 +81,11 @@ void	dsdt_unindent(int levels);
 void	sci_init(struct vmctx *ctx);
 void	pm_write_dsdt(struct vmctx *ctx, int ncpu);
 void	pm_backto_wakeup(struct vmctx *ctx);
+void	inject_power_button_event(struct vmctx *ctx);
+void	power_button_init(struct vmctx *ctx);
+void	power_button_deinit(struct vmctx *ctx);
+
+int pcpuid_from_vcpuid(uint64_t guest_pcpu_bitmask, int vcpu_id);
+int lapicid_from_pcpuid(struct acrn_platform_info *plat_info, int pcpu_id);
 
 #endif /* _ACPI_H_ */

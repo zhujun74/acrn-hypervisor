@@ -6,19 +6,19 @@ Timer
 Because ACRN is a flexible, lightweight reference hypervisor, we provide
 limited timer management services:
 
-- Only lapic tsc-deadline timer is supported as the clock source.
+- Only the lapic tsc-deadline timer is supported as the clock source.
 
 - A timer can only be added on the logical CPU for a process or thread. Timer
-  scheduling or timer migrating are not supported.
+  scheduling or timer migrating is not supported.
 
-How it works
+How It Works
 ************
 
 When the system boots, we check that the hardware supports lapic
 tsc-deadline timer by checking CPUID.01H:ECX.TSC_Deadline[bit 24]. If
 support is missing, we output an error message and panic the hypervisor.
 If supported, we register the timer interrupt callback that raises a
-timer softirq on each logical CPU and set the lapic timer mode to
+timer softirq on each logical CPU and sets the lapic timer mode to
 tsc-deadline timer mode by writing the local APIC LVT register.
 
 Data Structures and APIs
@@ -33,6 +33,9 @@ Interfaces Design
 .. doxygenfunction:: timer_expired
    :project: Project ACRN
 
+.. doxygenfunction:: timer_is_started
+   :project: Project ACRN
+
 .. doxygenfunction:: add_timer
    :project: Project ACRN
 
@@ -45,6 +48,12 @@ Interfaces Design
 .. doxygenfunction:: calibrate_tsc
    :project: Project ACRN
 
+.. doxygenfunction:: cpu_ticks
+   :project: Project ACRN
+
+.. doxygenfunction:: cpu_tickrate
+   :project: Project ACRN
+
 .. doxygenfunction:: us_to_ticks
    :project: Project ACRN
 
@@ -54,8 +63,5 @@ Interfaces Design
 .. doxygenfunction:: ticks_to_ms
    :project: Project ACRN
 
-.. doxygenfunction:: rdtsc
-   :project: Project ACRN
-
-.. doxygenfunction:: get_tsc_khz
+.. doxygenfunction:: udelay
    :project: Project ACRN

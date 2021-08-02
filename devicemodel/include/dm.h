@@ -31,17 +31,17 @@
 
 #include <stdbool.h>
 #include "types.h"
-#include "vmm.h"
 #include "dm_string.h"
 
 #define MAX_VMNAME_LEN	128U
 
 struct vmctx;
-extern int guest_ncpus;
 extern char *guest_uuid_str;
 extern uint8_t trusty_enabled;
 extern char *vsbl_file_name;
 extern char *ovmf_file_name;
+extern char *ovmf_code_file_name;
+extern char *ovmf_vars_file_name;
 extern char *kernel_file_name;
 extern char *elf_file_name;
 extern char *vmname;
@@ -49,9 +49,10 @@ extern bool stdio_in_use;
 extern char *mac_seed;
 extern bool lapic_pt;
 extern bool is_rtvm;
-
-int vmexit_task_switch(struct vmctx *ctx, struct vhm_request *vhm_req,
-		       int *vcpu);
+extern bool pt_tpm2;
+extern bool pt_rtct;
+extern bool vtpm2;
+extern bool is_winvm;
 
 /**
  * @brief Convert guest physical address to host virtual address
@@ -65,7 +66,6 @@ int vmexit_task_switch(struct vmctx *ctx, struct vhm_request *vhm_req,
 void *paddr_guest2host(struct vmctx *ctx, uintptr_t gaddr, size_t len);
 int  virtio_uses_msix(void);
 size_t high_bios_size(void);
-void ptdev_no_reset(bool enable);
 void init_debugexit(void);
 void deinit_debugexit(void);
 #endif

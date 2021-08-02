@@ -5,12 +5,12 @@
  */
 
 #include <types.h>
-#include <msr.h>
-#include <cpufeatures.h>
-#include <cpu.h>
-#include <per_cpu.h>
-#include <cpu_caps.h>
-#include <security.h>
+#include <asm/msr.h>
+#include <asm/cpufeatures.h>
+#include <asm/cpu.h>
+#include <asm/per_cpu.h>
+#include <asm/cpu_caps.h>
+#include <asm/security.h>
 #include <logmsg.h>
 
 static bool skip_l1dfl_vmentry;
@@ -162,10 +162,9 @@ void cpu_internal_buffers_clear(void)
 	}
 }
 
-#ifdef STACK_PROTECTOR
-static uint64_t get_random_value(void)
+uint64_t get_random_value(void)
 {
-	uint64_t random = 0UL;
+	uint64_t random;
 
 	asm volatile ("1: rdrand %%rax\n"
 			"jnc 1b\n"
@@ -176,11 +175,64 @@ static uint64_t get_random_value(void)
 	return random;
 }
 
+#ifdef STACK_PROTECTOR
 void set_fs_base(void)
 {
 	struct stack_canary *psc = &get_cpu_var(stk_canary);
 
 	psc->canary = get_random_value();
 	msr_write(MSR_IA32_FS_BASE, (uint64_t)psc);
+}
+#endif
+
+#ifdef CONFIG_MCE_ON_PSC_WORKAROUND_DISABLED
+bool is_ept_force_4k_ipage(void)
+{
+	return false;
+}
+#else
+bool is_ept_force_4k_ipage(void)
+{
+	bool force_4k_ipage = true;
+	const struct cpuinfo_x86 *info = get_pcpu_info();
+	uint64_t x86_arch_capabilities;
+
+	if (info->displayfamily == 0x6U) {
+		switch (info->displaymodel) {
+		case 0x26U:
+		case 0x27U:
+		case 0x35U:
+		case 0x36U:
+		case 0x37U:
+		case 0x86U:
+		case 0x1CU:
+		case 0x4AU:
+		case 0x4CU:
+		case 0x4DU:
+		case 0x5AU:
+		case 0x5CU:
+		case 0x5DU:
+		case 0x5FU:
+		case 0x6EU:
+		case 0x7AU:
+			/* Atom processor is not affected by the issue
+			 * "Machine Check Error on Page Size Change"
+			 */
+			force_4k_ipage = false;
+			break;
+		default:
+			force_4k_ipage = true;
+			break;
+		}
+	}
+
+	if (pcpu_has_cap(X86_FEATURE_ARCH_CAP)) {
+		x86_arch_capabilities = msr_read(MSR_IA32_ARCH_CAPABILITIES);
+		if ((x86_arch_capabilities & IA32_ARCH_CAP_IF_PSCHANGE_MC_NO) != 0UL) {
+			force_4k_ipage = false;
+		}
+	}
+
+	return force_4k_ipage;
 }
 #endif

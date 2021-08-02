@@ -18,6 +18,8 @@
 #
 import os
 import sys
+from datetime import datetime
+
 sys.path.insert(0, os.path.abspath('.'))
 
 RELEASE = ""
@@ -35,21 +37,17 @@ if "RELEASE" in os.environ:
 # ones.
 
 sys.path.insert(0, os.path.join(os.path.abspath('.'), 'extensions'))
-extensions = ['breathe', 'sphinx.ext.graphviz', 'sphinx.ext.extlinks',
-              'kerneldoc', 'eager_only', 'html_redirects']
+extensions = [
+   'breathe', 'sphinx.ext.graphviz', 'sphinx.ext.extlinks',
+   'eager_only', 'html_redirects', 'link_roles',
+   'sphinx_tabs.tabs'
+]
 
 # extlinks provides a macro template
 
 extlinks = {'acrn-commit': ('https://github.com/projectacrn/acrn-hypervisor/commit/%s', ''),
             'acrn-issue': ('https://github.com/projectacrn/acrn-hypervisor/issues/%s', '')
            }
-
-# kernel-doc extension configuration for running Sphinx directly (e.g. by Read
-# the Docs). In a normal build, these are supplied from the Makefile via command
-# line arguments.
-
-kerneldoc_bin = 'scripts/kernel-doc'
-kerneldoc_srctree = '../../acrn-kernel'
 
 
 graphviz_output_format='png'
@@ -72,8 +70,8 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Project ACRN™'
-copyright = u'2019, Project ACRN'
-author = u'Project ARCN developers'
+copyright = u'2018-' + str(datetime.now().year) + u', ' + project
+author = u'Project ACRN developers'
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -81,15 +79,16 @@ author = u'Project ARCN developers'
 
 # The following code tries to extract the information by reading the
 # Makefile from the acrn-hypervisor repo by finding these lines:
-#   MAJOR_VERSION=0
-#   MINOR_VERSION=1
-#   RC_VERSION=1
+#   MAJOR_VERSION=1
+#   MINOR_VERSION=3
+#   EXTRA_VERSION=-unstable
 
 try:
     version_major = None
     version_minor = None
     version_rc = None
-    for line in open(os.path.normpath("../VERSION")) :
+
+    for line in open(os.path.realpath("../../../VERSION")) :
         # remove comments
         line = line.split('#', 1)[0]
         line = line.rstrip()
@@ -103,18 +102,14 @@ try:
               version_rc = val
            if version_major and version_minor and version_rc :
               break
-except:
-    pass
 finally:
     if version_major and version_minor :
-        version = release = "v " + version_major + '.' + version_minor
+        version = release = str(version_major) + '.' + str(version_minor)
         if version_rc :
           version = release = version + version_rc
     else:
         sys.stderr.write('Warning: Could not extract hypervisor version from VERSION file\n')
         version = release = "unknown"
-
-
 
 #
 # The short X.Y version.
@@ -166,7 +161,7 @@ else:
         'analytics_id': '',
         'logo_only': False,
         'display_version': True,
-        'prev_next_buttons_location': 'None',
+        #'prev_next_buttons_location': 'None',
         # Toc options
         'collapse_navigation': False,
         'sticky_navigation': True,
@@ -177,22 +172,37 @@ else:
 # Here's where we (manually) list the document versions maintained on
 # the published doc website.  On a daily basis we publish to the
 # /latest folder but when releases are made, we publish to a /<relnum>
-# folder (specified via RELEASE=name on the make command).
+# folder (specified via the VERSION file as processed earlier or
+# overridden on the make command line with RELEASE=name.
 
 if tags.has('release'):
+   is_release = True
+   docs_title = '%s' %(version)
    current_version = version
    if RELEASE:
-      version = current_version = RELEASE
+      version = release = current_version = RELEASE
+      docs_title = '%s' %(version)
 else:
    version = current_version = "latest"
+   is_release = False
+   docs_title = 'Latest'
 
 html_context = {
    'current_version': current_version,
+   'docs_title': docs_title,
+   'is_release': is_release,
    'versions': ( ("latest", "/latest/"),
-                 ("1.2", "/1.2/"),
-                 ("1.1", "/1.1/"),
-                 ("1.0", "/1.0/"),
-                 ("0.8", "/0.8/"),
+                 ("2.5", "/2.5/"),
+                 ("2.4", "/2.4/"),
+                 ("2.3", "/2.3/"),
+                 ("2.2", "/2.2/"),
+                 ("2.1", "/2.1/"),
+                 ("2.0", "/2.0/"),
+                 ("1.6.1", "/1.6.1/"),
+                 ("1.6", "/1.6/"),
+                 ("1.5", "/1.5/"),
+                 ("1.4", "/1.4/"),
+                 ("1.0", "/1.0/"),   # keep 1.0
                )
     }
 
@@ -216,8 +226,18 @@ numfig_format = {'figure': 'Figure %s', 'table': 'Table %s', 'code-block': 'Code
 html_static_path = ['static']
 
 def setup(app):
-   app.add_stylesheet("acrn-custom.css")
-   app.add_javascript("acrn-custom.js")
+   import sphinx
+
+   if float(sphinx.__version__[0:3]) < 3.0:
+      app.add_stylesheet("acrn-custom.css")
+      app.add_javascript("https://www.googletagmanager.com/gtag/js?id=UA-831873-64")
+      # note more GA tag manager calls are in acrn-custom.js
+      app.add_javascript("acrn-custom.js")
+   else:
+      app.add_css_file("acrn-custom.css")
+      app.add_js_file("https://www.googletagmanager.com/gtag/js?id=UA-831873-64")
+      # note more GA tag manager calls are in acrn-custom.js
+      app.add_js_file("acrn-custom.js")
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -234,6 +254,10 @@ html_show_sourcelink = False
 # using the given strftime format.
 html_last_updated_fmt = '%b %d, %Y'
 
+# The name of a javascript file (relative to the configuration directory) that
+# implements a search results scorer. If empty, the default will be used.
+html_search_scorer = 'scorer.js'
+
 # -- Options for HTMLHelp output ------------------------------------------
 
 # Output file base name for HTML help builder.
@@ -242,7 +266,15 @@ htmlhelp_basename = 'ACRN Project Help'
 
 # -- Options for LaTeX output ---------------------------------------------
 
+latex_engine = "xelatex"
+
 latex_elements = {
+    'fontpkg': r'''
+\setmainfont{DejaVu Serif}
+\setsansfont{DejaVu Sans}
+\setmonofont{DejaVu Sans Mono}
+''',
+
     # The paper size ('letterpaper' or 'a4paper').
     #
     # 'papersize': 'letterpaper',
@@ -253,7 +285,27 @@ latex_elements = {
 
     # Additional stuff for the LaTeX preamble.
     #
-    # 'preamble': '',
+    'preamble': r'''
+\setcounter{tocdepth}{3}
+\renewcommand\_{\textunderscore\allowbreak}
+\usepackage{listings}
+\usepackage{xcolor}
+\definecolor{IntelMNBlue}{HTML}{003C71}
+\usepackage{titlesec}
+\title{\normalfont\\color{IntelMNBlue}}
+\usepackage{colortbl}
+\protected\def\sphinxstyletheadfamily{\cellcolor[HTML]{DCDCDC}\sffamily\bfseries\color{IntelMNBlue}}
+''',
+    'sphinxsetup': 'hmargin={0.7in,0.7in}, vmargin={1in,1in},\
+verbatimwithframe=true,\
+verbatimwrapslines=true,\
+TitleColor={HTML}{003C71},\
+HeaderFamily=\\rmfamily\\bfseries, \
+InnerLinkColor={HTML}{003C71},\
+OuterLinkColor={HTML}{003C71},\
+VerbatimColor={HTML}{F0F0F0},\
+VerbatimHighlightColor={HTML}{76CEFF},\
+VerbatimBorderColor={HTML}{00285A}',
 
     # Latex figure (float) alignment
     #
@@ -268,6 +320,7 @@ latex_documents = [
      u'Project ACRN', 'manual'),
 ]
 
+latex_logo = 'images/ACRN_Logo_PrimaryLockup_COLOR-300x300-1.png'
 
 # -- Options for manual page output ---------------------------------------
 
@@ -286,7 +339,7 @@ man_pages = [
 #  dir menu entry, description, category)
 texinfo_documents = [
     (master_doc, 'Project ACRN', u'Project ACRN Documentation',
-     author, 'Project ACRN', 
+     author, 'Project ACRN',
      'IoT-Optimized Hypervisor for Intel Architecture',
      'Miscellaneous'),
 ]
@@ -300,7 +353,21 @@ breathe_projects = {
 	"Project ACRN" : "doxygen/xml",
 }
 breathe_default_project = "Project ACRN"
-breathe_default_members = ('members', 'undoc-members', 'content-only')
+# breathe_default_members = ('members', 'undoc-members', 'content-only')
+breathe_domain_by_extension = {
+   "h": "c",
+   "c": "c",
+}
+
+cpp_id_attributes = [
+    '__syscall', '__deprecated', '__may_alias',
+    '__used', '__unused', '__weak',
+    '__DEPRECATED_MACRO', 'FUNC_NORETURN',
+    '__subsystem',
+]
+c_id_attributes = cpp_id_attributes
+
+
 
 
 # Custom added feature to allow redirecting old URLs (caused by
@@ -315,5 +382,7 @@ html_redirect_pages = [
    ('getting-started/index', 'try'),
    ('user-guides/index', 'develop'),
    ('hardware', 'reference/hardware'),
-   ('release_notes', 'release_notes/index')
+   ('release_notes', 'release_notes/index'),
+   ('getting-started/rt_industry', 'getting-started/getting-started'),
+   ('getting-started/rt_industry_ubuntu', 'getting-started/getting-started'),
    ]

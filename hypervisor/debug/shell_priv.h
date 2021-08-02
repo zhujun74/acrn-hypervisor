@@ -7,7 +7,7 @@
 #ifndef SHELL_PRIV_H
 #define SHELL_PRIV_H
 
-#include <spinlock.h>
+#include <asm/lib/spinlock.h>
 
 #define SHELL_CMD_MAX_LEN		100U
 #define SHELL_STRING_MAX_LEN		(PAGE_SIZE << 2U)
@@ -56,10 +56,13 @@ struct shell {
 #define SHELL_CMD_VCPU_DUMPREG_PARAM	"<vm id, vcpu id>"
 #define SHELL_CMD_VCPU_DUMPREG_HELP	"Dump registers for a specific vCPU"
 
-#define SHELL_CMD_DUMPMEM		"dumpmem"
-#define SHELL_CMD_DUMPMEM_PARAM		"<addr, length>"
-#define SHELL_CMD_DUMPMEM_HELP		"Dump host memory, starting at a given address, and for a given length (in "\
-					"bytes)"
+#define SHELL_CMD_DUMP_HOST_MEM		"dump_host_mem"
+#define SHELL_CMD_DUMP_HOST_MEM_PARAM	"<addr, length>"
+#define SHELL_CMD_DUMP_HOST_MEM_HELP	"Dump host memory, starting at a given address(Hex), and for a given length (Dec in bytes)"
+
+#define SHELL_CMD_DUMP_GUEST_MEM	"dump_guest_mem"
+#define SHELL_CMD_DUMP_GUEST_MEM_PARAM	"<vm_id, addr, length>"
+#define SHELL_CMD_DUMP_GUEST_MEM_HELP	"Dump guest memory, vm id(Dec), starting at a given address(Hex), and for a given length (Dec in bytes)"
 
 #define SHELL_CMD_VM_CONSOLE		"vm_console"
 #define SHELL_CMD_VM_CONSOLE_PARAM	"<vm id>"

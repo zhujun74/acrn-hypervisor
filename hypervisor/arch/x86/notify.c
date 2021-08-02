@@ -6,12 +6,13 @@
 
 #include <types.h>
 #include <errno.h>
-#include <bits.h>
-#include <atomic.h>
-#include <irq.h>
-#include <cpu.h>
-#include <per_cpu.h>
-#include <lapic.h>
+#include <asm/lib/bits.h>
+#include <asm/lib/atomic.h>
+#include <asm/irq.h>
+#include <asm/cpu.h>
+#include <asm/per_cpu.h>
+#include <asm/lapic.h>
+#include <asm/guest/vm.h>
 
 static uint32_t notification_irq = IRQ_INVALID;
 
@@ -42,9 +43,9 @@ void smp_call_function(uint64_t mask, smp_call_func_t func, void *data)
 	struct smp_call_info_data *smp_call;
 
 	/* wait for previous smp call complete, which may run on other cpus */
-	while (atomic_cmpxchg64(&smp_call_mask, 0UL, mask & INVALID_BIT_INDEX) != 0UL);
+	while (atomic_cmpxchg64(&smp_call_mask, 0UL, mask) != 0UL);
 	pcpu_id = ffs64(mask);
-	while (pcpu_id < CONFIG_MAX_PCPU_NUM) {
+	while (pcpu_id < MAX_PCPU_NUM) {
 		bitmap_clear_nolock(pcpu_id, &mask);
 		if (is_pcpu_active(pcpu_id)) {
 			smp_call = &per_cpu(smp_call_info, pcpu_id);
@@ -57,7 +58,7 @@ void smp_call_function(uint64_t mask, smp_call_func_t func, void *data)
 		}
 		pcpu_id = ffs64(mask);
 	}
-	send_dest_ipi_mask((uint32_t)smp_call_mask, VECTOR_NOTIFY_VCPU);
+	send_dest_ipi_mask((uint32_t)smp_call_mask, NOTIFY_VCPU_VECTOR);
 	/* wait for current smp call complete */
 	wait_sync_change(&smp_call_mask, 0UL);
 }
@@ -71,7 +72,7 @@ static int32_t request_notification_irq(irq_action_t func, void *data)
 		retval = -EBUSY;
 	} else {
 		/* all cpu register the same notification vector */
-		retval = request_irq(NOTIFY_IRQ, func, data, IRQF_NONE);
+		retval = request_irq(NOTIFY_VCPU_IRQ, func, data, IRQF_NONE);
 		if (retval < 0) {
 			pr_err("Failed to add notify isr");
 			retval = -ENODEV;
@@ -93,24 +94,53 @@ void setup_notification(void)
 		pr_err("Failed to setup notification");
 	}
 
-	dev_dbg(ACRN_DBG_PTIRQ, "NOTIFY: irq[%d] setup vector %x",
+	dev_dbg(DBG_LEVEL_PTIRQ, "NOTIFY: irq[%d] setup vector %x",
 		notification_irq, irq_to_vector(notification_irq));
 }
 
-static void posted_intr_notification(__unused uint32_t irq, __unused void *data)
+/*
+ * posted interrupt handler
+ * @pre (irq - POSTED_INTR_IRQ) < CONFIG_MAX_VM_NUM
+ */
+static void handle_pi_notification(uint32_t irq, __unused void *data)
 {
-	/* Dummy IRQ handler for case that Posted-Interrupt Notification
-	 * is sent to vCPU in root mode(isn't running),interrupt will be
-	 * picked up in next vmentry,do nothine here.
-	 */
+	uint32_t vcpu_index = irq - POSTED_INTR_IRQ;
+
+	ASSERT(vcpu_index < CONFIG_MAX_VM_NUM, "");
+	vcpu_handle_pi_notification(vcpu_index);
 }
 
-/*pre-conditon: be called only by BSP initialization proccess*/
-void setup_posted_intr_notification(void)
+/*pre-condition: be called only by BSP initialization proccess*/
+void setup_pi_notification(void)
 {
-	if (request_irq(POSTED_INTR_NOTIFY_IRQ,
-			posted_intr_notification,
-			NULL, IRQF_NONE) < 0) {
-		pr_err("Failed to setup posted-intr notification");
+	uint32_t i;
+
+	for (i = 0U; i < CONFIG_MAX_VM_NUM; i++) {
+		if (request_irq(POSTED_INTR_IRQ + i, handle_pi_notification, NULL, IRQF_NONE) < 0) {
+			pr_err("Failed to setup pi notification");
+			break;
+		}
 	}
+}
+
+/**
+ * @brief Check if the NMI is for notification purpose
+ *
+ * @return true, if the NMI is triggered for notifying vCPU
+ * @return false, if the NMI is triggered for other purpose
+ */
+bool is_notification_nmi(const struct acrn_vm *vm)
+{
+	bool ret;
+
+	/*
+	 * Currently, ACRN doesn't support vNMI well and there is no well-designed
+	 * way to check if the NMI is for notification or not. Here we take all the
+	 * NMIs as notification NMI for lapic-pt VMs temporarily.
+	 *
+	 * TODO: Add a way to check the NMI is for notification or not in order to support vNMI.
+	 */
+	ret = is_lapic_pt_configured(vm);
+
+	return ret;
 }

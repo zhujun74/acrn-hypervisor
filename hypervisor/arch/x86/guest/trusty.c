@@ -5,18 +5,19 @@
  */
 
 #include <types.h>
-#include <bits.h>
+#include <asm/lib/bits.h>
 #include <crypto_api.h>
-#include <trusty.h>
-#include <page.h>
-#include <pgtable.h>
-#include <mmu.h>
-#include <ept.h>
-#include <vm.h>
-#include <vmx.h>
-#include <security.h>
+#include <asm/guest/trusty.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+#include <asm/mmu.h>
+#include <asm/guest/ept.h>
+#include <asm/guest/vm.h>
+#include <asm/vmx.h>
+#include <asm/security.h>
 #include <logmsg.h>
-#include <seed.h>
+#include <asm/seed.h>
+#include <asm/tsc.h>
 
 #define TRUSTY_VERSION   1U
 #define TRUSTY_VERSION_2 2U
@@ -55,58 +56,16 @@ struct trusty_mem {
 static void create_secure_world_ept(struct acrn_vm *vm, uint64_t gpa_orig,
 		uint64_t size, uint64_t gpa_rebased)
 {
-	uint64_t nworld_pml4e;
-	uint64_t sworld_pml4e;
 	/* Check the HPA of parameter gpa_orig when invoking check_continuos_hpa */
 	uint64_t hpa;
-	uint64_t table_present = EPT_RWX;
-	uint64_t pdpte, *dest_pdpte_p, *src_pdpte_p;
-	void *sub_table_addr, *pml4_base;
-	uint16_t i;
 
 	hpa = gpa2hpa(vm, gpa_orig);
 
 	/* Unmap gpa_orig~gpa_orig+size from guest normal world ept mapping */
 	ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, gpa_orig, size);
 
-	/* Copy PDPT entries from Normal world to Secure world
-	 * Secure world can access Normal World's memory,
-	 * but Normal World can not access Secure World's memory.
-	 * The PML4/PDPT for Secure world are separated from
-	 * Normal World.PD/PT are shared in both Secure world's EPT
-	 * and Normal World's EPT
-	 */
-	pml4_base = vm->arch_vm.ept_mem_ops.info->ept.sworld_pgtable_base;
-	(void)memset(pml4_base, 0U, PAGE_SIZE);
-	vm->arch_vm.sworld_eptp = pml4_base;
-	sanitize_pte((uint64_t *)vm->arch_vm.sworld_eptp);
-
-	/* The trusty memory is remapped to guest physical address
-	 * of gpa_rebased to gpa_rebased + size
-	 */
-	sub_table_addr = vm->arch_vm.ept_mem_ops.info->ept.sworld_pgtable_base +
-									TRUSTY_PML4_PAGE_NUM(TRUSTY_EPT_REBASE_GPA);
-	(void)memset(sub_table_addr, 0U, PAGE_SIZE);
-	sworld_pml4e = hva2hpa(sub_table_addr) | table_present;
-	set_pgentry((uint64_t *)pml4_base, sworld_pml4e);
-
-	nworld_pml4e = get_pgentry((uint64_t *)vm->arch_vm.nworld_eptp);
-
-	/*
-	 * copy PTPDEs from normal world EPT to secure world EPT,
-	 * and remove execute access attribute in these entries
-	 */
-	dest_pdpte_p = pml4e_page_vaddr(sworld_pml4e);
-	src_pdpte_p = pml4e_page_vaddr(nworld_pml4e);
-	for (i = 0U; i < (uint16_t)(PTRS_PER_PDPTE - 1UL); i++) {
-		pdpte = get_pgentry(src_pdpte_p);
-		if ((pdpte & table_present) != 0UL) {
-			pdpte &= ~EPT_EXE;
-			set_pgentry(dest_pdpte_p, pdpte);
-		}
-		src_pdpte_p++;
-		dest_pdpte_p++;
-	}
+	vm->arch_vm.sworld_eptp = pgtable_create_trusty_root(&vm->arch_vm.ept_pgtable,
+					vm->arch_vm.nworld_eptp, EPT_RWX, EPT_EXE);
 
 	/* Map [gpa_rebased, gpa_rebased + size) to secure ept mapping */
 	ept_add_mr(vm, (uint64_t *)vm->arch_vm.sworld_eptp, hpa, gpa_rebased, size, EPT_RWX | EPT_WB);
@@ -132,8 +91,6 @@ void destroy_secure_world(struct acrn_vm *vm, bool need_clr_mem)
 		}
 
 		ept_del_mr(vm, vm->arch_vm.sworld_eptp, gpa_uos, size);
-		/* sanitize trusty ept page-structures */
-		sanitize_pte((uint64_t *)vm->arch_vm.sworld_eptp);
 		vm->arch_vm.sworld_eptp = NULL;
 
 		/* Restore memory to guest normal world */
@@ -141,17 +98,6 @@ void destroy_secure_world(struct acrn_vm *vm, bool need_clr_mem)
 	} else {
 		pr_err("sworld eptp is NULL, it's not created");
 	}
-}
-
-static inline void save_fxstore_guest_area(struct ext_context *ext_ctx)
-{
-	asm volatile("fxsave (%0)"
-			: : "r" (ext_ctx->fxstore_guest_area) : "memory");
-}
-
-static inline void rstor_fxstore_guest_area(const struct ext_context *ext_ctx)
-{
-	asm volatile("fxrstor (%0)" : : "r" (ext_ctx->fxstore_guest_area));
 }
 
 static void save_world_ctx(struct acrn_vcpu *vcpu, struct ext_context *ext_ctx)
@@ -204,8 +150,8 @@ static void save_world_ctx(struct acrn_vcpu *vcpu, struct ext_context *ext_ctx)
 	ext_ctx->ia32_fmask = msr_read(MSR_IA32_FMASK);
 	ext_ctx->ia32_kernel_gs_base = msr_read(MSR_IA32_KERNEL_GS_BASE);
 
-	/* FX area */
-	save_fxstore_guest_area(ext_ctx);
+	/* XSAVE area */
+	save_xsave_area(vcpu, ext_ctx);
 
 	/* For MSRs need isolation between worlds */
 	for (i = 0U; i < NUM_WORLD_MSRS; i++) {
@@ -256,8 +202,8 @@ static void load_world_ctx(struct acrn_vcpu *vcpu, const struct ext_context *ext
 	msr_write(MSR_IA32_FMASK, ext_ctx->ia32_fmask);
 	msr_write(MSR_IA32_KERNEL_GS_BASE, ext_ctx->ia32_kernel_gs_base);
 
-	/* FX area */
-	rstor_fxstore_guest_area(ext_ctx);
+	/* XSAVE area */
+	rstore_xsave_area(vcpu, ext_ctx);
 
 	/* For MSRs need isolation between worlds */
 	for (i = 0U; i < NUM_WORLD_MSRS; i++) {
@@ -268,10 +214,10 @@ static void load_world_ctx(struct acrn_vcpu *vcpu, const struct ext_context *ext
 static void copy_smc_param(const struct run_context *prev_ctx,
 				struct run_context *next_ctx)
 {
-	next_ctx->guest_cpu_regs.regs.rdi = prev_ctx->guest_cpu_regs.regs.rdi;
-	next_ctx->guest_cpu_regs.regs.rsi = prev_ctx->guest_cpu_regs.regs.rsi;
-	next_ctx->guest_cpu_regs.regs.rdx = prev_ctx->guest_cpu_regs.regs.rdx;
-	next_ctx->guest_cpu_regs.regs.rbx = prev_ctx->guest_cpu_regs.regs.rbx;
+	next_ctx->cpu_regs.regs.rdi = prev_ctx->cpu_regs.regs.rdi;
+	next_ctx->cpu_regs.regs.rsi = prev_ctx->cpu_regs.regs.rsi;
+	next_ctx->cpu_regs.regs.rdx = prev_ctx->cpu_regs.regs.rdx;
+	next_ctx->cpu_regs.regs.rbx = prev_ctx->cpu_regs.regs.rbx;
 }
 
 void switch_world(struct acrn_vcpu *vcpu, int32_t next_world)
@@ -337,14 +283,14 @@ static bool setup_trusty_info(struct acrn_vcpu *vcpu, uint32_t mem_size, uint64_
 			/* Prepare trusty startup param */
 			startup_param.size_of_this_struct = sizeof(struct trusty_startup_param);
 			startup_param.mem_size = mem_size;
-			startup_param.tsc_per_ms = CYCLES_PER_MS;
+			startup_param.tsc_per_ms = TSC_PER_MS;
 			startup_param.trusty_mem_base = TRUSTY_EPT_REBASE_GPA;
 
 			/* According to trusty boot protocol, it will use RDI as the
 			 * address(GPA) of startup_param on boot. Currently, the startup_param
 			 * is put in the first page of trusty memory just followed by key_info.
 			 */
-			vcpu->arch.contexts[SECURE_WORLD].run_ctx.guest_cpu_regs.regs.rdi
+			vcpu->arch.contexts[SECURE_WORLD].run_ctx.cpu_regs.regs.rdi
 				= (uint64_t)TRUSTY_EPT_REBASE_GPA + sizeof(struct trusty_key_info);
 
 			stac();
@@ -378,7 +324,7 @@ static bool init_secure_world_env(struct acrn_vcpu *vcpu,
 
 	vcpu->arch.inst_len = 0U;
 	vcpu->arch.contexts[SECURE_WORLD].run_ctx.rip = entry_gpa;
-	vcpu->arch.contexts[SECURE_WORLD].run_ctx.guest_cpu_regs.regs.rsp =
+	vcpu->arch.contexts[SECURE_WORLD].run_ctx.cpu_regs.regs.rsp =
 		TRUSTY_EPT_REBASE_GPA + size;
 
 	vcpu->arch.contexts[SECURE_WORLD].ext_ctx.tsc_offset = 0UL;
@@ -453,10 +399,8 @@ bool initialize_trusty(struct acrn_vcpu *vcpu, struct trusty_boot_param *boot_pa
 
 void save_sworld_context(struct acrn_vcpu *vcpu)
 {
-	(void)memcpy_s(&vcpu->vm->sworld_snapshot,
-			sizeof(struct cpu_context),
-			&vcpu->arch.contexts[SECURE_WORLD],
-			sizeof(struct cpu_context));
+	(void)memcpy_s((void *)&vcpu->vm->sworld_snapshot, sizeof(struct guest_cpu_context),
+			(void *)&vcpu->arch.contexts[SECURE_WORLD], sizeof(struct guest_cpu_context));
 }
 
 void restore_sworld_context(struct acrn_vcpu *vcpu)
@@ -469,10 +413,8 @@ void restore_sworld_context(struct acrn_vcpu *vcpu)
 		sworld_ctl->sworld_memory.length,
 		TRUSTY_EPT_REBASE_GPA);
 
-	(void)memcpy_s(&vcpu->arch.contexts[SECURE_WORLD],
-			sizeof(struct cpu_context),
-			&vcpu->vm->sworld_snapshot,
-			sizeof(struct cpu_context));
+	(void)memcpy_s((void *)&vcpu->arch.contexts[SECURE_WORLD], sizeof(struct guest_cpu_context),
+			(void *)&vcpu->vm->sworld_snapshot, sizeof(struct guest_cpu_context));
 }
 
 /**

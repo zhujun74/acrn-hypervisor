@@ -46,7 +46,7 @@ static int ipu_log_level;
 #define LWRN 2
 #define LDBG 3
 #define IPRINTF(lvl, fmt, args...) \
-	do { if (lvl <= ipu_log_level) printf(TAG fmt, ##args); } while (0)
+	do { if (lvl <= ipu_log_level) pr_dbg(TAG fmt, ##args); } while (0)
 
 struct virtio_ipu {
 	struct virtio_base base;
@@ -377,6 +377,7 @@ virtio_ipu_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 			close(ipu->vbs_k.ipu_fd);
 		ipu->vbs_k.ipu_fd = -1;
 	}
+	virtio_ipu_reset(ipu);
 	pthread_mutex_destroy(&ipu->mtx);
 	free(ipu);
 }

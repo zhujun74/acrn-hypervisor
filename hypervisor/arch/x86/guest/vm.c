@@ -7,37 +7,52 @@
 #include <types.h>
 #include <errno.h>
 #include <sprintf.h>
-#include <vm.h>
-#include <vm_reset.h>
-#include <bits.h>
-#include <e820.h>
-#include <multiboot.h>
-#include <vtd.h>
+#include <asm/per_cpu.h>
+#include <asm/lapic.h>
+#include <asm/guest/vm.h>
+#include <asm/guest/vm_reset.h>
+#include <asm/guest/virq.h>
+#include <asm/lib/bits.h>
+#include <asm/e820.h>
+#include <boot.h>
+#include <asm/vtd.h>
 #include <reloc.h>
-#include <ept.h>
-#include <guest_pm.h>
+#include <asm/guest/ept.h>
+#include <asm/guest/guest_pm.h>
 #include <console.h>
 #include <ptdev.h>
-#include <vmcs.h>
-#include <pgtable.h>
-#include <mmu.h>
+#include <asm/guest/vmcs.h>
+#include <asm/pgtable.h>
+#include <asm/mmu.h>
 #include <logmsg.h>
-#include <vboot.h>
 #include <vboot_info.h>
-#include <board.h>
-#include <sgx.h>
+#include <asm/board.h>
+#include <asm/sgx.h>
 #include <sbuf.h>
-#include <pci_dev.h>
-
-vm_sw_loader_t vm_sw_loader;
+#include <asm/pci_dev.h>
+#include <vacpi.h>
+#include <asm/platform_caps.h>
+#include <mmio_dev.h>
+#include <asm/trampoline.h>
+#include <asm/guest/assign.h>
+#include <vgpio.h>
+#include <asm/rtcm.h>
+#include <asm/irq.h>
+#include <uart16550.h>
 
 /* Local variables */
+
+/* pre-assumption: TRUSTY_RAM_SIZE is 2M aligned */
+static struct page post_uos_sworld_memory[MAX_POST_VM_NUM][TRUSTY_RAM_SIZE >> PAGE_SHIFT] __aligned(MEM_2M);
 
 static struct acrn_vm vm_array[CONFIG_MAX_VM_NUM] __aligned(PAGE_SIZE);
 
 static struct acrn_vm *sos_vm_ptr = NULL;
 
-static struct e820_entry sos_ve820[E820_MAX_ENTRIES];
+void *get_sworld_memory_base(void)
+{
+	return post_uos_sworld_memory;
+}
 
 uint16_t get_vmid_by_uuid(const uint8_t *uuid)
 {
@@ -68,6 +83,14 @@ bool is_created_vm(const struct acrn_vm *vm)
 	return (vm->state == VM_CREATED);
 }
 
+/**
+ * @pre vm != NULL
+ */
+bool is_paused_vm(const struct acrn_vm *vm)
+{
+	return (vm->state == VM_PAUSED);
+}
+
 bool is_sos_vm(const struct acrn_vm *vm)
 {
 	return (vm != NULL)  && (get_vm_config(vm->vm_id)->load_order == SOS_VM);
@@ -81,6 +104,7 @@ bool is_postlaunched_vm(const struct acrn_vm *vm)
 {
 	return (get_vm_config(vm->vm_id)->load_order == POST_LAUNCHED_VM);
 }
+
 
 /**
  * @pre vm != NULL
@@ -117,11 +141,43 @@ bool is_rt_vm(const struct acrn_vm *vm)
 /**
  * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
  */
-bool is_highest_severity_vm(const struct acrn_vm *vm)
+bool is_nvmx_configured(const struct acrn_vm *vm)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
-	return ((vm_config->guest_flags & GUEST_FLAG_HIGHEST_SEVERITY) != 0U);
+	return ((vm_config->guest_flags & GUEST_FLAG_NVMX_ENABLED) != 0U);
+}
+
+/**
+ * @brief VT-d PI posted mode can possibly be used for PTDEVs assigned
+ * to this VM if platform supports VT-d PI AND lapic passthru is not configured
+ * for this VM.
+ * However, as we can only post single destination IRQ, so meeting these 2 conditions
+ * does not necessarily mean posted mode will be used for all PTDEVs belonging
+ * to the VM, unless the IRQ is single-destination for the specific PTDEV
+ * @pre vm != NULL
+ */
+bool is_pi_capable(const struct acrn_vm *vm)
+{
+	return (platform_caps.pi && (!is_lapic_pt_configured(vm)));
+}
+
+struct acrn_vm *get_highest_severity_vm(bool runtime)
+{
+	uint16_t vm_id, highest_vm_id = 0U;
+
+	for (vm_id = 1U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
+		if (runtime && is_poweroff_vm(get_vm_from_vmid(vm_id))) {
+			/* If vm is non-existed or shutdown, it's not highest severity VM */
+			continue;
+		}
+
+		if (get_vm_severity(vm_id) > get_vm_severity(highest_vm_id)) {
+			highest_vm_id = vm_id;
+		}
+	}
+
+	return get_vm_from_vmid(highest_vm_id);
 }
 
 /**
@@ -171,13 +227,13 @@ struct acrn_vm *get_sos_vm(void)
 /**
  * @pre vm_config != NULL
  */
-static inline uint16_t get_vm_bsp_pcpu_id(const struct acrn_vm_config *vm_config)
+static inline uint16_t get_configured_bsp_pcpu_id(const struct acrn_vm_config *vm_config)
 {
-	uint16_t cpu_id = INVALID_CPU_ID;
-
-	cpu_id = ffs64(vm_config->pcpu_bitmap);
-
-	return (cpu_id < get_pcpu_nums()) ? cpu_id : INVALID_CPU_ID;
+	/*
+	 * The set least significant bit represents the pCPU ID for BSP
+	 * vm_config->cpu_affinity has been sanitized to contain valid pCPU IDs
+	 */
+	return ffs64(vm_config->cpu_affinity);
 }
 
 /**
@@ -185,126 +241,131 @@ static inline uint16_t get_vm_bsp_pcpu_id(const struct acrn_vm_config *vm_config
  */
 static void prepare_prelaunched_vm_memmap(struct acrn_vm *vm, const struct acrn_vm_config *vm_config)
 {
+	bool is_hpa1 = true;
 	uint64_t base_hpa = vm_config->memory.start_hpa;
+	uint64_t remaining_hpa_size = vm_config->memory.size;
 	uint32_t i;
 
 	for (i = 0U; i < vm->e820_entry_num; i++) {
 		const struct e820_entry *entry = &(vm->e820_entries[i]);
 
 		if (entry->length == 0UL) {
-			break;
+			continue;
+		} else {
+			if (is_software_sram_enabled() && (entry->baseaddr == PRE_RTVM_SW_SRAM_BASE_GPA) &&
+				((vm_config->guest_flags & GUEST_FLAG_RT) != 0U)){
+				/* pass through Software SRAM to pre-RTVM */
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp,
+					get_software_sram_base(), PRE_RTVM_SW_SRAM_BASE_GPA,
+					get_software_sram_size(), EPT_RWX | EPT_WB);
+				continue;
+			}
 		}
 
-		/* Do EPT mapping for GPAs that are backed by physical memory */
-		if (entry->type == E820_TYPE_RAM) {
-			ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
-				entry->length, EPT_RWX | EPT_WB);
+		if (remaining_hpa_size >= entry->length) {
+			/* Do EPT mapping for GPAs that are backed by physical memory */
+			if ((entry->type == E820_TYPE_RAM) || (entry->type == E820_TYPE_ACPI_RECLAIM)
+					|| (entry->type == E820_TYPE_ACPI_NVS)) {
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
+					entry->length, EPT_RWX | EPT_WB);
+				base_hpa += entry->length;
+				remaining_hpa_size -= entry->length;
+			}
 
-			base_hpa += entry->length;
+			/* GPAs under 1MB are always backed by physical memory */
+			if ((entry->type != E820_TYPE_RAM) && (entry->baseaddr < (uint64_t)MEM_1M)) {
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
+					entry->length, EPT_RWX | EPT_UNCACHED);
+				base_hpa += entry->length;
+				remaining_hpa_size -= entry->length;
+			}
+		} else if (entry->type == E820_TYPE_RAM) {
+			pr_warn("%s: HPA size incorrectly configured in v820\n", __func__);
 		}
 
-		/* GPAs under 1MB are always backed by physical memory */
-		if ((entry->type != E820_TYPE_RAM) && (entry->baseaddr < (uint64_t)MEM_1M)) {
-			ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
-				entry->length, EPT_RWX | EPT_UNCACHED);
+		if ((remaining_hpa_size == 0UL) && (is_hpa1)) {
+			is_hpa1 = false;
+			base_hpa = vm_config->memory.start_hpa2;
+			remaining_hpa_size = vm_config->memory.size_hpa2;
+		}
+	}
 
-			base_hpa += entry->length;
+	for (i = 0U; i < MAX_MMIO_DEV_NUM; i++) {
+		(void)assign_mmio_dev(vm, &vm_config->mmiodevs[i]);
+
+#ifdef P2SB_VGPIO_DM_ENABLED
+		if ((vm_config->pt_p2sb_bar) && (vm_config->mmiodevs[i].base_hpa == P2SB_BAR_ADDR)) {
+			register_vgpio_handler(vm, &vm_config->mmiodevs[i]);
+		}
+#endif
+	}
+}
+
+static void deny_pci_bar_access(struct acrn_vm *sos, const struct pci_pdev *pdev)
+{
+	uint32_t idx, mask;
+	struct pci_vbar vbar = {};
+	uint64_t base = 0UL, size = 0UL;
+	uint64_t *pml4_page;
+
+	pml4_page = (uint64_t *)sos->arch_vm.nworld_eptp;
+
+	for ( idx= 0; idx < pdev->nr_bars; idx++) {
+		vbar.bar_type.bits = pdev->bars[idx].phy_bar;
+		if (!is_pci_reserved_bar(&vbar)) {
+			base = pdev->bars[idx].phy_bar;
+			size = pdev->bars[idx].size_mask;
+			if (is_pci_mem64lo_bar(&vbar)) {
+				idx++;
+				base |= (((uint64_t)pdev->bars[idx].phy_bar) << 32UL);
+				size |= (((uint64_t)pdev->bars[idx].size_mask) << 32UL);
+			}
+
+			mask = (is_pci_io_bar(&vbar)) ? PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK;
+			base &= mask;
+			size &= mask;
+			size = size & ~(size - 1UL);
+
+			if ((base != 0UL)) {
+				if (is_pci_io_bar(&vbar)) {
+					base &= 0xffffU;
+					deny_guest_pio_access(sos, base, size);
+				} else {
+					/*for passthru device MMIO BAR base must be 4K aligned. This is the requirement of passthru devices.*/
+					ASSERT((base & PAGE_MASK) != 0U, "%02x:%02x.%d bar[%d] 0x%lx, is not 4K aligned!",
+						pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f, idx, base);
+					size =  round_page_up(size);
+					ept_del_mr(sos, pml4_page, base, size);
+				}
+			}
 		}
 	}
 }
 
-static void filter_mem_from_sos_e820(struct acrn_vm *vm, uint64_t start_pa, uint64_t end_pa)
+static void deny_pdevs(struct acrn_vm *sos, struct acrn_vm_pci_dev_config *pci_devs, uint16_t pci_dev_num)
 {
-	uint32_t i;
-	uint64_t entry_start;
-	uint64_t entry_end;
-	uint32_t entries_count = vm->e820_entry_num;
-	struct e820_entry *entry, new_entry = {0};
+	uint16_t i;
 
-	for (i = 0U; i < entries_count; i++) {
-		entry = &sos_ve820[i];
-		entry_start = entry->baseaddr;
-		entry_end = entry->baseaddr + entry->length;
-
-		/* No need handle in these cases*/
-		if ((entry->type != E820_TYPE_RAM) || (entry_end <= start_pa) || (entry_start >= end_pa)) {
-			continue;
-		}
-
-		/* filter out the specific memory and adjust length of this entry*/
-		if ((entry_start < start_pa) && (entry_end <= end_pa)) {
-			entry->length = start_pa - entry_start;
-			continue;
-		}
-
-		/* filter out the specific memory and need to create a new entry*/
-		if ((entry_start < start_pa) && (entry_end > end_pa)) {
-			entry->length = start_pa - entry_start;
-			new_entry.baseaddr = end_pa;
-			new_entry.length = entry_end - end_pa;
-			new_entry.type = E820_TYPE_RAM;
-			continue;
-		}
-
-		/* This entry is within the range of specific memory
-		 * change to E820_TYPE_RESERVED
-		 */
-		if ((entry_start >= start_pa) && (entry_end <= end_pa)) {
-			entry->type = E820_TYPE_RESERVED;
-			continue;
-		}
-
-		if ((entry_start >= start_pa) && (entry_start < end_pa) && (entry_end > end_pa)) {
-			entry->baseaddr = end_pa;
-			entry->length = entry_end - end_pa;
-			continue;
+	for (i = 0; i < pci_dev_num; i++) {
+		if ( pci_devs[i].pdev != NULL) {
+			deny_pci_bar_access(sos, pci_devs[i].pdev);
 		}
 	}
-
-	if (new_entry.length > 0UL) {
-		entries_count++;
-		ASSERT(entries_count <= E820_MAX_ENTRIES, "e820 entry overflow");
-		entry = &sos_ve820[entries_count - 1U];
-		entry->baseaddr = new_entry.baseaddr;
-		entry->length = new_entry.length;
-		entry->type = new_entry.type;
-		vm->e820_entry_num = entries_count;
-	}
-
 }
 
-/**
- * before boot sos_vm(service OS), call it to hide HV and prelaunched VM memory in e820 table from sos_vm
- *
- * @pre vm != NULL
- */
-static void create_sos_vm_e820(struct acrn_vm *vm)
+static void deny_hv_owned_devices(struct acrn_vm *sos)
 {
-	uint16_t vm_id;
-	uint64_t hv_start_pa = hva2hpa((void *)(get_hv_image_base()));
-	uint64_t hv_end_pa  = hv_start_pa + CONFIG_HV_RAM_SIZE;
-	uint32_t entries_count = get_e820_entries_count();
-	const struct e820_mem_params *p_e820_mem_info = get_e820_mem_info();
-	struct acrn_vm_config *sos_vm_config = get_vm_config(vm->vm_id);
+	uint16_t pio_address;
+	uint32_t nbytes, i;
 
-	(void)memcpy_s((void *)sos_ve820, entries_count * sizeof(struct e820_entry),
-			(const void *)get_e820_entry(), entries_count * sizeof(struct e820_entry));
+	const struct pci_pdev **hv_owned = get_hv_owned_pdevs();
 
-	vm->e820_entry_num = entries_count;
-	vm->e820_entries = sos_ve820;
-	/* filter out hv memory from e820 table */
-	filter_mem_from_sos_e820(vm, hv_start_pa, hv_end_pa);
-	sos_vm_config->memory.size = p_e820_mem_info->total_mem_size - CONFIG_HV_RAM_SIZE;
+	for (i = 0U; i < get_hv_owned_pdev_num(); i++) {
+		deny_pci_bar_access(sos, hv_owned[i]);
+	}
 
-	/* filter out prelaunched vm memory from e820 table */
-	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
-		struct acrn_vm_config *vm_config = get_vm_config(vm_id);
-
-		if (vm_config->load_order == PRE_LAUNCHED_VM) {
-			filter_mem_from_sos_e820(vm, vm_config->memory.start_hpa,
-					vm_config->memory.start_hpa + vm_config->memory.size);
-			sos_vm_config->memory.size -= vm_config->memory.size;
-		}
+	if (get_pio_dbg_uart_cfg(&pio_address, &nbytes)) {
+		deny_guest_pio_access(sos, pio_address, nbytes);
 	}
 }
 
@@ -320,8 +381,8 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 {
 	uint16_t vm_id;
 	uint32_t i;
-	uint64_t attr_uc = (EPT_RWX | EPT_UNCACHED);
 	uint64_t hv_hpa;
+	uint64_t sos_high64_max_ram = MEM_4G;
 	struct acrn_vm_config *vm_config;
 	uint64_t *pml4_page = (uint64_t *)vm->arch_vm.nworld_eptp;
 	struct epc_section* epc_secs;
@@ -329,18 +390,20 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 	const struct e820_entry *entry;
 	uint32_t entries_count = vm->e820_entry_num;
 	const struct e820_entry *p_e820 = vm->e820_entries;
-	const struct e820_mem_params *p_e820_mem_info = get_e820_mem_info();
+	struct pci_mmcfg_region *pci_mmcfg;
 
-	pr_dbg("sos_vm: bottom memory - 0x%llx, top memory - 0x%llx\n",
-		p_e820_mem_info->mem_bottom, p_e820_mem_info->mem_top);
-
-	if (p_e820_mem_info->mem_top > EPT_ADDRESS_SPACE(CONFIG_SOS_RAM_SIZE)) {
-		panic("Please configure SOS_VM_ADDRESS_SPACE correctly!\n");
+	pr_dbg("SOS_VM e820 layout:\n");
+	for (i = 0U; i < entries_count; i++) {
+		entry = p_e820 + i;
+		pr_dbg("e820 table: %d type: 0x%x", i, entry->type);
+		pr_dbg("BaseAddress: 0x%016lx length: 0x%016lx\n", entry->baseaddr, entry->length);
+		if (entry->type == E820_TYPE_RAM) {
+			sos_high64_max_ram = max((entry->baseaddr + entry->length), sos_high64_max_ram);
+		}
 	}
 
-	/* create real ept map for all ranges with UC */
-	ept_add_mr(vm, pml4_page, p_e820_mem_info->mem_bottom, p_e820_mem_info->mem_bottom,
-			(p_e820_mem_info->mem_top - p_e820_mem_info->mem_bottom), attr_uc);
+	/* create real ept map for [0, sos_high64_max_ram) with UC */
+	ept_add_mr(vm, pml4_page, 0UL, 0UL, sos_high64_max_ram, EPT_RWX | EPT_UNCACHED);
 
 	/* update ram entries to WB attr */
 	for (i = 0U; i < entries_count; i++) {
@@ -348,13 +411,6 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 		if (entry->type == E820_TYPE_RAM) {
 			ept_modify_mr(vm, pml4_page, entry->baseaddr, entry->length, EPT_WB, EPT_MT_MASK);
 		}
-	}
-
-	pr_dbg("SOS_VM e820 layout:\n");
-	for (i = 0U; i < entries_count; i++) {
-		entry = p_e820 + i;
-		pr_dbg("e820 table: %d type: 0x%x", i, entry->type);
-		pr_dbg("BaseAddress: 0x%016llx length: 0x%016llx\n", entry->baseaddr, entry->length);
 	}
 
 	/* Unmap all platform EPC resource from SOS.
@@ -376,8 +432,31 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 		vm_config = get_vm_config(vm_id);
 		if (vm_config->load_order == PRE_LAUNCHED_VM) {
 			ept_del_mr(vm, pml4_page, vm_config->memory.start_hpa, vm_config->memory.size);
+			/* Remove MMIO/IO bars of pre-launched VM's ptdev */
+			deny_pdevs(vm, vm_config->pci_devs, vm_config->pci_dev_num);
+		}
+
+		for (i = 0U; i < MAX_MMIO_DEV_NUM; i++) {
+			(void)deassign_mmio_dev(vm, &vm_config->mmiodevs[i]);
 		}
 	}
+
+	/* unmap AP trampoline code for security
+	 * This buffer is guaranteed to be page aligned.
+	 */
+	ept_del_mr(vm, pml4_page, get_trampoline_start16_paddr(), CONFIG_LOW_RAM_SIZE);
+
+	/* unmap PCIe MMCONFIG region since it's owned by hypervisor */
+	pci_mmcfg = get_mmcfg_region();
+	ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, pci_mmcfg->address, get_pci_mmcfg_size(pci_mmcfg));
+
+#if defined(PRE_RTVM_SW_SRAM_ENABLED)
+	/* remove Software SRAM region from Service VM EPT, to prevent Service VM from using clflush to
+	 * flush the Software SRAM cache.
+	 * This is applicable to prelaunch RTVM case only, for post-launch RTVM, Service VM is trusted.
+	 */
+	ept_del_mr(vm, pml4_page, PRE_RTVM_SW_SRAM_BASE_GPA, PRE_RTVM_SW_SRAM_END_GPA - PRE_RTVM_SW_SRAM_BASE_GPA);
+#endif
 }
 
 /* Add EPT mapping of EPC reource for the VM */
@@ -395,47 +474,48 @@ static void prepare_epc_vm_memmap(struct acrn_vm *vm)
 	}
 }
 
-static void register_pm_io_handler(struct acrn_vm *vm)
+/**
+ * @brief get bitmap of pCPUs whose vCPUs have LAPIC PT enabled
+ *
+ * @param[in] vm pointer to vm data structure
+ * @pre vm != NULL
+ *
+ * @return pCPU bitmap
+ */
+static uint64_t lapic_pt_enabled_pcpu_bitmap(struct acrn_vm *vm)
 {
-	if (is_sos_vm(vm)) {
-		/* Load pm S state data */
-		if (vm_load_pm_s_state(vm) == 0) {
-			register_pm1ab_handler(vm);
+	uint16_t i;
+	struct acrn_vcpu *vcpu;
+	uint64_t bitmap = 0UL;
+
+	if (is_lapic_pt_configured(vm)) {
+		foreach_vcpu(i, vm, vcpu) {
+			if (is_x2apic_enabled(vcpu_vlapic(vcpu))) {
+				bitmap_set_nolock(pcpuid_from_vcpu(vcpu), &bitmap);
+			}
 		}
 	}
 
-	/* Intercept the virtual pm port for RTVM */
-	if (is_rt_vm(vm)) {
-		register_rt_vm_pm1a_ctl_handler(vm);
-	}
+	return bitmap;
 }
 
 /**
  * @pre vm_id < CONFIG_MAX_VM_NUM && vm_config != NULL && rtn_vm != NULL
  * @pre vm->state == VM_POWERED_OFF
  */
-int32_t create_vm(uint16_t vm_id, struct acrn_vm_config *vm_config, struct acrn_vm **rtn_vm)
+int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *vm_config, struct acrn_vm **rtn_vm)
 {
 	struct acrn_vm *vm = NULL;
 	int32_t status = 0;
-	bool need_cleanup = false;
+	uint16_t pcpu_id;
 
 	/* Allocate memory for virtual machine */
 	vm = &vm_array[vm_id];
-	(void)memset((void *)vm, 0U, sizeof(struct acrn_vm));
 	vm->vm_id = vm_id;
 	vm->hw.created_vcpus = 0U;
-	vm->emul_mmio_regions = 0U;
 
-	init_ept_mem_ops(vm);
-	vm->arch_vm.nworld_eptp = vm->arch_vm.ept_mem_ops.get_pml4_page(vm->arch_vm.ept_mem_ops.info);
-	sanitize_pte((uint64_t *)vm->arch_vm.nworld_eptp);
-
-	/* Register default handlers for PIO & MMIO if it is SOS VM or Pre-launched VM */
-	if ((vm_config->load_order == SOS_VM) || (vm_config->load_order == PRE_LAUNCHED_VM)) {
-		register_pio_default_emulation_handler(vm);
-		register_mmio_default_emulation_handler(vm);
-	}
+	init_ept_pgtable(&vm->arch_vm.ept_pgtable, vm->vm_id);
+	vm->arch_vm.nworld_eptp = pgtable_create_root(&vm->arch_vm.ept_pgtable);
 
 	(void)memcpy_s(&vm->uuid[0], sizeof(vm->uuid),
 		&vm_config->uuid[0], sizeof(vm_config->uuid));
@@ -446,19 +526,17 @@ int32_t create_vm(uint16_t vm_id, struct acrn_vm_config *vm_config, struct acrn_
 		prepare_sos_vm_memmap(vm);
 
 		status = init_vm_boot_info(vm);
-		if (status != 0) {
-			need_cleanup = true;
-		}
 	} else {
 		/* For PRE_LAUNCHED_VM and POST_LAUNCHED_VM */
 		if ((vm_config->guest_flags & GUEST_FLAG_SECURE_WORLD_ENABLED) != 0U) {
 			vm->sworld_control.flag.supported = 1U;
 		}
 		if (vm->sworld_control.flag.supported != 0UL) {
-			struct memory_ops *ept_mem_ops = &vm->arch_vm.ept_mem_ops;
+			uint16_t sos_vm_id = (get_sos_vm())->vm_id;
+			uint16_t page_idx = vmid_2_rel_vmid(sos_vm_id, vm_id) - 1U;
 
 			ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp,
-				hva2hpa(ept_mem_ops->get_sworld_memory_base(ept_mem_ops->info)),
+				hva2hpa(post_uos_sworld_memory[page_idx]),
 				TRUSTY_EPT_REBASE_GPA, TRUSTY_RAM_SIZE, EPT_WB | EPT_RWX);
 		}
 		if (vm_config->name[0] == '\0') {
@@ -466,135 +544,222 @@ int32_t create_vm(uint16_t vm_id, struct acrn_vm_config *vm_config, struct acrn_
 			snprintf(vm_config->name, 16, "ACRN VM_%d", vm_id);
 		}
 
-		 if (vm_config->load_order == PRE_LAUNCHED_VM) {
+		if (vm_config->load_order == PRE_LAUNCHED_VM) {
 			create_prelaunched_vm_e820(vm);
 			prepare_prelaunched_vm_memmap(vm, vm_config);
 			status = init_vm_boot_info(vm);
-		 }
+		}
 	}
 
 	if (status == 0) {
 		prepare_epc_vm_memmap(vm);
+		spinlock_init(&vm->vlapic_mode_lock);
+		spinlock_init(&vm->ept_lock);
+		spinlock_init(&vm->emul_mmio_lock);
+		spinlock_init(&vm->arch_vm.iwkey_backup_lock);
 
-		INIT_LIST_HEAD(&vm->softirq_dev_entry_list);
-		spinlock_init(&vm->softirq_dev_lock);
-		spinlock_init(&vm->vm_lock);
-
-		vm->arch_vm.vlapic_state = VM_VLAPIC_XAPIC;
+		vm->arch_vm.vlapic_mode = VM_VLAPIC_XAPIC;
+		vm->arch_vm.vm_mwait_cap = has_monitor_cap();
 		vm->intr_inject_delay_delta = 0UL;
+		vm->nr_emul_mmio_regions = 0U;
+		vm->vcpuid_entry_nr = 0U;
 
 		/* Set up IO bit-mask such that VM exit occurs on
 		 * selected IO ranges
 		 */
 		setup_io_bitmap(vm);
 
-		vm_setup_cpu_state(vm);
+		init_guest_pm(vm);
 
-		register_pm_io_handler(vm);
+		if (is_nvmx_configured(vm)) {
+			init_nested_vmx(vm);
+		}
 
 		if (!is_lapic_pt_configured(vm)) {
 			vpic_init(vm);
 		}
 
-		/* Create virtual uart;*/
-		vuart_init(vm, vm_config->vuart);
-
 		if (is_rt_vm(vm) || !is_postlaunched_vm(vm)) {
 			vrtc_init(vm);
 		}
 
-		vpci_init(vm);
+		if (is_sos_vm(vm)) {
+			deny_hv_owned_devices(vm);
+		}
+
+		init_vpci(vm);
 		enable_iommu();
+
+		/* Create virtual uart;*/
+		init_legacy_vuarts(vm, vm_config->vuart);
 
 		register_reset_port_handler(vm);
 
 		/* vpic wire_mode default is INTR */
 		vm->wire_mode = VPIC_WIRE_INTR;
 
-		/* Init full emulated vIOAPIC instance */
-		if (!is_lapic_pt_configured(vm)) {
-			vioapic_init(vm);
-		}
+		/* Init full emulated vIOAPIC instance:
+		 * Present a virtual IOAPIC to guest, as a placeholder interrupt controller,
+		 * even if the guest uses PT LAPIC. This is to satisfy the guest OSes,
+		 * in some cases, though the functionality of vIOAPIC doesn't work.
+		 */
+		vioapic_init(vm);
 
 		/* Populate return VM handle */
 		*rtn_vm = vm;
 		vm->sw.io_shared_page = NULL;
 		if ((vm_config->load_order == POST_LAUNCHED_VM) && ((vm_config->guest_flags & GUEST_FLAG_IO_COMPLETION_POLLING) != 0U)) {
 			/* enable IO completion polling mode per its guest flags in vm_config. */
-			vm->sw.is_completion_polling = true;
+			vm->sw.is_polling_ioreq = true;
 		}
 		status = set_vcpuid_entries(vm);
 		if (status == 0) {
 			vm->state = VM_CREATED;
-		} else {
-			need_cleanup = true;
 		}
 	}
 
-	if (need_cleanup) {
-		if (vm->arch_vm.nworld_eptp != NULL) {
-			(void)memset(vm->arch_vm.nworld_eptp, 0U, PAGE_SIZE);
+	if (status == 0) {
+		/* We have assumptions:
+		 *   1) vcpus used by SOS has been offlined by DM before UOS re-use it.
+		 *   2) pcpu_bitmap passed sanitization is OK for vcpu creating.
+		 */
+		vm->hw.cpu_affinity = pcpu_bitmap;
+
+		uint64_t tmp64 = pcpu_bitmap;
+		while (tmp64 != 0UL) {
+			pcpu_id = ffs64(tmp64);
+			bitmap_clear_nolock(pcpu_id, &tmp64);
+			status = prepare_vcpu(vm, pcpu_id);
+			if (status != 0) {
+				break;
+			}
 		}
 	}
+
+	if (status == 0) {
+		uint32_t i;
+		for (i = 0; i < vm_config->pt_intx_num; i++) {
+			status = ptirq_add_intx_remapping(vm, vm_config->pt_intx[i].virt_gsi,
+								vm_config->pt_intx[i].phys_gsi, false);
+			if (status != 0) {
+				ptirq_remove_configured_intx_remappings(vm);
+				break;
+			}
+		}
+	}
+
+	if ((status != 0) && (vm->arch_vm.nworld_eptp != NULL)) {
+		(void)memset(vm->arch_vm.nworld_eptp, 0U, PAGE_SIZE);
+	}
+
 	return status;
+}
+
+static bool is_ready_for_system_shutdown(void)
+{
+	bool ret = true;
+	uint16_t vm_id;
+	struct acrn_vm *vm;
+
+	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
+		vm = get_vm_from_vmid(vm_id);
+		/* TODO: Update code to cover hybrid mode */
+		if (!is_poweroff_vm(vm)) {
+			ret = false;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static int32_t offline_lapic_pt_enabled_pcpus(const struct acrn_vm *vm, uint64_t pcpu_mask)
+{
+	int32_t ret = 0;
+	uint16_t i;
+	uint64_t mask = pcpu_mask;
+	const struct acrn_vcpu *vcpu = NULL;
+	uint16_t this_pcpu_id = get_pcpu_id();
+
+	if (bitmap_test(this_pcpu_id, &mask)) {
+		bitmap_clear_nolock(this_pcpu_id, &mask);
+		if (vm->state == VM_POWERED_OFF) {
+			/*
+			 * If the current pcpu needs to offline itself,
+			 * it will be done after shutdown_vm() completes
+			 * in the idle thread.
+			 */
+			make_pcpu_offline(this_pcpu_id);
+		} else {
+			/*
+			 * The current pcpu can't reset itself
+			 */
+			pr_warn("%s: cannot offline self(%u)",
+				__func__, this_pcpu_id);
+			ret = -EINVAL;
+		}
+	}
+
+	foreach_vcpu(i, vm, vcpu) {
+		if (bitmap_test(pcpuid_from_vcpu(vcpu), &mask)) {
+			make_pcpu_offline(pcpuid_from_vcpu(vcpu));
+		}
+	}
+
+	wait_pcpus_offline(mask);
+	if (!start_pcpus(mask)) {
+		pr_fatal("Failed to start all cpus in mask(0x%lx)", mask);
+		ret = -ETIMEDOUT;
+	}
+	return ret;
 }
 
 /*
  * @pre vm != NULL
+ * @pre vm->state == VM_PAUSED
  */
 int32_t shutdown_vm(struct acrn_vm *vm)
 {
 	uint16_t i;
-	uint64_t mask = 0UL;
+	uint64_t mask;
 	struct acrn_vcpu *vcpu = NULL;
 	struct acrn_vm_config *vm_config = NULL;
 	int32_t ret = 0;
 
-	pause_vm(vm);
-
 	/* Only allow shutdown paused vm */
-	if (vm->state == VM_PAUSED) {
-		vm->state = VM_POWERED_OFF;
+	vm->state = VM_POWERED_OFF;
 
-		foreach_vcpu(i, vm, vcpu) {
-			reset_vcpu(vcpu);
-			offline_vcpu(vcpu);
+	if (is_sos_vm(vm)) {
+		sbuf_reset();
+	}
 
-			if (is_lapic_pt_enabled(vcpu)) {
-				bitmap_set_nolock(vcpu->pcpu_id, &mask);
-				make_pcpu_offline(vcpu->pcpu_id);
-			}
-		}
+	ptirq_remove_configured_intx_remappings(vm);
 
-		wait_pcpus_offline(mask);
+	deinit_legacy_vuarts(vm);
 
-		if (is_lapic_pt_configured(vm) && !start_pcpus(mask)) {
-			pr_fatal("Failed to start all cpus in mask(0x%llx)", mask);
-			ret = -ETIMEDOUT;
-		}
+	deinit_vpci(vm);
 
-		vm_config = get_vm_config(vm->vm_id);
-		vm_config->guest_flags &= ~DM_OWNED_GUEST_FLAG_MASK;
+	deinit_emul_io(vm);
 
-		if (is_sos_vm(vm)) {
-			sbuf_reset();
-		}
+	/* Free EPT allocated resources assigned to VM */
+	destroy_ept(vm);
 
-		vpci_cleanup(vm);
+	mask = lapic_pt_enabled_pcpu_bitmap(vm);
+	if (mask != 0UL) {
+		ret = offline_lapic_pt_enabled_pcpus(vm, mask);
+	}
 
-		vuart_deinit(vm);
+	foreach_vcpu(i, vm, vcpu) {
+		offline_vcpu(vcpu);
+	}
 
-		ptdev_release_all_entries(vm);
+	/* after guest_flags not used, then clear it */
+	vm_config = get_vm_config(vm->vm_id);
+	vm_config->guest_flags &= ~DM_OWNED_GUEST_FLAG_MASK;
 
-		/* Free iommu */
-		destroy_iommu_domain(vm->iommu);
-
-		/* Free EPT allocated resources assigned to VM */
-		destroy_ept(vm);
-
-		ret = 0;
-	} else {
-	        ret = -EINVAL;
+	if (is_ready_for_system_shutdown()) {
+		/* If no any guest running, shutdown system */
+		shutdown_system();
 	}
 
 	/* Return status to caller */
@@ -602,85 +767,86 @@ int32_t shutdown_vm(struct acrn_vm *vm)
 }
 
 /**
- *  * @pre vm != NULL
+ * @pre vm != NULL
+ * @pre vm->state == VM_CREATED
  */
 void start_vm(struct acrn_vm *vm)
 {
 	struct acrn_vcpu *bsp = NULL;
 
-	vm->state = VM_STARTED;
+	vm->state = VM_RUNNING;
 
 	/* Only start BSP (vid = 0) and let BSP start other APs */
-	bsp = vcpu_from_vid(vm, BOOT_CPU_ID);
-	schedule_vcpu(bsp);
+	bsp = vcpu_from_vid(vm, BSP_CPU_ID);
+	vcpu_make_request(bsp, ACRN_REQUEST_INIT_VMCS);
+	launch_vcpu(bsp);
 }
 
 /**
- *  * @pre vm != NULL
+ * @pre vm != NULL
+ * @pre vm->state == VM_PAUSED
  */
 int32_t reset_vm(struct acrn_vm *vm)
 {
 	uint16_t i;
+	uint64_t mask;
 	struct acrn_vcpu *vcpu = NULL;
-	int32_t ret;
+	int32_t ret = 0;
 
-	if (vm->state == VM_PAUSED) {
-		foreach_vcpu(i, vm, vcpu) {
-			reset_vcpu(vcpu);
-		}
-		/*
-		 * Set VM vLAPIC state to VM_VLAPIC_XAPIC
-		 */
-
-		vm->arch_vm.vlapic_state = VM_VLAPIC_XAPIC;
-
-		if (is_sos_vm(vm)) {
-			(void )vm_sw_loader(vm);
-		}
-
-		reset_vm_ioreqs(vm);
-		vioapic_reset(vm);
-		destroy_secure_world(vm, false);
-		vm->sworld_control.flag.active = 0UL;
-		vm->state = VM_CREATED;
-
-		ret = 0;
-	} else {
-		ret = -1;
+	mask = lapic_pt_enabled_pcpu_bitmap(vm);
+	if (mask != 0UL) {
+		ret = offline_lapic_pt_enabled_pcpus(vm, mask);
 	}
+
+	foreach_vcpu(i, vm, vcpu) {
+		reset_vcpu(vcpu, COLD_RESET);
+	}
+
+	/*
+	 * Set VM vLAPIC state to VM_VLAPIC_XAPIC
+	 */
+	vm->arch_vm.vlapic_mode = VM_VLAPIC_XAPIC;
+
+	if (is_sos_vm(vm)) {
+		(void)vm_sw_loader(vm);
+	}
+
+	reset_vm_ioreqs(vm);
+	reset_vioapics(vm);
+	destroy_secure_world(vm, false);
+	vm->sworld_control.flag.active = 0UL;
+	vm->arch_vm.iwkey_backup_status = 0UL;
+	vm->state = VM_CREATED;
 
 	return ret;
 }
 
 /**
- *  * @pre vm != NULL
+ * @pre vm != NULL
+ */
+void poweroff_if_rt_vm(struct acrn_vm *vm)
+{
+	if (is_rt_vm(vm) && !is_paused_vm(vm) && !is_poweroff_vm(vm)) {
+		vm->state = VM_READY_TO_POWEROFF;
+	}
+}
+
+/**
+ * @pre vm != NULL
  */
 void pause_vm(struct acrn_vm *vm)
 {
 	uint16_t i;
 	struct acrn_vcpu *vcpu = NULL;
 
-	if (vm->state != VM_PAUSED) {
-		if (is_rt_vm(vm)) {
-			/**
-			 * For RTVM, we can only pause its vCPUs when it stays at following states:
-			 *  - It is powering off by itself
-			 *  - It is created but doesn't start
-			 */
-			if ((vm->state == VM_POWERING_OFF) || (vm->state == VM_CREATED)) {
-				foreach_vcpu(i, vm, vcpu) {
-					pause_vcpu(vcpu, VCPU_ZOMBIE);
-				}
-
-				vm->state = VM_PAUSED;
-			}
-		} else {
-			foreach_vcpu(i, vm, vcpu) {
-				pause_vcpu(vcpu, VCPU_ZOMBIE);
-			}
-
-			vm->state = VM_PAUSED;
+	/* For RTVM, we can only pause its vCPUs when it is powering off by itself */
+	if (((!is_rt_vm(vm)) && (vm->state == VM_RUNNING)) ||
+			((is_rt_vm(vm)) && (vm->state == VM_READY_TO_POWEROFF)) ||
+			(vm->state == VM_CREATED)) {
+		foreach_vcpu(i, vm, vcpu) {
+			zombie_vcpu(vcpu, VCPU_ZOMBIE);
 		}
+		vm->state = VM_PAUSED;
 	}
 }
 
@@ -697,14 +863,15 @@ void pause_vm(struct acrn_vm *vm)
  * @wakeup_vec[in]	The resume address of vm
  *
  * @pre vm != NULL
+ * @pre is_sos_vm(vm) && vm->state == VM_PAUSED
  */
 void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 {
-	struct acrn_vcpu *bsp = vcpu_from_vid(vm, BOOT_CPU_ID);
+	struct acrn_vcpu *bsp = vcpu_from_vid(vm, BSP_CPU_ID);
 
-	vm->state = VM_STARTED;
+	vm->state = VM_RUNNING;
 
-	reset_vcpu(bsp);
+	reset_vcpu(bsp, POWER_ON_RESET);
 
 	/* When SOS resume from S3, it will return to real mode
 	 * with entry set to wakeup_vec.
@@ -712,10 +879,10 @@ void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 	set_vcpu_startup_entry(bsp, wakeup_vec);
 
 	init_vmcs(bsp);
-	schedule_vcpu(bsp);
-	switch_to_idle(default_idle);
+	launch_vcpu(bsp);
 }
 
+static uint8_t loaded_pre_vm_nr = 0U;
 /**
  * Prepare to create vm/vcpu for vm
  *
@@ -724,53 +891,70 @@ void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 {
 	int32_t err = 0;
-	uint16_t i;
 	struct acrn_vm *vm = NULL;
 
-	err = create_vm(vm_id, vm_config, &vm);
+	/* SOS and pre-launched VMs launch on all pCPUs defined in vm_config->cpu_affinity */
+	err = create_vm(vm_id, vm_config->cpu_affinity, vm_config, &vm);
 
 	if (err == 0) {
-		for (i = 0U; i < get_pcpu_nums(); i++) {
-			if (bitmap_test(i, &vm_config->pcpu_bitmap)) {
-				err = prepare_vcpu(vm, i);
-				if (err != 0) {
+		if (is_prelaunched_vm(vm)) {
+			build_vrsdp(vm);
+		}
+
+		if (is_sos_vm(vm)) {
+			/* We need to ensure all modules of pre-launched VMs have been loaded already
+			 * before loading SOS VM modules, otherwise the module of pre-launched VMs could
+			 * be corrupted because SOS VM kernel might pick any usable RAM to extract kernel
+			 * when KASLR enabled.
+			 * In case the pre-launched VMs aren't loaded successfuly that cause deadlock here,
+			 * use a 10000ms timer to break the waiting loop.
+			 */
+			uint64_t start_tick = cpu_ticks();
+
+			while (loaded_pre_vm_nr != PRE_VM_NUM) {
+				uint64_t timeout = ticks_to_ms(cpu_ticks() - start_tick);
+
+				if (timeout > 10000U) {
+					pr_err("Loading pre-launched VMs timeout!");
 					break;
 				}
 			}
 		}
-	}
 
-	if (err == 0) {
+		err = vm_sw_loader(vm);
+
 		if (is_prelaunched_vm(vm)) {
-			(void)mptable_build(vm);
+			loaded_pre_vm_nr++;
 		}
 
-		(void )vm_sw_loader(vm);
+		if (err == 0) {
 
-		/* start vm BSP automatically */
-		start_vm(vm);
+			/* start vm BSP automatically */
+			start_vm(vm);
 
-		pr_acrnlog("Start VM id: %x name: %s", vm_id, vm_config->name);
+			pr_acrnlog("Start VM id: %x name: %s", vm_id, vm_config->name);
+		} else {
+			pr_err("Failed to load VM id: %x name: %s, error = %d", vm_id, vm_config->name, err);
+		}
 	}
 }
 
 /**
  * @pre vm_config != NULL
+ * @Application constraint: The validity of vm_config->cpu_affinity should be guaranteed before run-time.
  */
 void launch_vms(uint16_t pcpu_id)
 {
-	uint16_t vm_id, bsp_id;
+	uint16_t vm_id;
 	struct acrn_vm_config *vm_config;
 
 	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 		vm_config = get_vm_config(vm_id);
 		if ((vm_config->load_order == SOS_VM) || (vm_config->load_order == PRE_LAUNCHED_VM)) {
-			if (vm_config->load_order == SOS_VM) {
-				sos_vm_ptr = &vm_array[vm_id];
-			}
-
-			bsp_id = get_vm_bsp_pcpu_id(vm_config);
-			if (pcpu_id == bsp_id) {
+			if (pcpu_id == get_configured_bsp_pcpu_id(vm_config)) {
+				if (vm_config->load_order == SOS_VM) {
+					sos_vm_ptr = &vm_array[vm_id];
+				}
 				prepare_vm(vm_id, vm_config);
 			}
 		}
@@ -793,9 +977,6 @@ void launch_vms(uint16_t pcpu_id)
  * VM_VLAPIC_DISABLED - All the online vCPUs/vLAPICs of this VM are in Disabled mode
  * VM_VLAPIC_TRANSITION - Online vCPUs/vLAPICs of this VM are in between transistion
  *
- * TODO: offline_vcpu need to call this API to reflect the status of rest of the
- * vLAPICs that are online.
- *
  * @pre vm != NULL
  */
 void update_vm_vlapic_state(struct acrn_vm *vm)
@@ -803,20 +984,23 @@ void update_vm_vlapic_state(struct acrn_vm *vm)
 	uint16_t i;
 	struct acrn_vcpu *vcpu;
 	uint16_t vcpus_in_x2apic, vcpus_in_xapic;
-	enum vm_vlapic_state vlapic_state = VM_VLAPIC_XAPIC;
+	enum vm_vlapic_mode vlapic_mode = VM_VLAPIC_XAPIC;
 
 	vcpus_in_x2apic = 0U;
 	vcpus_in_xapic = 0U;
-	spinlock_obtain(&vm->vm_lock);
+	spinlock_obtain(&vm->vlapic_mode_lock);
 	foreach_vcpu(i, vm, vcpu) {
-		if (is_x2apic_enabled(vcpu_vlapic(vcpu))) {
-			vcpus_in_x2apic++;
-		} else if (is_xapic_enabled(vcpu_vlapic(vcpu))) {
-			vcpus_in_xapic++;
-		} else {
-			/*
-			 * vCPU is using vLAPIC in Disabled mode
-			 */
+		/* Skip vCPU in state outside of VCPU_RUNNING as it may be offline. */
+		if (vcpu->state == VCPU_RUNNING) {
+			if (is_x2apic_enabled(vcpu_vlapic(vcpu))) {
+				vcpus_in_x2apic++;
+			} else if (is_xapic_enabled(vcpu_vlapic(vcpu))) {
+				vcpus_in_xapic++;
+			} else {
+				/*
+				 * vCPU is using vLAPIC in Disabled mode
+				 */
+			}
 		}
 	}
 
@@ -825,42 +1009,42 @@ void update_vm_vlapic_state(struct acrn_vm *vm)
 		 * Check if the counts vcpus_in_x2apic and vcpus_in_xapic are zero
 		 * VM_VLAPIC_DISABLED
 		 */
-		vlapic_state = VM_VLAPIC_DISABLED;
+		vlapic_mode = VM_VLAPIC_DISABLED;
 	} else if ((vcpus_in_x2apic != 0U) && (vcpus_in_xapic != 0U)) {
 		/*
 		 * Check if the counts vcpus_in_x2apic and vcpus_in_xapic are non-zero
 		 * VM_VLAPIC_TRANSITION
 		 */
-		vlapic_state = VM_VLAPIC_TRANSITION;
+		vlapic_mode = VM_VLAPIC_TRANSITION;
 	} else if (vcpus_in_x2apic != 0U) {
 		/*
 		 * Check if the counts vcpus_in_x2apic is non-zero
 		 * VM_VLAPIC_X2APIC
 		 */
-		vlapic_state = VM_VLAPIC_X2APIC;
+		vlapic_mode = VM_VLAPIC_X2APIC;
 	} else {
 		/*
 		 * Count vcpus_in_xapic is non-zero
 		 * VM_VLAPIC_XAPIC
 		 */
-		vlapic_state = VM_VLAPIC_XAPIC;
+		vlapic_mode = VM_VLAPIC_XAPIC;
 	}
 
-	vm->arch_vm.vlapic_state = vlapic_state;
-	spinlock_release(&vm->vm_lock);
+	vm->arch_vm.vlapic_mode = vlapic_mode;
+	spinlock_release(&vm->vlapic_mode_lock);
 }
 
 /*
- * @brief Check state of vLAPICs of a VM
+ * @brief Check mode of vLAPICs of a VM
  *
  * @pre vm != NULL
  */
-enum vm_vlapic_state check_vm_vlapic_state(const struct acrn_vm *vm)
+enum vm_vlapic_mode check_vm_vlapic_mode(const struct acrn_vm *vm)
 {
-	enum vm_vlapic_state vlapic_state;
+	enum vm_vlapic_mode vlapic_mode;
 
-	vlapic_state = vm->arch_vm.vlapic_state;
-	return vlapic_state;
+	vlapic_mode = vm->arch_vm.vlapic_mode;
+	return vlapic_mode;
 }
 
 /**
@@ -876,5 +1060,33 @@ bool has_rt_vm(void)
 		}
 	}
 
-	return ((vm_id == CONFIG_MAX_VM_NUM) ? false : true);
+	return (vm_id != CONFIG_MAX_VM_NUM);
+}
+
+void make_shutdown_vm_request(uint16_t pcpu_id)
+{
+	bitmap_set_lock(NEED_SHUTDOWN_VM, &per_cpu(pcpu_flag, pcpu_id));
+	if (get_pcpu_id() != pcpu_id) {
+		send_single_ipi(pcpu_id, NOTIFY_VCPU_VECTOR);
+	}
+}
+
+bool need_shutdown_vm(uint16_t pcpu_id)
+{
+	return bitmap_test_and_clear_lock(NEED_SHUTDOWN_VM, &per_cpu(pcpu_flag, pcpu_id));
+}
+
+/*
+ * @pre vm != NULL
+ */
+void get_vm_lock(struct acrn_vm *vm)
+{
+	spinlock_obtain(&vm->vm_state_lock);
+}
+/*
+ * @pre vm != NULL
+ */
+void put_vm_lock(struct acrn_vm *vm)
+{
+	spinlock_release(&vm->vm_state_lock);
 }

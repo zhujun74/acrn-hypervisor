@@ -7,10 +7,10 @@
  */
 
 #include <types.h>
-#include <msr.h>
-#include <per_cpu.h>
-#include <pgtable.h>
-#include <vmx.h>
+#include <asm/msr.h>
+#include <asm/per_cpu.h>
+#include <asm/pgtable.h>
+#include <asm/vmx.h>
 
 /**
  * @pre addr != NULL && addr is 4KB-aligned
@@ -109,6 +109,28 @@ void exec_vmptrld(void *addr)
 		: "cc", "memory");
 }
 
+/*
+ * @pre vcpu != NULL
+ */
+void load_va_vmcs(const uint8_t *vmcs_va)
+{
+	uint64_t vmcs_pa;
+
+	vmcs_pa = hva2hpa(vmcs_va);
+	exec_vmptrld((void *)&vmcs_pa);
+}
+
+/*
+ * @pre vcpu != NULL
+ */
+void clear_va_vmcs(const uint8_t *vmcs_va)
+{
+	uint64_t vmcs_pa;
+
+	vmcs_pa = hva2hpa(vmcs_va);
+	exec_vmclear((void *)&vmcs_pa);
+}
+
 /**
  * only run on current pcpu
  */
@@ -117,10 +139,7 @@ void vmx_off(void)
 	void **vmcs_ptr = &get_cpu_var(vmcs_run);
 
 	if (*vmcs_ptr != NULL) {
-		uint64_t vmcs_pa;
-
-		vmcs_pa = hva2hpa(*vmcs_ptr);
-		exec_vmclear((void *)&vmcs_pa);
+		clear_va_vmcs(*vmcs_ptr);
 		*vmcs_ptr = NULL;
 	}
 

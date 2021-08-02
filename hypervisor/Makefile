@@ -1,5 +1,5 @@
 #
-# ACRN Hypervisor
+# acrn-hypervisor/hypervisor/Makefile
 #
 
 include ../VERSION
@@ -18,7 +18,6 @@ BASEDIR := $(shell pwd)
 HV_OBJDIR ?= $(CURDIR)/build
 HV_MODDIR ?= $(HV_OBJDIR)/modules
 HV_FILE := acrn
-SUB_MAKEFILES := $(wildcard */Makefile)
 
 LIB_MOD = $(HV_MODDIR)/lib_mod.a
 BOOT_MOD = $(HV_MODDIR)/boot_mod.a
@@ -44,22 +43,13 @@ ARCH_LDFLAGS :=
 .PHONY: default
 default: all
 
-include $(BASEDIR)/../misc/acrn-config/library/deps.mk
+include scripts/makefile/config.mk
 
-include scripts/kconfig/kconfig.mk
+BOARD_INFO_DIR := $(HV_CONFIG_DIR)/boards
+SCENARIO_CFG_DIR := $(HV_CONFIG_DIR)/scenarios/$(SCENARIO)
+BOARD_CFG_DIR := $(SCENARIO_CFG_DIR)
 
-#initialize scenarios name
-ifeq ($(CONFIG_SDC),y)
-SCENARIO_NAME := sdc
-else ifeq ($(CONFIG_SDC2),y)
-SCENARIO_NAME := sdc2
-else ifeq ($(CONFIG_LOGICAL_PARTITION),y)
-SCENARIO_NAME := logical_partition
-else ifeq ($(CONFIG_INDUSTRY),y)
-SCENARIO_NAME := industry
-else ifeq ($(CONFIG_HYBRID),y)
-SCENARIO_NAME := hybrid
-endif
+include ../paths.make
 
 LD_IN_TOOL = scripts/genld.sh
 BASH = $(shell which bash)
@@ -71,9 +61,13 @@ CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += -fshort-wchar -ffreestanding
 CFLAGS += -fsigned-char
 CFLAGS += -m64 -mno-mmx -mno-sse -mno-sse2 -mno-80387 -mno-fp-ret-in-387
-CFLAGS += -mno-red-zone
+CFLAGS += -mno-red-zone -mpopcnt
 CFLAGS += -nostdinc -nostdlib -fno-common
 CFLAGS += -Werror
+
+# ACRN depends on zero length array. Silence the gcc if Warrary-bounds is default option
+CFLAGS += -Wno-array-bounds
+CFLAGS += -O2
 ifeq (y, $(CONFIG_RELOC))
 CFLAGS += -fpie
 else
@@ -94,10 +88,27 @@ endif
 CFLAGS += -DSTACK_PROTECTOR
 endif
 
+# In case using Ubuntu 19.10 as build environment, its gcc has -fcf-protection enabled
+# by default. But this option is not compatible with -mindirect-branch:
+#   https://bugs.launchpad.net/ubuntu/+source/gcc-9/+bug/1830961
+#
+# We disable the -fcf-protection in ACRN build.
+ifeq (true, $(shell [ $(GCC_MAJOR) -gt 8 ] && echo true))
+CFLAGS += -fcf-protection=none
+endif
+
 ASFLAGS += -m64 -nostdinc -nostdlib
+ifeq (y, $(CONFIG_MULTIBOOT2))
+ASFLAGS += -DCONFIG_MULTIBOOT2
+endif
+
+ifeq (y, $(CONFIG_RELOC))
+ASFLAGS += -DCONFIG_RELOC
+endif
 
 LDFLAGS += -Wl,--gc-sections -nostartfiles -nostdlib
 LDFLAGS += -Wl,-n,-z,max-page-size=0x1000
+LDFLAGS += -Wl,--no-dynamic-linker
 
 ifeq (y, $(CONFIG_RELOC))
 # on X86_64, when build with "-pie", GCC fails on linking R_X86_64_32
@@ -122,23 +133,27 @@ ARCH_LDFLAGS +=
 ARCH_LDSCRIPT = $(HV_OBJDIR)/link_ram.ld
 ARCH_LDSCRIPT_IN = bsp/ld/link_ram.ld.in
 
-INCLUDE_PATH += include
-INCLUDE_PATH += include/lib
-INCLUDE_PATH += include/lib/crypto
-INCLUDE_PATH += include/common
-INCLUDE_PATH += include/arch/x86
-INCLUDE_PATH += include/arch/x86/boot
-INCLUDE_PATH += include/arch/x86/guest
-INCLUDE_PATH += include/arch/x86/lib
-INCLUDE_PATH += include/debug
-INCLUDE_PATH += include/public
-INCLUDE_PATH += include/dm
-INCLUDE_PATH += include/hw
-INCLUDE_PATH += boot/include
-INCLUDE_PATH += boot/include/guest
+REL_INCLUDE_PATH += include
+REL_INCLUDE_PATH += include/lib
+REL_INCLUDE_PATH += include/lib/crypto
+REL_INCLUDE_PATH += include/common
+REL_INCLUDE_PATH += include/debug
+REL_INCLUDE_PATH += include/public
+REL_INCLUDE_PATH += include/dm
+REL_INCLUDE_PATH += include/hw
+REL_INCLUDE_PATH += boot/include
+REL_INCLUDE_PATH += boot/include/guest
+
+# TODO: ARCH name should come from generated config.mk.
+# Fixed to x86 for now.
+ARCH := x86
+REL_INCLUDE_PATH += include/arch/$(ARCH)
+
+INCLUDE_PATH := $(realpath $(REL_INCLUDE_PATH))
 INCLUDE_PATH += $(HV_OBJDIR)/include
-INCLUDE_PATH += arch/x86/configs/$(CONFIG_BOARD)
-INCLUDE_PATH += scenarios/$(SCENARIO_NAME)
+INCLUDE_PATH += $(BOARD_INFO_DIR)
+INCLUDE_PATH += $(BOARD_CFG_DIR)
+INCLUDE_PATH += $(SCENARIO_CFG_DIR)
 
 CC ?= gcc
 AS ?= as
@@ -178,9 +193,14 @@ endif
 
 # platform boot component
 BOOT_S_SRCS += arch/x86/boot/cpu_primary.S
-BOOT_S_SRCS += arch/x86/boot/cpu_save_boot_ctx.S
 BOOT_S_SRCS += arch/x86/boot/trampoline.S
+BOOT_C_SRCS += boot/boot.c
+BOOT_C_SRCS += boot/multiboot/multiboot.c
+ifeq ($(CONFIG_MULTIBOOT2),y)
+BOOT_C_SRCS += boot/multiboot/multiboot2.c
+endif
 BOOT_C_SRCS += boot/reloc.c
+BOOT_C_SRCS += arch/x86/rtcm.c
 
 # hardware management component
 HW_S_SRCS += arch/x86/idt.S
@@ -188,6 +208,7 @@ HW_C_SRCS += arch/x86/ioapic.c
 HW_C_SRCS += arch/x86/lapic.c
 HW_C_SRCS += arch/x86/cpu.c
 HW_C_SRCS += arch/x86/cpu_caps.c
+HW_C_SRCS += arch/x86/platform_caps.c
 HW_C_SRCS += arch/x86/security.c
 HW_C_SRCS += arch/x86/mmu.c
 HW_C_SRCS += arch/x86/e820.c
@@ -196,37 +217,51 @@ HW_C_SRCS += arch/x86/page.c
 HW_C_SRCS += arch/x86/notify.c
 HW_C_SRCS += arch/x86/vtd.c
 HW_C_SRCS += arch/x86/gdt.c
+HW_C_SRCS += arch/x86/nmi.c
+HW_C_SRCS += arch/x86/exception.c
 HW_C_SRCS += arch/x86/irq.c
-HW_C_SRCS += arch/x86/timer.c
+HW_C_SRCS += arch/x86/tsc.c
+HW_C_SRCS += arch/x86/tsc_deadline_timer.c
 HW_C_SRCS += arch/x86/vmx.c
 HW_C_SRCS += arch/x86/cpu_state_tbl.c
 HW_C_SRCS += arch/x86/pm.c
 HW_S_SRCS += arch/x86/wakeup.S
 HW_C_SRCS += arch/x86/trampoline.c
 HW_S_SRCS += arch/x86/sched.S
-HW_C_SRCS += arch/x86/cat.c
+HW_C_SRCS += arch/x86/rdt.c
 HW_C_SRCS += arch/x86/sgx.c
+HW_C_SRCS += common/ticks.c
+HW_C_SRCS += common/delay.c
+HW_C_SRCS += common/timer.c
+HW_C_SRCS += common/irq.c
 HW_C_SRCS += common/softirq.c
 HW_C_SRCS += common/schedule.c
+HW_C_SRCS += common/event.c
+HW_C_SRCS += common/efi_mmap.c
+ifeq ($(CONFIG_SCHED_NOOP),y)
+HW_C_SRCS += common/sched_noop.c
+endif
+ifeq ($(CONFIG_SCHED_IORR),y)
+HW_C_SRCS += common/sched_iorr.c
+endif
+ifeq ($(CONFIG_SCHED_BVT),y)
+HW_C_SRCS += common/sched_bvt.c
+endif
 HW_C_SRCS += hw/pci.c
 HW_C_SRCS += arch/x86/configs/vm_config.c
-HW_C_SRCS += arch/x86/configs/$(CONFIG_BOARD)/board.c
-HW_C_SRCS += scenarios/$(SCENARIO_NAME)/vm_configurations.c
-ifneq (,$(wildcard scenarios/$(SCENARIO_NAME)/pci_dev.c))
-HW_C_SRCS += scenarios/$(SCENARIO_NAME)/pci_dev.c
-endif
 HW_C_SRCS += boot/acpi_base.c
-HW_C_SRCS += boot/dmar_info.c
-HW_C_SRCS += boot/cmdline.c
 # ACPI parsing component
 # This part should be isolated from FuSa Cert
 ifeq ($(CONFIG_ACPI_PARSE_ENABLED),y)
 HW_C_SRCS += acpi_parser/dmar_parse.c
 HW_C_SRCS += acpi_parser/acpi_ext.c
 endif
-HW_C_SRCS += boot/guest/vboot_wrapper.c
-HW_C_SRCS += boot/guest/deprivilege_boot.c
-HW_C_SRCS += boot/guest/direct_boot.c
+
+# VM Configuration
+VM_CFG_C_SRCS += $(BOARD_INFO_DIR)/board.c
+VM_CFG_C_SRCS += $(SCENARIO_CFG_DIR)/vm_configurations.c
+VM_CFG_C_SRCS += $(BOARD_CFG_DIR)/pt_intx.c
+VM_CFG_C_SRCS += $(BOARD_CFG_DIR)/pci_dev.c
 
 # virtual platform base component
 VP_BASE_C_SRCS += arch/x86/guest/vcpuid.c
@@ -241,13 +276,20 @@ VP_BASE_C_SRCS += arch/x86/guest/virq.c
 VP_BASE_C_SRCS += arch/x86/guest/virtual_cr.c
 VP_BASE_C_SRCS += arch/x86/guest/vmexit.c
 VP_BASE_C_SRCS += arch/x86/guest/ept.c
+VP_BASE_C_SRCS += arch/x86/guest/ve820.c
 VP_BASE_C_SRCS += arch/x86/guest/ucode.c
+ifeq ($(CONFIG_HYPERV_ENABLED),y)
+VP_BASE_C_SRCS += arch/x86/guest/hyperv.c
+endif
+ifeq ($(CONFIG_NVMX_ENABLED),y)
+VP_BASE_C_SRCS += arch/x86/guest/nested.c
+VP_BASE_C_SRCS += arch/x86/guest/vept.c
+endif
 VP_BASE_C_SRCS += boot/guest/vboot_info.c
 VP_BASE_C_SRCS += common/hv_main.c
 VP_BASE_C_SRCS += common/vm_load.c
-VP_BASE_C_SRCS += arch/x86/configs/vmptable.c
 VP_BASE_C_SRCS += arch/x86/configs/pci_dev.c
-VP_BASE_C_SRCS += arch/x86/configs/$(CONFIG_BOARD)/ve820.c
+VP_BASE_C_SRCS += arch/x86/configs/vacpi.c
 
 # virtual platform device model
 VP_DM_C_SRCS += dm/vpic.c
@@ -258,14 +300,23 @@ VP_DM_C_SRCS += dm/io_req.c
 VP_DM_C_SRCS += dm/vpci/vdev.c
 VP_DM_C_SRCS += dm/vpci/vpci.c
 VP_DM_C_SRCS += dm/vpci/vhostbridge.c
+VP_DM_C_SRCS += dm/vpci/vroot_port.c
+VP_DM_C_SRCS += dm/vpci/vpci_bridge.c
+VP_DM_C_SRCS += dm/vpci/ivshmem.c
 VP_DM_C_SRCS += dm/vpci/pci_pt.c
 VP_DM_C_SRCS += dm/vpci/vmsi.c
 VP_DM_C_SRCS += dm/vpci/vmsix.c
+VP_DM_C_SRCS += dm/vpci/vmsix_on_msi.c
+VP_DM_C_SRCS += dm/vpci/vsriov.c
+VP_DM_C_SRCS += dm/vpci/vmcs9900.c
+VP_DM_C_SRCS += dm/mmio_dev.c
+VP_DM_C_SRCS += dm/vgpio.c
 VP_DM_C_SRCS += arch/x86/guest/vlapic.c
 VP_DM_C_SRCS += arch/x86/guest/pm.c
 VP_DM_C_SRCS += arch/x86/guest/assign.c
 VP_DM_C_SRCS += arch/x86/guest/vmx_io.c
 VP_DM_C_SRCS += arch/x86/guest/instr_emul.c
+VP_DM_C_SRCS += arch/x86/guest/lock_instr_emul.c
 VP_DM_C_SRCS += arch/x86/guest/vm_reset.c
 VP_DM_C_SRCS += common/ptdev.c
 
@@ -289,6 +340,7 @@ BOOT_C_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(BOOT_C_SRCS))
 BOOT_S_OBJS := $(patsubst %.S,$(HV_OBJDIR)/%.o,$(BOOT_S_SRCS))
 HW_C_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(HW_C_SRCS))
 HW_S_OBJS := $(patsubst %.S,$(HV_OBJDIR)/%.o,$(HW_S_SRCS))
+VM_CFG_C_OBJS := $(patsubst %.c,%.o,$(VM_CFG_C_SRCS))
 VP_BASE_C_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(VP_BASE_C_SRCS))
 VP_BASE_S_OBJS := $(patsubst %.S,$(HV_OBJDIR)/%.o,$(VP_BASE_S_SRCS))
 VP_DM_C_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(VP_DM_C_SRCS))
@@ -299,8 +351,6 @@ SYS_INIT_C_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(SYS_INIT_C_SRCS))
 ifneq ($(CONFIG_RELEASE),y)
 CFLAGS += -DHV_DEBUG -DPROFILING_ON -fno-omit-frame-pointer
 endif
-PRE_BUILD_SRCS += pre_build/static_checks.c
-PRE_BUILD_OBJS := $(patsubst %.c,$(HV_OBJDIR)/%.o,$(PRE_BUILD_SRCS))
 
 MODULES += $(LIB_MOD)
 MODULES += $(BOOT_MOD)
@@ -311,144 +361,102 @@ MODULES += $(VP_TRUSTY_MOD)
 MODULES += $(VP_HCALL_MOD)
 ifeq ($(CONFIG_RELEASE),y)
 MODULES += $(LIB_RELEASE)
+LIB_BUILD = $(LIB_RELEASE)
+LIB_MK = release/Makefile
 else
 MODULES += $(LIB_DEBUG)
+LIB_BUILD = $(LIB_DEBUG)
+LIB_MK = debug/Makefile
 endif
 MODULES += $(SYS_INIT_MOD)
-
-.PHONY: $(MODULES)
 
 DISTCLEAN_OBJS := $(shell find $(BASEDIR) -name '*.o')
 VERSION := $(HV_OBJDIR)/include/version.h
 
-# Create platform_acpi_info.h
-TEMPLATE_ACPI_INFO_HEADER := arch/x86/configs/platform_acpi_info.h
-BOARDTEMPLATE_ACPI_INFO_HEADER := arch/x86/configs/$(CONFIG_BOARD)/platform_acpi_info.h
-SOURCE_ACPI_INFO_HEADER := arch/x86/configs/$(CONFIG_BOARD)/$(CONFIG_BOARD)_acpi_info.h
-TARGET_ACPI_INFO_HEADER := $(HV_OBJDIR)/include/platform_acpi_info.h
-
-$(TARGET_ACPI_INFO_HEADER): $(HV_OBJDIR)/$(HV_CONFIG)
-ifeq (,$(wildcard $(SOURCE_ACPI_INFO_HEADER)))
-	@echo "******* No ACPI info found *******" && \
-	 echo "Expected ACPI info header at $(SOURCE_ACPI_INFO_HEADER)" && \
-	 echo "" && \
-	 echo "The ACPI info header for this board is not available. Please use" && \
-	 echo "an offline tool on the target board to generate a validated one." && \
-	 echo "More details will be available soon."
-ifdef CONFIG_ENFORCE_VALIDATED_ACPI_INFO
-	@echo "" && \
-	 echo "If you want to build the hypervisor with the template ACPI info," && \
-	 echo "unset ENFORCE_VALIDATED_ACPI_INFO using 'make menuconfig'." && \
-	 false
-else ifeq (,$(wildcard $(BOARDTEMPLATE_ACPI_INFO_HEADER)))
-	@echo "" && \
-	 echo "Using the template at $(TEMPLATE_ACPI_INFO_HEADER) instead" && \
-	 echo "**********************************"
-	@cp $(TEMPLATE_ACPI_INFO_HEADER) $(TARGET_ACPI_INFO_HEADER)
-else
-	@echo "" && \
-	 echo "Using the template at $(BOARDTEMPLATE_ACPI_INFO_HEADER) instead" && \
-	 echo "**********************************"
-	@cp $(BOARDTEMPLATE_ACPI_INFO_HEADER) $(TARGET_ACPI_INFO_HEADER)
-endif
-else
-	@cp $(SOURCE_ACPI_INFO_HEADER) $(TARGET_ACPI_INFO_HEADER)
-endif
+PRE_BUILD_DIR := ../misc/hv_prebuild
 
 .PHONY: all
 all: pre_build $(HV_OBJDIR)/$(HV_FILE).32.out $(HV_OBJDIR)/$(HV_FILE).bin
 
-ifeq ($(FIRMWARE),sbl)
 install: $(HV_OBJDIR)/$(HV_FILE).32.out
-ifeq ($(BOARD),apl-up2)
-	install -D $(HV_OBJDIR)/$(HV_FILE).32.out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).apl-up2.sbl
-else
-	install -D $(HV_OBJDIR)/$(HV_FILE).32.out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).sbl
-endif
+	install -D $(HV_OBJDIR)/$(HV_FILE).32.out $(DESTDIR)$(libdir)/acrn/$(HV_FILE).$(BOARD).$(SCENARIO).32.out
+	install -D $(HV_OBJDIR)/$(HV_FILE).bin $(DESTDIR)$(libdir)/acrn/$(HV_FILE).$(BOARD).$(SCENARIO).bin
+	@if [ -e "$(HV_OBJDIR)/acpi" ];then \
+		install -D $(HV_OBJDIR)/acpi/*.bin -t $(DESTDIR)$(libdir)/acrn/acpi/; \
+	fi
 
 install-debug: $(HV_OBJDIR)/$(HV_FILE).map $(HV_OBJDIR)/$(HV_FILE).out
-ifeq ($(BOARD),apl-up2)
-	install -D $(HV_OBJDIR)/$(HV_FILE).out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).apl-up2.sbl.out
-	install -D $(HV_OBJDIR)/$(HV_FILE).map $(DESTDIR)/usr/lib/acrn/$(HV_FILE).apl-up2.sbl.map
-else
-	install -D $(HV_OBJDIR)/$(HV_FILE).out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).sbl.out
-	install -D $(HV_OBJDIR)/$(HV_FILE).map $(DESTDIR)/usr/lib/acrn/$(HV_FILE).sbl.map
-endif
-endif
-
-ifeq ($(FIRMWARE),uefi)
-install: $(HV_OBJDIR)/$(HV_FILE).32.out
-	install -D $(HV_OBJDIR)/$(HV_FILE).32.out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).$(BOARD).32.out
-endif
+	install -D $(HV_OBJDIR)/$(HV_FILE).out $(DESTDIR)$(libdir)/acrn/$(HV_FILE).$(BOARD).$(SCENARIO).out
+	install -D $(HV_OBJDIR)/$(HV_FILE).map $(DESTDIR)$(libdir)/acrn/$(HV_FILE).$(BOARD).$(SCENARIO).map
 
 .PHONY: pre_build
-pre_build: $(PRE_BUILD_OBJS)
+pre_build: $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
+	@echo "Start pre-build static check ..."
+	$(MAKE) -C $(PRE_BUILD_DIR) BOARD=$(BOARD) SCENARIO=$(SCENARIO) TARGET_DIR=$(HV_CONFIG_DIR)
+	@$(HV_OBJDIR)/hv_prebuild_check.out
+	@echo "generate the binary of ACPI tables for pre-launched VMs ..."
+	python3 ../misc/config_tools/acpi_gen/bin_gen.py --board $(BOARD) --scenario $(SCENARIO) --asl $(HV_CONFIG_DIR) --out $(HV_OBJDIR)/acpi
 
 .PHONY: header
-header: $(VERSION) $(HV_OBJDIR)/$(HV_CONFIG_H) $(TARGET_ACPI_INFO_HEADER)
+header: $(VERSION) $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
 
 .PHONY: lib-mod boot-mod hw-mod vp-base-mod vp-dm-mod vp-trusty-mod vp-hcall-mod sys-init-mod
-lib-mod: $(LIB_C_OBJS) $(LIB_S_OBJS)
+$(LIB_MOD): $(LIB_C_OBJS) $(LIB_S_OBJS)
 	$(AR) $(ARFLAGS) $(LIB_MOD) $(LIB_C_OBJS) $(LIB_S_OBJS)
 
-$(LIB_MOD): lib-mod
+lib-mod: $(LIB_MOD)
 
-boot-mod: $(BOOT_S_OBJS) $(BOOT_C_OBJS)
+$(BOOT_MOD): $(BOOT_S_OBJS) $(BOOT_C_OBJS)
 	$(AR) $(ARFLAGS) $(BOOT_MOD) $(BOOT_S_OBJS) $(BOOT_C_OBJS)
 
-$(BOOT_MOD): boot-mod
+boot-mod: $(BOOT_MOD)
 
-hw-mod: $(HW_S_OBJS) $(HW_C_OBJS)
-	$(AR) $(ARFLAGS) $(HW_MOD) $(HW_S_OBJS) $(HW_C_OBJS)
+$(HW_MOD): $(HW_S_OBJS) $(HW_C_OBJS) $(VM_CFG_C_OBJS)
+	$(AR) $(ARFLAGS) $(HW_MOD) $(HW_S_OBJS) $(HW_C_OBJS) $(VM_CFG_C_OBJS)
 
-$(HW_MOD): hw-mod
+hw-mod: $(HW_MOD)
 
-vp-base-mod: $(VP_BASE_S_OBJS) $(VP_BASE_C_OBJS)
+$(VP_BASE_MOD): $(VP_BASE_S_OBJS) $(VP_BASE_C_OBJS)
 	$(AR) $(ARFLAGS) $(VP_BASE_MOD) $(VP_BASE_S_OBJS) $(VP_BASE_C_OBJS)
 
-$(VP_BASE_MOD): vp-base-mod
+vp-base-mod: $(VP_BASE_MOD)
 
-vp-dm-mod: $(VP_DM_C_OBJS)
+$(VP_DM_MOD): $(VP_DM_C_OBJS)
 	$(AR) $(ARFLAGS) $(VP_DM_MOD) $(VP_DM_C_OBJS)
 
-$(VP_DM_MOD): vp-dm-mod
+vp-dm-mod: $(VP_DM_MOD)
 
-vp-trusty-mod: $(VP_TRUSTY_C_OBJS)
+$(VP_TRUSTY_MOD): $(VP_TRUSTY_C_OBJS)
 	$(AR) $(ARFLAGS) $(VP_TRUSTY_MOD) $(VP_TRUSTY_C_OBJS)
 
-$(VP_TRUSTY_MOD): vp-trusty-mod
+vp-trusty-mod: $(VP_TRUSTY_MOD)
 
-vp-hcall-mod: $(VP_HCALL_C_OBJS)
+$(VP_HCALL_MOD): $(VP_HCALL_C_OBJS)
 	$(AR) $(ARFLAGS) $(VP_HCALL_MOD) $(VP_HCALL_C_OBJS)
 
-$(VP_HCALL_MOD): vp-hcall-mod
+vp-hcall-mod: $(VP_HCALL_MOD)
 
-sys-init-mod: $(SYS_INIT_C_OBJS)
+$(SYS_INIT_MOD): $(SYS_INIT_C_OBJS)
 	$(AR) $(ARFLAGS) $(SYS_INIT_MOD) $(SYS_INIT_C_OBJS)
 
-$(SYS_INIT_MOD): sys-init-mod
+sys-init-mod: $(SYS_INIT_MOD)
 
 .PHONY: lib
-lib: $(SUB_MAKEFILES)
 
-.PHONY: $(SUB_MAKEFILES)
-$(SUB_MAKEFILES): header
-	for Makefile in $(SUB_MAKEFILES); do \
-		$(MAKE) -f $$Makefile MKFL_NAME=$$Makefile; \
-	done
+$(LIB_BUILD): header
+	$(MAKE) -f $(LIB_MK) MKFL_NAME=$(LIB_MK)
 
-$(LIB_RELEASE): lib
-
-$(LIB_DEBUG): lib
+lib: $(LIB_BUILD)
 
 $(HV_OBJDIR)/$(HV_FILE).32.out: $(HV_OBJDIR)/$(HV_FILE).out
 	$(OBJCOPY) -S --section-alignment=0x1000 -O elf32-i386 $< $@
 
 $(HV_OBJDIR)/$(HV_FILE).bin: $(HV_OBJDIR)/$(HV_FILE).out
 	$(OBJCOPY) -O binary $< $(HV_OBJDIR)/$(HV_FILE).bin
+	rm -f $(UPDATE_RESULT)
 
 $(HV_OBJDIR)/$(HV_FILE).out: $(MODULES)
-	${BASH} ${LD_IN_TOOL} $(ARCH_LDSCRIPT_IN) $(ARCH_LDSCRIPT) ${HV_OBJDIR}/.config
+	${BASH} ${LD_IN_TOOL} $(ARCH_LDSCRIPT_IN) $(ARCH_LDSCRIPT) ${HV_CONFIG_MK}
 	$(CC) -Wl,-Map=$(HV_OBJDIR)/$(HV_FILE).map -o $@ $(LDFLAGS) $(ARCH_LDFLAGS) -T$(ARCH_LDSCRIPT) \
 		-Wl,--start-group $^ -Wl,--end-group
 
@@ -465,14 +473,19 @@ distclean:
 	rm -f tags TAGS cscope.files cscope.in.out cscope.out cscope.po.out GTAGS GPATH GRTAGS GSYMS
 
 PHONY: (VERSION)
-$(VERSION):
+$(VERSION): $(HV_CONFIG_H)
 	touch $(VERSION)
-	@COMMIT=`git rev-parse --verify --short HEAD 2>/dev/null`;\
-	DIRTY=`git diff-index --name-only HEAD`;\
-	if [ -n "$$DIRTY" ];then PATCH="$$COMMIT-dirty";else PATCH="$$COMMIT";fi;\
-	DAILY_TAG=`git tag --merged HEAD|grep "acrn"|tail -n 1`;\
-	TIME=`date "+%F %T"`;\
-	USER=`id -u -n`; \
+	@if [ "$(BUILD_VERSION)"x = x -o "$(BUILD_TAG)"x = x ];then \
+		COMMIT=`git rev-parse --verify --short HEAD 2>/dev/null`;\
+		DIRTY=`git diff-index --name-only HEAD`;\
+		if [ -n "$$DIRTY" ];then PATCH="$$COMMIT-dirty";else PATCH="$$COMMIT";fi;\
+		DAILY_TAG=`git tag --merged HEAD|grep "acrn"|tail -n 1`;\
+	else \
+		PATCH="$(BUILD_VERSION)"; \
+		DAILY_TAG="$(BUILD_TAG)"; \
+	fi; \
+	TIME=$$(date -u -d "@$${SOURCE_DATE_EPOCH:-$$(date +%s)}" "+%F %T"); \
+	USER="$${USER:-$$(id -u -n)}"; \
 	if [ x$(CONFIG_RELEASE) = "xy" ];then BUILD_TYPE="REL";else BUILD_TYPE="DBG";fi;\
 	echo "/*" > $(VERSION); \
 	sed 's/^/ * /' ../LICENSE >> $(VERSION); \
@@ -488,15 +501,28 @@ $(VERSION):
 	echo "#define HV_BUILD_TYPE "\""$$BUILD_TYPE"\""" >> $(VERSION);\
 	echo "#define HV_BUILD_TIME "\""$$TIME"\""" >> $(VERSION);\
 	echo "#define HV_BUILD_USER "\""$$USER"\""" >> $(VERSION);\
+	echo "#define HV_BUILD_SCENARIO "\"$(SCENARIO)\""" >> $(VERSION);\
+	echo "#define HV_BUILD_BOARD "\"$(BOARD)\""" >> $(VERSION);\
+	if [ "$(CONFIG_XML_ENABLED)" = "true" ]; then \
+		echo "#define HV_CONFIG_TOOL \" with acrn-config\"" >> $(VERSION);\
+	else	\
+		echo "#define HV_CONFIG_TOOL \"\"" >> $(VERSION);\
+	fi;\
 	echo "#endif" >> $(VERSION)
 
 -include $(C_OBJS:.o=.d)
 -include $(S_OBJS:.o=.d)
 
-$(HV_OBJDIR)/%.o: %.c $(VERSION) $(HV_OBJDIR)/$(HV_CONFIG_H) $(TARGET_ACPI_INFO_HEADER)
+$(HV_OBJDIR)/%.o: %.c header
 	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
 	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@ -MMD -MT $@
 
-$(HV_OBJDIR)/%.o: %.S $(HV_OBJDIR)/$(HV_CONFIG_H)
+$(VM_CFG_C_SRCS): %.c: $(HV_CONFIG_TIMESTAMP)
+
+$(VM_CFG_C_OBJS): %.o: %.c header
+	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
+	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@ -MMD -MT $@
+
+$(HV_OBJDIR)/%.o: %.S header
 	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
 	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. $(ASFLAGS) $(ARCH_ASFLAGS) -c $< -o $@ -MMD -MT $@

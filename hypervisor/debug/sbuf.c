@@ -12,8 +12,8 @@
 #include <types.h>
 #include <rtl.h>
 #include <errno.h>
-#include <cpu.h>
-#include <per_cpu.h>
+#include <asm/cpu.h>
+#include <asm/per_cpu.h>
 
 uint32_t sbuf_next_ptr(uint32_t pos_arg,
 		uint32_t span, uint32_t scope)

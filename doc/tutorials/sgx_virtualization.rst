@@ -1,7 +1,7 @@
 .. _sgx_virt:
 
-SGX Virtualization
-##################
+Enable SGX Virtualization
+#########################
 
 SGX refers to `Intel® Software Guard Extensions <https://software.intel.com/
 en-us/sgx>`_ (Intel® SGX). This is a set of instructions that can be used by
@@ -30,7 +30,7 @@ The image below shows the high-level design of SGX virtualization in ACRN.
    SGX Virtualization in ACRN
 
 
-Enable SGX support for Guest
+Enable SGX Support for Guest
 ****************************
 
 Presumptions
@@ -41,8 +41,8 @@ No Enclave in a Hypervisor
 
 ACRN does not support running an enclave in a hypervisor since the whole
 hypervisor is currently running in VMX root mode, ring 0, and an enclave must
-run in ring 3. ACRN SGX virtualization in provides the capability to (non-SOS)
-VMs.
+run in ring 3. ACRN SGX virtualization provides the capability to
+non-Service VMs.
 
 Enable SGX on Host
 ------------------
@@ -92,7 +92,7 @@ enable SGX support in the BIOS and in ACRN:
 
 #. Add the EPC config in the VM configuration.
 
-   Apply the patch to enable SGX support in UOS in the SDC scenario:
+   Apply the patch to enable SGX support in User VM in the SDC scenario:
 
    .. code-block:: bash
 
@@ -112,7 +112,7 @@ enable SGX support in the BIOS and in ACRN:
 SGX Capability Exposure
 ***********************
 ACRN exposes SGX capability and EPC resource to a guest VM via CPUIDs and
-Processor Model-Specific Registers (MSRs), as explained in the following
+Processor model-specific registers (MSRs), as explained in the following
 sections.
 
 CPUID Virtualization
@@ -135,12 +135,12 @@ CPUID Leaf 12H
 **Intel SGX Capability Enumeration**
 
 * CPUID_12H.0.EAX[0] SGX1: If 1, indicates that Intel SGX supports the
-  collection of SGX1 leaf functions.If is_sgx_supported and the section count
+  collection of SGX1 leaf functions. If is_sgx_supported and the section count
   is initialized for the VM, this bit will be set.
 * CPUID_12H.0.EAX[1] SGX2: If 1, indicates that Intel SGX supports the
   collection of SGX2 leaf functions. If hardware supports it and SGX enabled
   for the VM, this bit will be set.
-* Other fields of CPUID_12H.0.EAX aligns with the physical CPUID.
+* Other fields of CPUID_12H.0.EAX align with the physical CPUID.
 
 **Intel SGX Attributes Enumeration**
 
@@ -149,7 +149,7 @@ CPUID Leaf 12H
   Extended feature (same structure as XCR0).
 
 The hypervisor may change the allow-1 setting of XFRM in ATTRIBUTES for VM.
-If some feature is disabled for the VM, the bit is also cleared, eg. MPX.
+If some feature is disabled for the VM, the bit is also cleared, e.g. MPX.
 
 **Intel SGX EPC Enumeration**
 
@@ -163,7 +163,7 @@ MSR Virtualization
 IA32_FEATURE_CONTROL
 --------------------
 
-The hypervisor will opt-in to SGX for VM if SGX is enabled for VM.
+The hypervisor will opt in to SGX for VM if SGX is enabled for VM.
 
 * MSR_IA32_FEATURE_CONTROL_LOCK is set
 * MSR_IA32_FEATURE_CONTROL_SGX_GE is set
@@ -232,13 +232,13 @@ ENCLS[ECREATE]
 Other VMExit Control
 ********************
 
-RDRAND exiting
+RDRAND Exiting
 ==============
 
 * ACRN allows Guest to use RDRAND/RDSEED instruction but does not set "RDRAND
   exiting" to 1.
 
-PAUSE exiting
+PAUSE Exiting
 =============
 
 * ACRN does not set "PAUSE exiting" to 1.
@@ -248,7 +248,7 @@ Future Development
 Following are some currently unplanned areas of interest for future
 ACRN development around SGX virtualization.
 
-Launch Configuration support
+Launch Configuration Support
 ============================
 
 When the following two conditions are both satisfied:

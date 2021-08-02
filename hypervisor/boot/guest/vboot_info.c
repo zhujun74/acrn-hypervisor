@@ -7,87 +7,131 @@
 #include <types.h>
 #include <rtl.h>
 #include <errno.h>
-#include <per_cpu.h>
-#include <irq.h>
-#include <boot_context.h>
-#include <sprintf.h>
-#include <multiboot.h>
-#include <pgtable.h>
-#include <zeropage.h>
-#include <seed.h>
-#include <mmu.h>
-#include <vm.h>
+#include <asm/per_cpu.h>
+#include <asm/irq.h>
+#include <boot.h>
+#include <asm/pgtable.h>
+#include <asm/zeropage.h>
+#include <asm/seed.h>
+#include <asm/mmu.h>
+#include <asm/guest/vm.h>
+#include <asm/guest/ept.h>
+#include <reloc.h>
 #include <logmsg.h>
-#include <deprivilege_boot.h>
 #include <vboot_info.h>
+#include <vacpi.h>
 
-#define ACRN_DBG_BOOT	6U
+#define DBG_LEVEL_BOOT	6U
 
-#define MAX_BOOT_PARAMS_LEN 64U
-#define INVALID_MOD_IDX		0xFFFFU
+/* TODO:
+ * The value is referenced from Linux boot protocal for old kernels,
+ * but this should be configurable for different OS. */
+#define DEFAULT_RAMDISK_GPA_MAX		0x37ffffffUL
+
+#define PRE_VM_MAX_RAM_ADDR_BELOW_4GB		(VIRT_ACPI_DATA_ADDR - 1U)
 
 /**
- * @pre vm != NULL && mbi != NULL
+ * @pre vm != NULL && mod != NULL
  */
-static void init_vm_ramdisk_info(struct acrn_vm *vm, const struct multiboot_module *mod)
+static void init_vm_ramdisk_info(struct acrn_vm *vm, const struct abi_module *mod)
 {
-	void *mod_addr = hpa2hva((uint64_t)mod->mm_mod_start);
+	uint64_t ramdisk_load_gpa = INVALID_GPA;
+	uint64_t ramdisk_gpa_max = DEFAULT_RAMDISK_GPA_MAX;
+	uint64_t kernel_start = (uint64_t)vm->sw.kernel_info.kernel_load_addr;
+	uint64_t kernel_end = kernel_start + vm->sw.kernel_info.kernel_size;
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
-	if ((mod_addr != NULL) && (mod->mm_mod_end > mod->mm_mod_start)) {
-		vm->sw.ramdisk_info.src_addr = mod_addr;
-		vm->sw.ramdisk_info.load_addr = vm->sw.kernel_info.kernel_load_addr + vm->sw.kernel_info.kernel_size;
-		vm->sw.ramdisk_info.load_addr = (void *)round_page_up((uint64_t)vm->sw.ramdisk_info.load_addr);
-		vm->sw.ramdisk_info.size = mod->mm_mod_end - mod->mm_mod_start;
+	if (mod->start != NULL) {
+		vm->sw.ramdisk_info.src_addr = mod->start;
+		vm->sw.ramdisk_info.size = mod->size;
 	}
+
+	/* Per Linux boot protocol, the Kernel need a size of contiguous
+	 * memory(i.e. init_size field in zeropage) from its extract address to boot,
+	 * and initrd_addr_max field specifies the maximum address of the ramdisk.
+	 * Per kernel src head_64.S, decompressed kernel start at 2M aligned to the
+	 * compressed kernel load address.
+	 */
+	if (vm->sw.kernel_type == KERNEL_BZIMAGE) {
+		struct zero_page *zeropage = (struct zero_page *)vm->sw.kernel_info.kernel_src_addr;
+		uint32_t kernel_init_size = zeropage->hdr.init_size;
+		uint32_t initrd_addr_max = zeropage->hdr.initrd_addr_max;
+
+		kernel_end = kernel_start + MEM_2M + kernel_init_size;
+		if (initrd_addr_max != 0U) {
+			ramdisk_gpa_max = initrd_addr_max;
+		}
+	}
+
+	if (is_sos_vm(vm)) {
+		uint64_t mods_start, mods_end;
+
+		get_boot_mods_range(&mods_start, &mods_end);
+		mods_start = sos_vm_hpa2gpa(mods_start);
+		mods_end = sos_vm_hpa2gpa(mods_end);
+
+		if (vm->sw.ramdisk_info.src_addr != NULL) {
+			ramdisk_load_gpa = sos_vm_hpa2gpa((uint64_t)vm->sw.ramdisk_info.src_addr);
+		}
+
+		/* For SOS VM, the ramdisk has been loaded by bootloader, so in most cases
+		 * there is no need to do gpa copy again. But in the case that the ramdisk is
+		 * loaded by bootloader at a address higher than its limit, we should do gpa
+		 * copy then.
+		 */
+		if ((ramdisk_load_gpa + vm->sw.ramdisk_info.size) > ramdisk_gpa_max) {
+			/* In this case, mods_end must be higher than ramdisk_gpa_max,
+			 * so try to locate ramdisk between MEM_1M and mods_start/kernel_start,
+			 * or try the range between kernel_end and mods_start;
+			 */
+			ramdisk_load_gpa = find_space_from_ve820(vm, vm->sw.ramdisk_info.size,
+					MEM_1M, min(min(mods_start, kernel_start), ramdisk_gpa_max));
+			if ((ramdisk_load_gpa == INVALID_GPA) && (kernel_end < min(mods_start, ramdisk_gpa_max))) {
+				ramdisk_load_gpa = find_space_from_ve820(vm, vm->sw.ramdisk_info.size,
+						kernel_end, min(mods_start, ramdisk_gpa_max));
+			}
+		}
+	} else {
+		/* For pre-launched VM, the ramdisk would be put by searching ve820 table.
+		 */
+		ramdisk_gpa_max = min(PRE_VM_MAX_RAM_ADDR_BELOW_4GB, ramdisk_gpa_max);
+
+		if (kernel_end < ramdisk_gpa_max) {
+			ramdisk_load_gpa = find_space_from_ve820(vm, vm->sw.ramdisk_info.size,
+					kernel_end, ramdisk_gpa_max);
+		}
+		if (ramdisk_load_gpa == INVALID_GPA) {
+			ramdisk_load_gpa = find_space_from_ve820(vm, vm->sw.ramdisk_info.size,
+					MEM_1M, min(kernel_start, ramdisk_gpa_max));
+		}
+	}
+
+	if (ramdisk_load_gpa == INVALID_GPA) {
+		pr_err("no space in guest memory to load VM %d ramdisk", vm->vm_id);
+		vm->sw.ramdisk_info.size = 0U;
+	}
+
+	/* Use customer specified ramdisk load addr if it is configured in VM configuration,
+	 * otherwise use allocated address calculated by HV.
+	 */
+	if (vm_config->os_config.kernel_ramdisk_addr != 0UL) {
+		vm->sw.ramdisk_info.load_addr = (void *)vm_config->os_config.kernel_ramdisk_addr;
+	} else {
+		vm->sw.ramdisk_info.load_addr = (void *)ramdisk_load_gpa;
+	}
+
+	dev_dbg(DBG_LEVEL_BOOT, "ramdisk mod start=0x%x, size=0x%x", (uint64_t)mod->start, mod->size);
+	dev_dbg(DBG_LEVEL_BOOT, "ramdisk load addr = 0x%lx", ramdisk_load_gpa);
 }
 
-/* There are two sources for sos_vm kernel cmdline:
- * - cmdline from direct boot mbi->cmdline
- * - cmdline from acrn stitching tool. mod[0].mm_string
- * We need to merge them together
- */
-static char kernel_cmdline[MAX_BOOTARGS_SIZE + 1U];
-
 /**
- * @pre vm != NULL && cmdline != NULL && cmdstr != NULL
+ * @pre vm != NULL && mod != NULL
  */
-static void merge_cmdline(const struct acrn_vm *vm, const char *cmdline, const char *cmdstr)
+static void init_vm_acpi_info(struct acrn_vm *vm, const struct abi_module *mod)
 {
-	char *cmd_dst = kernel_cmdline;
-	uint32_t cmdline_len, cmdstr_len;
-	uint32_t dst_avail; /* available room for cmd_dst[] */
-	uint32_t dst_len; /* the actual number of characters that are copied */
-
-	/*
-	 * Append seed argument for SOS
-	 * seed_arg string ends with a white space and '\0', so no aditional delimiter is needed
-	 */
-	append_seed_arg(cmd_dst, is_sos_vm(vm));
-	dst_len = strnlen_s(cmd_dst, MAX_BOOTARGS_SIZE);
-	dst_avail = MAX_BOOTARGS_SIZE + 1U - dst_len;
-	cmd_dst += dst_len;
-
-	cmdline_len = strnlen_s(cmdline, MAX_BOOTARGS_SIZE);
-	cmdstr_len = strnlen_s(cmdstr, MAX_BOOTARGS_SIZE);
-
-	/* reserve one character for the delimiter between 2 strings (one white space) */
-	if ((cmdline_len + cmdstr_len + 1U) >= dst_avail) {
-		panic("Multiboot bootarg string too long");
-	} else {
-		/* copy mbi->mi_cmdline */
-		(void)strncpy_s(cmd_dst, dst_avail, cmdline, cmdline_len);
-		dst_len = strnlen_s(cmd_dst, dst_avail);
-		dst_avail -= dst_len;
-		cmd_dst += dst_len;
-
-		/* overwrite '\0' with a white space */
-		(void)strncpy_s(cmd_dst, dst_avail, " ", 1U);
-		dst_avail -= 1U;
-		cmd_dst += 1U;
-
-		/* copy vm_config->os_config.bootargs */
-		(void)strncpy_s(cmd_dst, dst_avail, cmdstr, cmdstr_len);
-	}
+	vm->sw.acpi_info.src_addr = mod->start;
+	vm->sw.acpi_info.load_addr = (void *)VIRT_ACPI_DATA_ADDR;
+	vm->sw.acpi_info.size = ACPI_MODULE_SIZE;
 }
 
 /**
@@ -106,15 +150,44 @@ static void *get_kernel_load_addr(struct acrn_vm *vm)
 		 * in Documentation/x86/boot.txt, a relocating
 		 * bootloader should attempt to load kernel at pref_address
 		 * if possible. A non-relocatable kernel will unconditionally
-		 * move itself and to run at this address, so no need to copy
-		 * kernel to perf_address by bootloader, if kernel is
-		 * non-relocatable.
+		 * move itself and to run at this address.
 		 */
 		zeropage = (struct zero_page *)sw_info->kernel_info.kernel_src_addr;
-		if (zeropage->hdr.relocatable_kernel != 0U) {
-			zeropage = (struct zero_page *)zeropage->hdr.pref_addr;
+
+		if ((is_sos_vm(vm)) && (zeropage->hdr.relocatable_kernel != 0U)) {
+			uint64_t mods_start, mods_end;
+			uint64_t kernel_load_gpa = INVALID_GPA;
+			uint32_t kernel_align = zeropage->hdr.kernel_alignment;
+			uint32_t kernel_init_size = zeropage->hdr.init_size;
+			/* Because the kernel load address need to be up aligned to kernel_align size
+			 * whereas find_space_from_ve820() can only return page aligned address,
+			 * we enlarge the needed size to (kernel_init_size + 2 * kernel_align).
+			 */
+			uint32_t kernel_size = kernel_init_size + 2 * kernel_align;
+
+			get_boot_mods_range(&mods_start, &mods_end);
+			mods_start = sos_vm_hpa2gpa(mods_start);
+			mods_end = sos_vm_hpa2gpa(mods_end);
+
+			/* TODO: support load kernel when modules are beyond 4GB space. */
+			if (mods_end < MEM_4G) {
+				kernel_load_gpa = find_space_from_ve820(vm, kernel_size, MEM_1M, mods_start);
+
+				if (kernel_load_gpa == INVALID_GPA) {
+					kernel_load_gpa = find_space_from_ve820(vm, kernel_size, mods_end, MEM_4G);
+				}
+			}
+
+			if (kernel_load_gpa != INVALID_GPA) {
+				load_addr = (void *)roundup((uint64_t)kernel_load_gpa, kernel_align);
+			}
+		} else {
+			load_addr = (void *)zeropage->hdr.pref_addr;
+			if (is_sos_vm(vm)) {
+				/* The non-relocatable SOS kernel might overlap with boot modules. */
+				pr_err("Non-relocatable kernel found, risk to boot!");
+			}
 		}
-		load_addr = (void *)zeropage;
 		break;
 	case KERNEL_ZEPHYR:
 		load_addr = (void *)vm_config->os_config.kernel_load_addr;
@@ -126,190 +199,166 @@ static void *get_kernel_load_addr(struct acrn_vm *vm)
 	if (load_addr == NULL) {
 		pr_err("Could not get kernel load addr of VM %d .", vm->vm_id);
 	}
+
+	dev_dbg(DBG_LEVEL_BOOT, "VM%d kernel load_addr: 0x%lx", vm->vm_id, load_addr);
 	return load_addr;
 }
 
 /**
  * @pre vm != NULL && mod != NULL
  */
-static int32_t init_vm_kernel_info(struct acrn_vm *vm, const struct multiboot_module *mod)
+static int32_t init_vm_kernel_info(struct acrn_vm *vm, const struct abi_module *mod)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
-	dev_dbg(ACRN_DBG_BOOT, "kernel mod start=0x%x, end=0x%x",
-		mod->mm_mod_start, mod->mm_mod_end);
+	dev_dbg(DBG_LEVEL_BOOT, "kernel mod start=0x%x, size=0x%x",
+			(uint64_t)mod->start, mod->size);
 
 	vm->sw.kernel_type = vm_config->os_config.kernel_type;
-	vm->sw.kernel_info.kernel_src_addr = hpa2hva((uint64_t)mod->mm_mod_start);
-	if ((vm->sw.kernel_info.kernel_src_addr != NULL) && (mod->mm_mod_end > mod->mm_mod_start)){
-		vm->sw.kernel_info.kernel_size = mod->mm_mod_end - mod->mm_mod_start;
+	vm->sw.kernel_info.kernel_src_addr = mod->start;
+	if (vm->sw.kernel_info.kernel_src_addr != NULL) {
+		vm->sw.kernel_info.kernel_size = mod->size;
 		vm->sw.kernel_info.kernel_load_addr = get_kernel_load_addr(vm);
 	}
 
 	return (vm->sw.kernel_info.kernel_load_addr == NULL) ? (-EINVAL) : 0;
 }
 
+/* cmdline parsed from abi module string, for pre-launched VMs and SOS VM only. */
+static char mod_cmdline[PRE_VM_NUM + SOS_VM_NUM][MAX_BOOTARGS_SIZE] = { '\0' };
+
 /**
- * @pre vm != NULL && mbi != NULL
+ * @pre vm != NULL && abi != NULL
  */
-static void init_vm_bootargs_info(struct acrn_vm *vm, const struct multiboot_info *mbi)
+static void init_vm_bootargs_info(struct acrn_vm *vm, const struct acrn_boot_info *abi)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
-	char *bootargs = vm_config->os_config.bootargs;
 
-	if (vm_config->load_order == PRE_LAUNCHED_VM) {
-		vm->sw.bootargs_info.src_addr = bootargs;
-		vm->sw.bootargs_info.size = strnlen_s(bootargs, MAX_BOOTARGS_SIZE);
-	} else {
-		/* vm_config->load_order == SOS_VM */
-		if (((mbi->mi_flags & MULTIBOOT_INFO_HAS_CMDLINE) != 0U)
-				&& (*(char *)hpa2hva(mbi->mi_cmdline) != 0)) {
-			/*
-			 * If there is cmdline from mbi->mi_cmdline, merge it with
-			 * vm_config->os_config.bootargs
+	vm->sw.bootargs_info.src_addr = vm_config->os_config.bootargs;
+	/* If module string of the kernel module exists, it would OVERRIDE the pre-configured build-in VM bootargs,
+	 * which means we give user a chance to re-configure VM bootargs at bootloader runtime. e.g. GRUB menu
+	 */
+	if (mod_cmdline[vm->vm_id][0] != '\0') {
+		vm->sw.bootargs_info.src_addr = &mod_cmdline[vm->vm_id][0];
+	}
+
+	if (vm_config->load_order == SOS_VM) {
+		if (strncat_s((char *)vm->sw.bootargs_info.src_addr, MAX_BOOTARGS_SIZE, " ", 1U) == 0) {
+			char seed_args[MAX_SEED_ARG_SIZE] = "";
+
+			fill_seed_arg(seed_args, MAX_SEED_ARG_SIZE);
+			/* Fill seed argument for SOS
+			 * seed_args string ends with a white space and '\0', so no additional delimiter is needed
 			 */
-			merge_cmdline(vm, hpa2hva((uint64_t)mbi->mi_cmdline), bootargs);
+			if (strncat_s((char *)vm->sw.bootargs_info.src_addr, MAX_BOOTARGS_SIZE,
+					seed_args, (MAX_BOOTARGS_SIZE - 1U)) != 0) {
+				pr_err("failed to fill seed arg to SOS bootargs!");
+			}
 
-			vm->sw.bootargs_info.src_addr = kernel_cmdline;
-			vm->sw.bootargs_info.size = strnlen_s(kernel_cmdline, MAX_BOOTARGS_SIZE);
+			/* If there is cmdline from abi->cmdline, merge it with configured SOS bootargs.
+			 * This is very helpful when one of configured bootargs need to be revised at GRUB runtime
+			 * (e.g. "root="), since the later one would override the previous one if multiple bootargs exist.
+			 */
+			if (abi->cmdline[0] != '\0') {
+				if (strncat_s((char *)vm->sw.bootargs_info.src_addr, MAX_BOOTARGS_SIZE,
+						abi->cmdline, (MAX_BOOTARGS_SIZE - 1U)) != 0) {
+					pr_err("failed to merge mbi cmdline to SOS bootargs!");
+				}
+			}
 		} else {
-			vm->sw.bootargs_info.src_addr = bootargs;
-			vm->sw.bootargs_info.size = strnlen_s(bootargs, MAX_BOOTARGS_SIZE);
+			pr_err("no space to append SOS bootargs!");
 		}
+
 	}
 
-	/* Kernel bootarg and zero page are right before the kernel image */
-	if (vm->sw.bootargs_info.size > 0U) {
-		vm->sw.bootargs_info.load_addr = vm->sw.kernel_info.kernel_load_addr - (MEM_1K * 8U);
-	} else {
-		vm->sw.bootargs_info.load_addr = NULL;
-	}
+	vm->sw.bootargs_info.size = strnlen_s((const char *)vm->sw.bootargs_info.src_addr, (MAX_BOOTARGS_SIZE - 1U)) + 1U;
+
 }
 
-/* @pre mods != NULL
+/* @pre abi != NULL && tag != NULL
  */
-static uint32_t get_mod_idx_by_tag(const struct multiboot_module *mods, uint32_t mods_count, const char *tag)
+static struct abi_module *get_mod_by_tag(const struct acrn_boot_info *abi, const char *tag)
 {
-	uint32_t i, ret = INVALID_MOD_IDX;
+	uint8_t i;
+	struct abi_module *mod = NULL;
+	struct abi_module *mods = (struct abi_module *)(&abi->mods[0]);
 	uint32_t tag_len = strnlen_s(tag, MAX_MOD_TAG_LEN);
 
-	for (i = 0U; i < mods_count; i++) {
-		const char *mm_string = (char *)hpa2hva((uint64_t)mods[i].mm_string);
-		uint32_t mm_str_len = strnlen_s(mm_string, MAX_MOD_TAG_LEN);
+	for (i = 0U; i < abi->mods_count; i++) {
+		const char *string = (char *)hpa2hva((uint64_t)(mods + i)->string);
+		uint32_t str_len = strnlen_s(string, MAX_MOD_TAG_LEN);
+		const char *p_chr = string + tag_len; /* point to right after the end of tag */
 
-		/* when do file stitch by tool, the tag in mm_string might be followed with 0x0d or 0x0a */
-		if ((mm_str_len >= tag_len) && (strncmp(mm_string, tag, tag_len) == 0)
-				&& ((*(mm_string + tag_len) == 0x0d)
-				|| (*(mm_string + tag_len) == 0x0a)
-				|| (*(mm_string + tag_len) == 0))){
-			ret = i;
+		/* The tag must be located at the first word in string and end with SPACE/TAB or EOL since
+		 * when do file stitch by tool, the tag in string might be followed by EOL(0x0d/0x0a).
+		 */
+		if ((str_len >= tag_len) && (strncmp(string, tag, tag_len) == 0)
+				&& (is_space(*p_chr) || is_eol(*p_chr))) {
+			mod = mods + i;
 			break;
 		}
 	}
-	return ret;
+	/* GRUB might put module at address 0 or under 1MB in the case that the module size is less then 1MB
+	 * ACRN will not support these cases
+	 */
+	if ((mod != NULL) && (mod->start == NULL)) {
+		pr_err("Unsupported module: start at HPA 0, size 0x%x .", mod->size);
+		mod = NULL;
+	}
+
+	return mod;
 }
 
-/* @pre vm != NULL && mbi != NULL
+/* @pre vm != NULL && abi != NULL
  */
-static int32_t init_vm_sw_load(struct acrn_vm *vm, const struct multiboot_info *mbi)
+static int32_t init_vm_sw_load(struct acrn_vm *vm, const struct acrn_boot_info *abi)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
-	struct multiboot_module *mods = (struct multiboot_module *)hpa2hva((uint64_t)mbi->mi_mods_addr);
-	uint32_t mod_idx;
+	struct abi_module *mod;
 	int32_t ret = -EINVAL;
 
-	dev_dbg(ACRN_DBG_BOOT, "mod counts=%d\n", mbi->mi_mods_count);
+	dev_dbg(DBG_LEVEL_BOOT, "mod counts=%d\n", abi->mods_count);
 
-	if (mods != NULL) {
-		mod_idx = get_mod_idx_by_tag(mods, mbi->mi_mods_count, vm_config->os_config.kernel_mod_tag);
-		if (mod_idx != INVALID_MOD_IDX) {
-			ret = init_vm_kernel_info(vm, &mods[mod_idx]);
+	/* find kernel module first */
+	mod = get_mod_by_tag(abi, vm_config->os_config.kernel_mod_tag);
+	if (mod != NULL) {
+		const char *string = (char *)hpa2hva((uint64_t)mod->string);
+		uint32_t str_len = strnlen_s(string, MAX_BOOTARGS_SIZE);
+		uint32_t tag_len = strnlen_s(vm_config->os_config.kernel_mod_tag, MAX_MOD_TAG_LEN);
+		const char *p_chr = string + tag_len + 1; /* point to the possible start of cmdline */
+
+		/* check whether there is a cmdline configured in module string */
+		if (((str_len > (tag_len + 1U))) && (is_space(*(p_chr - 1))) && (!is_eol(*p_chr))) {
+			(void)strncpy_s(&mod_cmdline[vm->vm_id][0], MAX_BOOTARGS_SIZE,
+					p_chr, (MAX_BOOTARGS_SIZE - 1U));
 		}
+
+		ret = init_vm_kernel_info(vm, mod);
 	}
 
 	if (ret == 0) {
-		init_vm_bootargs_info(vm, mbi);
-		/* check whether there is a ramdisk module */
-		mod_idx = get_mod_idx_by_tag(mods, mbi->mi_mods_count, vm_config->os_config.ramdisk_mod_tag);
-		if (mod_idx != INVALID_MOD_IDX) {
-			init_vm_ramdisk_info(vm, &mods[mod_idx]);
-			/* TODO: prepare other modules like firmware, seedlist */
+		/* Currently VM bootargs only support Linux guest */
+		if (vm->sw.kernel_type == KERNEL_BZIMAGE) {
+			init_vm_bootargs_info(vm, abi);
 		}
+		/* check whether there is a ramdisk module */
+		mod = get_mod_by_tag(abi, vm_config->os_config.ramdisk_mod_tag);
+		if (mod != NULL) {
+			init_vm_ramdisk_info(vm, mod);
+		}
+
+		if (is_prelaunched_vm(vm)) {
+			mod = get_mod_by_tag(abi, vm_config->acpi_config.acpi_mod_tag);
+			if ((mod != NULL) && (mod->size == ACPI_MODULE_SIZE)) {
+				init_vm_acpi_info(vm, mod);
+			} else {
+				pr_err("failed to load VM %d acpi module", vm->vm_id);
+			}
+		}
+
 	} else {
 		pr_err("failed to load VM %d kernel module", vm->vm_id);
 	}
-	return ret;
-}
-
-/**
- * @pre vm != NULL
- */
-static int32_t init_general_vm_boot_info(struct acrn_vm *vm)
-{
-	struct multiboot_info *mbi = NULL;
-	int32_t ret = -EINVAL;
-
-	if (boot_regs[0] != MULTIBOOT_INFO_MAGIC) {
-		panic("no multiboot info found");
-	} else {
-		mbi = (struct multiboot_info *)hpa2hva((uint64_t)boot_regs[1]);
-
-		if (mbi != NULL) {
-			stac();
-			dev_dbg(ACRN_DBG_BOOT, "Multiboot detected, flag=0x%x", mbi->mi_flags);
-			if ((mbi->mi_flags & MULTIBOOT_INFO_HAS_MODS) == 0U) {
-				panic("no multiboot module info found");
-			} else {
-				ret = init_vm_sw_load(vm, mbi);
-			}
-			clac();
-		}
-	}
-	return ret;
-}
-
-static void depri_boot_spurious_handler(uint32_t vector)
-{
-	if (get_pcpu_id() == BOOT_CPU_ID) {
-		struct acrn_vcpu *vcpu = per_cpu(vcpu, BOOT_CPU_ID);
-
-		if (vcpu != NULL) {
-			vlapic_set_intr(vcpu, vector, LAPIC_TRIG_EDGE);
-		} else {
-			pr_err("%s vcpu or vlapic is not ready, interrupt lost\n", __func__);
-		}
-	}
-}
-
-static int32_t depri_boot_sw_loader(struct acrn_vm *vm)
-{
-	int32_t ret = 0;
-	/* get primary vcpu */
-	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BOOT_CPU_ID);
-	struct acrn_vcpu_regs *vcpu_regs = &boot_context;
-	const struct depri_boot_context *depri_boot_ctx = get_depri_boot_ctx();
-	const struct lapic_regs *depri_boot_lapic_regs = get_depri_boot_lapic_regs();
-
-	pr_dbg("Loading guest to run-time location");
-
-	vlapic_restore(vcpu_vlapic(vcpu), depri_boot_lapic_regs);
-
-	/* For UEFI platform, the bsp init regs come from two places:
-	 * 1. saved in depri_boot: gpregs, rip
-	 * 2. saved when HV started: other registers
-	 * We copy the info saved in depri_boot to boot_context and
-	 * init bsp with boot_context.
-	 */
-	(void)memcpy_s((void *)&(vcpu_regs->gprs), sizeof(struct acrn_gp_regs),
-		&(depri_boot_ctx->vcpu_regs.gprs), sizeof(struct acrn_gp_regs));
-
-	vcpu_regs->rip = depri_boot_ctx->vcpu_regs.rip;
-	set_vcpu_regs(vcpu, vcpu_regs);
-
-	/* defer irq enabling till vlapic is ready */
-	spurious_handler = depri_boot_spurious_handler;
-	CPU_IRQ_ENABLE();
-
 	return ret;
 }
 
@@ -323,14 +372,12 @@ static int32_t depri_boot_sw_loader(struct acrn_vm *vm)
  */
 int32_t init_vm_boot_info(struct acrn_vm *vm)
 {
-	int32_t ret = 0;
+	struct acrn_boot_info *abi = get_acrn_boot_info();
+	int32_t ret = -EINVAL;
 
-	if (is_sos_vm(vm) && (get_sos_boot_mode() == DEPRI_BOOT_MODE)) {
-		vm_sw_loader = depri_boot_sw_loader;
-	} else {
-		vm_sw_loader = direct_boot_sw_loader;
-		ret = init_general_vm_boot_info(vm);
-	}
+	stac();
+	ret = init_vm_sw_load(vm, abi);
+	clac();
 
 	return ret;
 }

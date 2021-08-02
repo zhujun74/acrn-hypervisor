@@ -33,6 +33,7 @@
 #include "dm.h"
 #include "vmmapi.h"
 #include "sw_load.h"
+#include "log.h"
 
 #define SETUP_SIG 0x5a5aaa55
 
@@ -49,9 +50,9 @@
  * +-----------------------------------------------------+
  * | ...                                                 |
  * +-----------------------------------------------------+
- * | offset: lowmem - 4MB - 2K (kernel gdt)              |
+ * | offset: lowmem - RAMDISK_LOAD_SIZE - 2K (kernel gdt)|
  * +-----------------------------------------------------+
- * | offset: lowmem - 4MB (ramdisk image)                |
+ * | offset: lowmem - RAMDISK_LOAD_SIZE (ramdisk image)  |
  * +-----------------------------------------------------+
  * | offset: lowmem - 8K (bootargs)                      |
  * +-----------------------------------------------------+
@@ -62,8 +63,10 @@
  */
 
 /* Check default e820 table in sw_load_common.c for info about ctx->lowmem */
-#define	GDT_LOAD_OFF(ctx)	(ctx->lowmem - 4*MB - 2* KB)
-#define RAMDISK_LOAD_OFF(ctx)	(ctx->lowmem - 4*MB)
+/* use ramdisk size for ramdisk load offset, leave 8KB room for bootargs */
+#define RAMDISK_LOAD_SIZE	roundup2(ramdisk_size + 8*KB, 4*KB)
+#define GDT_LOAD_OFF(ctx)	(ctx->lowmem - RAMDISK_LOAD_SIZE - 2*KB)
+#define RAMDISK_LOAD_OFF(ctx)	(ctx->lowmem - RAMDISK_LOAD_SIZE)
 #define BOOTARGS_LOAD_OFF(ctx)	(ctx->lowmem - 8*KB)
 #define KERNEL_ENTRY_OFF(ctx)	(ctx->lowmem - 6*KB)
 #define ZEROPAGE_LOAD_OFF(ctx)	(ctx->lowmem - 4*KB)
@@ -76,7 +79,8 @@ struct _zeropage {
 	uint8_t pad2[0x8];                      /* 0x1e9 */
 
 	struct	{
-		uint8_t hdr_pad1[0x1f];         /* 0x1f1 */
+		uint8_t setup_sects;		/* 0x1f1 */
+		uint8_t hdr_pad1[0x1e];         /* 0x1f2 */
 		uint8_t loader_type;            /* 0x210 */
 		uint8_t load_flags;             /* 0x211 */
 		uint8_t hdr_pad2[0x2];          /* 0x212 */
@@ -103,27 +107,17 @@ static size_t kernel_size;
 static int
 acrn_get_bzimage_setup_size(struct vmctx *ctx)
 {
-	uint32_t *tmp, location = 1024, setup_sectors;
-	int size = -1;
+	struct _zeropage *kernel_load = (struct _zeropage *)
+		(ctx->baseaddr + KERNEL_LOAD_OFF(ctx));
 
-	tmp = (uint32_t *)(ctx->baseaddr + KERNEL_LOAD_OFF(ctx)) + 1024/4;
-	while (*tmp != SETUP_SIG && location < 0x8000) {
-		tmp++;
-		location += 4;
+	/* For backwards compatibility, if the setup_sects field
+	 * is 0, the real value is 4.
+	 */
+	if (kernel_load->hdr.setup_sects == 0) {
+		kernel_load->hdr.setup_sects = 4;
 	}
 
-	/* setup size must be at least 1024 bytes and small than 0x8000 */
-	if (location < 0x8000 && location > 1024) {
-		setup_sectors = (location + 511) / 512;
-		size = setup_sectors*512;
-		printf("SW_LOAD: found setup sig @ 0x%08x, "
-				"setup_size is 0x%08x\n",
-				location, size);
-	} else
-		printf("SW_LOAD ERR: could not get setup "
-				"size in kernel %s\n",
-				kernel_path);
-	return size;
+	return (kernel_load->hdr.setup_sects + 1) * 512;
 }
 
 int
@@ -134,14 +128,14 @@ acrn_parse_kernel(char *arg)
 	if (len < STR_LEN) {
 		strncpy(kernel_path, arg, len + 1);
 		if (check_image(kernel_path, 0, &kernel_size) != 0){
-			fprintf(stderr, "SW_LOAD: check_image failed for '%s'\n",
+			pr_err("SW_LOAD: check_image failed for '%s'\n",
 				kernel_path);
 			exit(10); /* Non-zero */
 		}
 		kernel_file_name = kernel_path;
 
 		with_kernel = 1;
-		printf("SW_LOAD: get kernel path %s\n", kernel_path);
+		pr_notice("SW_LOAD: get kernel path %s\n", kernel_path);
 		return 0;
 	} else
 		return -1;
@@ -155,13 +149,13 @@ acrn_parse_ramdisk(char *arg)
 	if (len < STR_LEN) {
 		strncpy(ramdisk_path, arg, len + 1);
 		if (check_image(ramdisk_path, 0, &ramdisk_size) != 0){
-			fprintf(stderr, "SW_LOAD: check_image failed for '%s'\n",
+			pr_err("SW_LOAD: check_image failed for '%s'\n",
 				ramdisk_path);
 			exit(11); /* Non-zero */
 		}
 
 		with_ramdisk = 1;
-		printf("SW_LOAD: get ramdisk path %s\n", ramdisk_path);
+		pr_notice("SW_LOAD: get ramdisk path %s\n", ramdisk_path);
 		return 0;
 	} else
 		return -1;
@@ -176,7 +170,7 @@ acrn_prepare_ramdisk(struct vmctx *ctx)
 
 	fp = fopen(ramdisk_path, "r");
 	if (fp == NULL) {
-		printf("SW_LOAD ERR: could not open ramdisk file %s\n",
+		pr_err("SW_LOAD ERR: could not open ramdisk file %s\n",
 				ramdisk_path);
 		return -1;
 	}
@@ -191,10 +185,12 @@ acrn_prepare_ramdisk(struct vmctx *ctx)
 		return -1;
 	}
 
-	if (len > (BOOTARGS_LOAD_OFF(ctx) - RAMDISK_LOAD_OFF(ctx))) {
-		printf("SW_LOAD ERR: the size of ramdisk file is too big"
-				" file len=0x%lx, limit is 0x%lx\n", len,
-				BOOTARGS_LOAD_OFF(ctx) - RAMDISK_LOAD_OFF(ctx));
+	/* make sure there is enough room for the theoretical maximum ramdisk
+	 * size (kernel size is not yet available)
+	 */
+	if (ctx->lowmem <= (RAMDISK_LOAD_SIZE + 2*KB + KERNEL_LOAD_OFF(ctx))) {
+		pr_err("SW_LOAD ERR: the size of ramdisk file is too big"
+			" file len=0x%lx\n", len);
 		fclose(fp);
 		return -1;
 	}
@@ -203,13 +199,13 @@ acrn_prepare_ramdisk(struct vmctx *ctx)
 	read = fread(ctx->baseaddr + RAMDISK_LOAD_OFF(ctx),
 			sizeof(char), len, fp);
 	if (read < len) {
-		printf("SW_LOAD ERR: could not read the whole ramdisk file,"
+		pr_err("SW_LOAD ERR: could not read the whole ramdisk file,"
 				" file len=%ld, read %lu\n", len, read);
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: ramdisk %s size %lu copied to guest 0x%lx\n",
+	pr_info("SW_LOAD: ramdisk %s size %lu copied to guest 0x%lx\n",
 			ramdisk_path, ramdisk_size, RAMDISK_LOAD_OFF(ctx));
 
 	return 0;
@@ -224,7 +220,7 @@ acrn_prepare_kernel(struct vmctx *ctx)
 
 	fp = fopen(kernel_path, "r");
 	if (fp == NULL) {
-		printf("SW_LOAD ERR: could not open kernel file %s\n",
+		pr_err("SW_LOAD ERR: could not open kernel file %s\n",
 				kernel_path);
 		return -1;
 	}
@@ -240,7 +236,7 @@ acrn_prepare_kernel(struct vmctx *ctx)
 	}
 
 	if ((len + KERNEL_LOAD_OFF(ctx)) > RAMDISK_LOAD_OFF(ctx)) {
-		printf("SW_LOAD ERR: need big system memory to fit image\n");
+		pr_err("SW_LOAD ERR: need big system memory to fit image\n");
 		fclose(fp);
 		return -1;
 	}
@@ -249,13 +245,13 @@ acrn_prepare_kernel(struct vmctx *ctx)
 	read = fread(ctx->baseaddr + KERNEL_LOAD_OFF(ctx),
 			sizeof(char), len, fp);
 	if (read < len) {
-		printf("SW_LOAD ERR: could not read the whole kernel file,"
+		pr_err("SW_LOAD ERR: could not read the whole kernel file,"
 				" file len=%ld, read %lu\n", len, read);
 		fclose(fp);
 		return -1;
 	}
 	fclose(fp);
-	printf("SW_LOAD: kernel %s size %lu copied to guest 0x%lx\n",
+	pr_info("SW_LOAD: kernel %s size %lu copied to guest 0x%lx\n",
 			kernel_path, kernel_size, KERNEL_LOAD_OFF(ctx));
 
 	return 0;
@@ -281,7 +277,7 @@ acrn_prepare_zeropage(struct vmctx *ctx, int setup_size)
 			((uint64_t)RAMDISK_LOAD_OFF(ctx));
 		zeropage->hdr.ramdisk_size = (uint32_t)ramdisk_size;
 
-		printf("SW_LOAD: build zeropage for ramdisk addr: 0x%x,"
+		pr_info("SW_LOAD: build zeropage for ramdisk addr: 0x%x,"
 				" size: %d\n", zeropage->hdr.ramdisk_addr,
 				zeropage->hdr.ramdisk_size);
 	}
@@ -289,7 +285,7 @@ acrn_prepare_zeropage(struct vmctx *ctx, int setup_size)
 	/* Copy bootargs load_addr in zeropage header structure */
 	zeropage->hdr.bootargs_addr = (uint32_t)
 		((uint64_t)BOOTARGS_LOAD_OFF(ctx));
-	printf("SW_LOAD: build zeropage for bootargs addr: 0x%x\n",
+	pr_info("SW_LOAD: build zeropage for bootargs addr: 0x%x\n",
 			zeropage->hdr.bootargs_addr);
 
 	/* set constant arguments in zero page */
@@ -314,12 +310,12 @@ acrn_sw_load_bzimage(struct vmctx *ctx)
 {
 	int ret, setup_size;
 
-	memset(&ctx->bsp_regs, 0, sizeof(struct acrn_set_vcpu_regs));
+	memset(&ctx->bsp_regs, 0, sizeof(struct acrn_vcpu_regs));
 	ctx->bsp_regs.vcpu_id = 0;
 
 	if (with_bootargs) {
 		strncpy(ctx->baseaddr + BOOTARGS_LOAD_OFF(ctx), get_bootargs(), STR_LEN);
-		printf("SW_LOAD: bootargs copied to guest 0x%lx\n",
+		pr_info("SW_LOAD: bootargs copied to guest 0x%lx\n",
 				BOOTARGS_LOAD_OFF(ctx));
 	}
 
@@ -344,7 +340,7 @@ acrn_sw_load_bzimage(struct vmctx *ctx)
 		if (ret)
 			return ret;
 
-		printf("SW_LOAD: zeropage prepared @ 0x%lx, "
+		pr_info("SW_LOAD: zeropage prepared @ 0x%lx, "
 				"kernel_entry_addr=0x%lx\n",
 				ZEROPAGE_LOAD_OFF(ctx),
 				(KERNEL_LOAD_OFF(ctx) + setup_size));

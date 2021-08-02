@@ -46,6 +46,7 @@
 #include "dm.h"
 #include "pci_core.h"
 #include "log.h"
+#include "sw_load.h"
 
 #define MAP_NOCORE 0
 #define MAP_ALIGNED_SUPER 0
@@ -60,42 +61,116 @@
 #define SUPPORT_VHM_API_VERSION_MAJOR	1
 #define SUPPORT_VHM_API_VERSION_MINOR	0
 
-static int
-check_api(int fd)
+#define VM_STATE_STR_LEN                16
+static const char vm_state_str[VM_SUSPEND_LAST][VM_STATE_STR_LEN] = {
+	[VM_SUSPEND_NONE]		= "RUNNING",
+	[VM_SUSPEND_SYSTEM_RESET]	= "SYSTEM_RESET",
+	[VM_SUSPEND_FULL_RESET]		= "FULL_RESET",
+	[VM_SUSPEND_POWEROFF]		= "POWEROFF",
+	[VM_SUSPEND_SUSPEND]		= "SUSPEND",
+	[VM_SUSPEND_HALT]		= "HALT",
+	[VM_SUSPEND_TRIPLEFAULT]	= "TRIPLEFAULT"
+};
+
+const char *vm_state_to_str(enum vm_suspend_how idx)
 {
-	struct api_version api_version;
-	int error;
+	return (idx < VM_SUSPEND_LAST) ? vm_state_str[idx] : "UNKNOWN";
+}
 
-	error = ioctl(fd, IC_GET_API_VERSION, &api_version);
-	if (error) {
-		pr_err("failed to get vhm api version\n");
+static int devfd = -1;
+static uint64_t cpu_affinity_bitmap = 0UL;
+
+static void add_one_pcpu(int pcpu_id)
+{
+	if (cpu_affinity_bitmap & (1UL << pcpu_id)) {
+		pr_err("%s: pcpu_id %d has been allocated to this VM.\n", __func__, pcpu_id);
+		return;
+	}
+
+	cpu_affinity_bitmap |= (1UL << pcpu_id);
+}
+
+/*
+ * example options:
+ *   --cpu_affinity 1,2,3
+ *   --cpu_affinity 1-3
+ *   --cpu_affinity 1,3,4-6
+ *   --cpu_affinity 1,3,4-6,9
+ */
+int acrn_parse_cpu_affinity(char *opt)
+{
+	char *str, *cp;
+	int pcpu_id;
+	int pcpu_start, pcpu_end;
+
+	cp = strdup(opt);
+	if (!cp) {
+		pr_err("%s: strdup returns NULL\n", __func__);
 		return -1;
 	}
 
-	if (api_version.major_version != SUPPORT_VHM_API_VERSION_MAJOR ||
-		api_version.minor_version != SUPPORT_VHM_API_VERSION_MINOR) {
-		pr_err("not support vhm api version\n");
-		return -1;
-	}
+	/* white spaces within the commane line are invalid */
+	while (cp && isdigit(cp[0])) {
+		str = strpbrk(cp, ",-");
 
-	pr_info("VHM api version %d.%d\n", api_version.major_version,
-			api_version.minor_version);
+		/* no more entries delimited by ',' or '-' */
+		if (!str) {
+			if (!dm_strtoi(cp, NULL, 10, &pcpu_id)) {
+				add_one_pcpu(pcpu_id);
+			}
+			break;
+		} else {
+			if (*str == ',') {
+				/* after this, 'cp' points to the character after ',' */
+				str = strsep(&cp, ",");
+
+				/* parse the entry before ',' */
+				if (dm_strtoi(str, NULL, 10, &pcpu_id)) {
+					return -1;
+				}
+				add_one_pcpu(pcpu_id);
+			}
+
+			if (*str == '-') {
+				str = strsep(&cp, "-");
+
+				/* parse the entry before and after '-' respectively */
+				if (dm_strtoi(str, NULL, 10, &pcpu_start) || dm_strtoi(cp, NULL, 10, &pcpu_end)) {
+					return -1;
+				}
+
+				if (pcpu_end <= pcpu_start) {
+					return -1;
+				}
+
+				for (; pcpu_start <= pcpu_end; pcpu_start++) {
+					add_one_pcpu(pcpu_start);
+				}
+
+				/* skip the ',' after pcpu_end */
+				str = strsep(&cp, ",");
+			}
+		}
+	}
 
 	return 0;
 }
 
-static int devfd = -1;
+uint64_t vm_get_cpu_affinity_dm(void)
+{
+	return cpu_affinity_bitmap;
+}
 
 struct vmctx *
-vm_create(const char *name, uint64_t req_buf)
+vm_create(const char *name, uint64_t req_buf, int *vcpu_num)
 {
 	struct vmctx *ctx;
-	struct acrn_create_vm create_vm;
+	struct acrn_vm_creation create_vm;
 	int error, retry = 10;
 	uuid_t vm_uuid;
 	struct stat tmp_st;
 
-	memset(&create_vm, 0, sizeof(struct acrn_create_vm));
+	memset(&create_vm, 0, sizeof(struct acrn_vm_creation));
 	ctx = calloc(1, sizeof(struct vmctx) + strnlen(name, PATH_MAX) + 1);
 	if ((ctx == NULL) || (devfd != -1))
 		goto err;
@@ -112,9 +187,6 @@ vm_create(const char *name, uint64_t req_buf)
 		goto err;
 	}
 
-	if (check_api(devfd) < 0)
-		goto err;
-
 	if (guest_uuid_str == NULL)
 		guest_uuid_str = "d2795438-25d6-11e8-864e-cb7a18b34643";
 
@@ -128,9 +200,10 @@ vm_create(const char *name, uint64_t req_buf)
 	/* Pass uuid as parameter of create vm*/
 	uuid_copy(create_vm.uuid, vm_uuid);
 
+	ctx->gvt_enabled = false;
 	ctx->fd = devfd;
-	ctx->lowmem_limit = 2 * GB;
-	ctx->highmem_gpa_base = PCI_EMUL_MEMLIMIT64;
+	ctx->lowmem_limit = PCI_EMUL_MEMBASE32;
+	ctx->highmem_gpa_base = HIGHRAM_START_ADDR;
 	ctx->name = (char *)(ctx + 1);
 	strncpy(ctx->name, name, strnlen(name, PATH_MAX) + 1);
 
@@ -149,14 +222,17 @@ vm_create(const char *name, uint64_t req_buf)
 		create_vm.vm_flag &= (~GUEST_FLAG_IO_COMPLETION_POLLING);
 	}
 
+	/* command line arguments specified CPU affinity could overwrite HV's static configuration */
+	create_vm.cpu_affinity = cpu_affinity_bitmap;
+
 	if (is_rtvm) {
 		create_vm.vm_flag |= GUEST_FLAG_RT;
 		create_vm.vm_flag |= GUEST_FLAG_IO_COMPLETION_POLLING;
 	}
 
-	create_vm.req_buf = req_buf;
+	create_vm.ioreq_buf = req_buf;
 	while (retry > 0) {
-		error = ioctl(ctx->fd, IC_CREATE_VM, &create_vm);
+		error = ioctl(ctx->fd, ACRN_IOCTL_CREATE_VM, &create_vm);
 		if (error == 0)
 			break;
 		usleep(500000);
@@ -168,6 +244,7 @@ vm_create(const char *name, uint64_t req_buf)
 		goto err;
 	}
 
+	*vcpu_num = create_vm.vcpu_num;
 	ctx->vmid = create_vm.vmid;
 
 	return ctx;
@@ -182,13 +259,13 @@ err:
 int
 vm_create_ioreq_client(struct vmctx *ctx)
 {
-	return ioctl(ctx->fd, IC_CREATE_IOREQ_CLIENT, 0);
+	return ioctl(ctx->fd, ACRN_IOCTL_CREATE_IOREQ_CLIENT, 0);
 }
 
 int
 vm_destroy_ioreq_client(struct vmctx *ctx)
 {
-	return ioctl(ctx->fd, IC_DESTROY_IOREQ_CLIENT, ctx->ioreq_client);
+	return ioctl(ctx->fd, ACRN_IOCTL_DESTROY_IOREQ_CLIENT, ctx->ioreq_client);
 }
 
 int
@@ -196,7 +273,7 @@ vm_attach_ioreq_client(struct vmctx *ctx)
 {
 	int error;
 
-	error = ioctl(ctx->fd, IC_ATTACH_IOREQ_CLIENT, ctx->ioreq_client);
+	error = ioctl(ctx->fd, ACRN_IOCTL_ATTACH_IOREQ_CLIENT, ctx->ioreq_client);
 
 	if (error) {
 		pr_err("attach ioreq client return %d "
@@ -212,13 +289,13 @@ int
 vm_notify_request_done(struct vmctx *ctx, int vcpu)
 {
 	int error;
-	struct ioreq_notify notify;
+	struct acrn_ioreq_notify notify;
 
 	bzero(&notify, sizeof(notify));
-	notify.client_id = ctx->ioreq_client;
+	notify.vmid = ctx->vmid;
 	notify.vcpu = vcpu;
 
-	error = ioctl(ctx->fd, IC_NOTIFY_REQUEST_FINISH, &notify);
+	error = ioctl(ctx->fd, ACRN_IOCTL_NOTIFY_REQUEST_FINISH, &notify);
 
 	if (error) {
 		pr_err("failed: notify request finish\n");
@@ -234,7 +311,7 @@ vm_destroy(struct vmctx *ctx)
 	if (!ctx)
 		return;
 
-	ioctl(ctx->fd, IC_DESTROY_VM, NULL);
+	ioctl(ctx->fd, ACRN_IOCTL_DESTROY_VM, NULL);
 	close(ctx->fd);
 	free(ctx);
 	devfd = -1;
@@ -285,16 +362,15 @@ int
 vm_map_memseg_vma(struct vmctx *ctx, size_t len, vm_paddr_t gpa,
 	uint64_t vma, int prot)
 {
-	struct vm_memmap memmap;
+	struct acrn_vm_memmap memmap;
 
-	bzero(&memmap, sizeof(struct vm_memmap));
-	memmap.type = VM_MEMMAP_SYSMEM;
-	memmap.using_vma = 1;
+	bzero(&memmap, sizeof(struct acrn_vm_memmap));
+	memmap.type = ACRN_MEMMAP_RAM;
 	memmap.vma_base = vma;
 	memmap.len = len;
-	memmap.gpa = gpa;
-	memmap.prot = prot;
-	return ioctl(ctx->fd, IC_SET_MEMSEG, &memmap);
+	memmap.user_vm_pa = gpa;
+	memmap.attr = prot;
+	return ioctl(ctx->fd, ACRN_IOCTL_SET_MEMSEG, &memmap);
 }
 
 int
@@ -328,11 +404,17 @@ vm_unsetup_memory(struct vmctx *ctx)
 	 * allocated the new UOS, the previous UOS sensitive data
 	 * may be leaked to the new UOS if the memory is not cleared.
 	 *
+	 * For rtvm, we can't clean VM's memory as RTVM may still
+	 * run. But we need to return the memory to SOS here.
+	 * Otherwise, VM can't be restart again.
 	 */
-	bzero((void *)ctx->baseaddr, ctx->lowmem);
-	if (ctx->highmem > 0) {
-		bzero((void *)(ctx->baseaddr + ctx->highmem_gpa_base),
-			ctx->highmem);
+
+	if (!is_rtvm) {
+		bzero((void *)ctx->baseaddr, ctx->lowmem);
+		if (ctx->highmem > 0) {
+			bzero((void *)(ctx->baseaddr + ctx->highmem_gpa_base),
+					ctx->highmem);
+		}
 	}
 
 	hugetlb_unsetup_memory(ctx);
@@ -364,6 +446,7 @@ vm_map_gpa(struct vmctx *ctx, vm_paddr_t gaddr, size_t len)
 		}
 	}
 
+	pr_dbg("%s context memory is not valid!\n", __func__);
 	return NULL;
 }
 
@@ -384,7 +467,7 @@ vm_run(struct vmctx *ctx)
 {
 	int error;
 
-	error = ioctl(ctx->fd, IC_START_VM, &ctx->vmid);
+	error = ioctl(ctx->fd, ACRN_IOCTL_START_VM, &ctx->vmid);
 
 	return error;
 }
@@ -392,27 +475,27 @@ vm_run(struct vmctx *ctx)
 void
 vm_pause(struct vmctx *ctx)
 {
-	ioctl(ctx->fd, IC_PAUSE_VM, &ctx->vmid);
+	ioctl(ctx->fd, ACRN_IOCTL_PAUSE_VM, &ctx->vmid);
 }
 
 void
 vm_reset(struct vmctx *ctx)
 {
-	ioctl(ctx->fd, IC_RESET_VM, &ctx->vmid);
+	ioctl(ctx->fd, ACRN_IOCTL_RESET_VM, &ctx->vmid);
 }
 
 void
 vm_clear_ioreq(struct vmctx *ctx)
 {
-	ioctl(ctx->fd, IC_CLEAR_VM_IOREQ, NULL);
+	ioctl(ctx->fd, ACRN_IOCTL_CLEAR_VM_IOREQ, NULL);
 }
 
-static int suspend_mode = VM_SUSPEND_NONE;
+static enum vm_suspend_how suspend_mode = VM_SUSPEND_NONE;
 
 void
 vm_set_suspend_mode(enum vm_suspend_how how)
 {
-	pr_notice("vm mode changed from %d to %d\n", suspend_mode, how);
+	pr_notice("VM state changed from[ %s ] to [ %s ]\n", vm_state_to_str(suspend_mode), vm_state_to_str(how));
 	suspend_mode = how;
 }
 
@@ -425,6 +508,7 @@ vm_get_suspend_mode(void)
 int
 vm_suspend(struct vmctx *ctx, enum vm_suspend_how how)
 {
+	pr_info("%s: setting VM state to %s\n", __func__, vm_state_to_str(how));
 	vm_set_suspend_mode(how);
 	mevent_notify();
 
@@ -440,7 +524,7 @@ vm_lapic_msi(struct vmctx *ctx, uint64_t addr, uint64_t msg)
 	msi.msi_addr = addr;
 	msi.msi_data = msg;
 
-	return ioctl(ctx->fd, IC_INJECT_MSI, &msi);
+	return ioctl(ctx->fd, ACRN_IOCTL_INJECT_MSI, &msi);
 }
 
 int
@@ -452,159 +536,194 @@ vm_set_gsi_irq(struct vmctx *ctx, int gsi, uint32_t operation)
 	op.op = operation;
 	op.gsi = (uint32_t)gsi;
 
-	return ioctl(ctx->fd, IC_SET_IRQLINE, *req);
+	return ioctl(ctx->fd, ACRN_IOCTL_SET_IRQLINE, *req);
 }
 
 int
-vm_assign_ptdev(struct vmctx *ctx, int bus, int slot, int func)
+vm_assign_pcidev(struct vmctx *ctx, struct acrn_pcidev *pcidev)
 {
-	uint16_t bdf;
-
-	bdf = ((bus & 0xff) << 8) | ((slot & 0x1f) << 3) |
-			(func & 0x7);
-
-	return ioctl(ctx->fd, IC_ASSIGN_PTDEV, &bdf);
+	return ioctl(ctx->fd, ACRN_IOCTL_ASSIGN_PCIDEV, pcidev);
 }
 
 int
-vm_unassign_ptdev(struct vmctx *ctx, int bus, int slot, int func)
+vm_deassign_pcidev(struct vmctx *ctx, struct acrn_pcidev *pcidev)
 {
-	uint16_t bdf;
+	return ioctl(ctx->fd, ACRN_IOCTL_DEASSIGN_PCIDEV, pcidev);
+}
 
-	bdf = ((bus & 0xff) << 8) | ((slot & 0x1f) << 3) |
-			(func & 0x7);
+int
+vm_assign_mmiodev(struct vmctx *ctx, struct acrn_mmiodev *mmiodev)
+{
+	return ioctl(ctx->fd, ACRN_IOCTL_ASSIGN_MMIODEV, mmiodev);
+}
 
-	return ioctl(ctx->fd, IC_DEASSIGN_PTDEV, &bdf);
+int
+vm_deassign_mmiodev(struct vmctx *ctx, struct acrn_mmiodev *mmiodev)
+{
+	return ioctl(ctx->fd, ACRN_IOCTL_DEASSIGN_MMIODEV, mmiodev);
 }
 
 int
 vm_map_ptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 		   vm_paddr_t gpa, size_t len, vm_paddr_t hpa)
 {
-	struct vm_memmap memmap;
+	struct acrn_vm_memmap memmap;
 
-	bzero(&memmap, sizeof(struct vm_memmap));
-	memmap.type = VM_MMIO;
+	bzero(&memmap, sizeof(struct acrn_vm_memmap));
+	memmap.type = ACRN_MEMMAP_MMIO;
 	memmap.len = len;
-	memmap.gpa = gpa;
-	memmap.hpa = hpa;
-	memmap.prot = PROT_ALL;
+	memmap.user_vm_pa = gpa;
+	memmap.service_vm_pa = hpa;
+	memmap.attr = ACRN_MEM_ACCESS_RWX;
 
-	return ioctl(ctx->fd, IC_SET_MEMSEG, &memmap);
+	return ioctl(ctx->fd, ACRN_IOCTL_SET_MEMSEG, &memmap);
 }
 
 int
 vm_unmap_ptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 		   vm_paddr_t gpa, size_t len, vm_paddr_t hpa)
 {
-	struct vm_memmap memmap;
+	struct acrn_vm_memmap memmap;
 
-	bzero(&memmap, sizeof(struct vm_memmap));
-	memmap.type = VM_MMIO;
+	bzero(&memmap, sizeof(struct acrn_vm_memmap));
+	memmap.type = ACRN_MEMMAP_MMIO;
 	memmap.len = len;
-	memmap.gpa = gpa;
-	memmap.hpa = hpa;
-	memmap.prot = PROT_ALL;
+	memmap.user_vm_pa = gpa;
+	memmap.service_vm_pa = hpa;
+	memmap.attr = ACRN_MEM_ACCESS_RWX;
 
-	return ioctl(ctx->fd, IC_UNSET_MEMSEG, &memmap);
+	return ioctl(ctx->fd, ACRN_IOCTL_UNSET_MEMSEG, &memmap);
 }
 
 int
-vm_set_ptdev_msix_info(struct vmctx *ctx, struct ic_ptdev_irq *ptirq)
+vm_add_hv_vdev(struct vmctx *ctx, struct acrn_vdev *dev)
 {
-	if (!ptirq)
-		return -1;
-
-	return ioctl(ctx->fd, IC_SET_PTDEV_INTR_INFO, ptirq);
+	return ioctl(ctx->fd, ACRN_IOCTL_CREATE_VDEV, dev);
 }
 
 int
-vm_reset_ptdev_msix_info(struct vmctx *ctx, uint16_t virt_bdf, uint16_t phys_bdf,
-			 int vector_count)
+vm_remove_hv_vdev(struct vmctx *ctx, struct acrn_vdev *dev)
 {
-	struct ic_ptdev_irq ptirq;
-
-	bzero(&ptirq, sizeof(ptirq));
-	ptirq.type = IRQ_MSIX;
-	ptirq.virt_bdf = virt_bdf;
-	ptirq.phys_bdf = phys_bdf;
-	ptirq.msix.vector_cnt = vector_count;
-
-	return ioctl(ctx->fd, IC_RESET_PTDEV_INTR_INFO, &ptirq);
+	return ioctl(ctx->fd, ACRN_IOCTL_DESTROY_VDEV, dev);
 }
 
 int
 vm_set_ptdev_intx_info(struct vmctx *ctx, uint16_t virt_bdf, uint16_t phys_bdf,
 		       int virt_pin, int phys_pin, bool pic_pin)
 {
-	struct ic_ptdev_irq ptirq;
+	struct acrn_ptdev_irq ptirq;
 
 	bzero(&ptirq, sizeof(ptirq));
-	ptirq.type = IRQ_INTX;
+	ptirq.type = ACRN_PTDEV_IRQ_INTX;
 	ptirq.virt_bdf = virt_bdf;
 	ptirq.phys_bdf = phys_bdf;
 	ptirq.intx.virt_pin = virt_pin;
 	ptirq.intx.phys_pin = phys_pin;
 	ptirq.intx.is_pic_pin = pic_pin;
 
-	return ioctl(ctx->fd, IC_SET_PTDEV_INTR_INFO, &ptirq);
+	return ioctl(ctx->fd, ACRN_IOCTL_SET_PTDEV_INTR, &ptirq);
 }
 
 int
 vm_reset_ptdev_intx_info(struct vmctx *ctx, uint16_t virt_bdf, uint16_t phys_bdf,
 			int virt_pin, bool pic_pin)
 {
-	struct ic_ptdev_irq ptirq;
+	struct acrn_ptdev_irq ptirq;
 
 	bzero(&ptirq, sizeof(ptirq));
-	ptirq.type = IRQ_INTX;
+	ptirq.type = ACRN_PTDEV_IRQ_INTX;
 	ptirq.intx.virt_pin = virt_pin;
 	ptirq.intx.is_pic_pin = pic_pin;
 	ptirq.virt_bdf = virt_bdf;
 	ptirq.phys_bdf = phys_bdf;
 
-	return ioctl(ctx->fd, IC_RESET_PTDEV_INTR_INFO, &ptirq);
+	return ioctl(ctx->fd, ACRN_IOCTL_RESET_PTDEV_INTR, &ptirq);
 }
 
 int
-vm_create_vcpu(struct vmctx *ctx, uint16_t vcpu_id)
+vm_set_vcpu_regs(struct vmctx *ctx, struct acrn_vcpu_regs *vcpu_regs)
 {
-	struct acrn_create_vcpu cv;
-	int error;
-
-	bzero(&cv, sizeof(struct acrn_create_vcpu));
-	cv.vcpu_id = vcpu_id;
-	error = ioctl(ctx->fd, IC_CREATE_VCPU, &cv);
-
-	return error;
-}
-
-int
-vm_set_vcpu_regs(struct vmctx *ctx, struct acrn_set_vcpu_regs *vcpu_regs)
-{
-	return ioctl(ctx->fd, IC_SET_VCPU_REGS, vcpu_regs);
+	return ioctl(ctx->fd, ACRN_IOCTL_SET_VCPU_REGS, vcpu_regs);
 }
 
 int
 vm_get_cpu_state(struct vmctx *ctx, void *state_buf)
 {
-	return ioctl(ctx->fd, IC_PM_GET_CPU_STATE, state_buf);
+	return ioctl(ctx->fd, ACRN_IOCTL_PM_GET_CPU_STATE, state_buf);
 }
 
 int
 vm_intr_monitor(struct vmctx *ctx, void *intr_buf)
 {
-	return ioctl(ctx->fd, IC_VM_INTR_MONITOR, intr_buf);
+	return ioctl(ctx->fd, ACRN_IOCTL_VM_INTR_MONITOR, intr_buf);
 }
 
 int
 vm_ioeventfd(struct vmctx *ctx, struct acrn_ioeventfd *args)
 {
-	return ioctl(ctx->fd, IC_EVENT_IOEVENTFD, args);
+	return ioctl(ctx->fd, ACRN_IOCTL_IOEVENTFD, args);
 }
 
 int
 vm_irqfd(struct vmctx *ctx, struct acrn_irqfd *args)
 {
-	return ioctl(ctx->fd, IC_EVENT_IRQFD, args);
+	return ioctl(ctx->fd, ACRN_IOCTL_IRQFD, args);
+}
+
+int
+vm_get_config(struct vmctx *ctx, struct acrn_vm_config_header *vm_cfg, struct acrn_platform_info *plat_info)
+{
+	int i, err = 0;
+	int configs_size;
+	uint8_t *configs_buff = NULL;
+	struct acrn_vm_config_header *pcfg;
+	struct acrn_platform_info platform_info;
+
+	if ((ctx == NULL) || (vm_cfg == NULL))
+		return -1;
+
+	/* The first IOCTL to get max_vm and vm_config size of a VM */
+	bzero(&platform_info, sizeof(platform_info));
+	err = ioctl(ctx->fd, ACRN_IOCTL_GET_PLATFORM_INFO, &platform_info);
+	if (err) {
+		pr_err("%s: IOCTL first time failed!\n", __func__);
+		goto exit;
+	}
+
+	configs_size = platform_info.sw.max_vms * platform_info.sw.vm_config_size;
+	configs_buff = calloc(1, configs_size);
+	if (configs_buff == NULL) {
+		pr_err("%s, Allocate memory fail.\n", __func__);
+		return -1;
+	}
+
+	platform_info.sw.vm_configs_addr = configs_buff;
+	err = ioctl(ctx->fd, ACRN_IOCTL_GET_PLATFORM_INFO, &platform_info);
+	if (err) {
+		pr_err("%s: IOCTL second time failed!\n", __func__);
+		goto exit;
+	}
+
+	for (i = 0; i < platform_info.sw.max_vms; i++) {
+		pcfg = (struct acrn_vm_config_header *)(configs_buff + (i * platform_info.sw.vm_config_size));
+		if (!uuid_compare(ctx->vm_uuid, pcfg->uuid))
+			break;
+	}
+
+	if (i == platform_info.sw.max_vms) {
+		pr_err("%s, Not found target VM.\n", __func__);
+		err = -1;
+		goto exit;
+	}
+
+	memcpy((void *)vm_cfg, (void *)pcfg, sizeof(struct acrn_vm_config_header));
+	if (plat_info != NULL) {
+		memcpy((void *)plat_info, (void *)&platform_info, sizeof(struct acrn_platform_info));
+		pr_info("%s, l2_cat_shift=%u, l3_cat_shift=%u\n",
+			__func__, platform_info.hw.l2_cat_shift, platform_info.hw.l3_cat_shift);
+	}
+
+exit:
+	free(configs_buff);
+	return err;
 }

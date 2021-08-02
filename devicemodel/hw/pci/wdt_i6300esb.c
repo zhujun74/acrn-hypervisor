@@ -136,10 +136,12 @@ wdt_expired_handler(void *arg, uint64_t nexp)
 
 			/* watchdog timer out, set the uos to reboot */
 #ifdef DM_DEBUG
+			pr_info("%s: setting VM state to %s\n", __func__, vm_state_to_str(VM_SUSPEND_SYSTEM_RESET));
 			vm_set_suspend_mode(VM_SUSPEND_SYSTEM_RESET);
 			/* Notify vm thread to handle VM_SUSPEND_SYSTEM_RESET request */
 			notify_vmloop_thread();
 #else
+			pr_info("%s: setting VM state to %s\n", __func__, vm_state_to_str(VM_SUSPEND_FULL_RESET));
 			vm_set_suspend_mode(VM_SUSPEND_FULL_RESET);
 #endif
 			mevent_notify();
@@ -187,7 +189,7 @@ start_wdt_timer(void)
 	timer_val.it_value.tv_sec = seconds;
 
 	if (acrn_timer_settime(&wdt_state.timer, &timer_val) == -1) {
-		perror("WDT timerfd_settime failed.\n");
+		pr_err("WDT timerfd_settime failed.\n");
 		wdt_state.wdt_armed = false;
 		return;
 	}
@@ -331,7 +333,7 @@ pci_wdt_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
 	/*the wdt just has one inistance */
 	if (wdt_state.reboot_enabled && wdt_state.timer1_val) {
-		perror("wdt can't be initialized twice, please check!");
+		pr_err("wdt can't be initialized twice, please check!");
 		return -1;
 	}
 

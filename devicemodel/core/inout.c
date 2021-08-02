@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "inout.h"
+#include "log.h"
 SET_DECLARE(inout_port_set, struct inout_port);
 
 #define	MAX_IOPORTS	(1 << 16)
@@ -71,7 +72,7 @@ register_default_iohandler(int start, int size)
 	struct inout_port iop;
 
 	if (!VERIFY_IOPORT(start, size)) {
-		printf("invalid input: port:0x%x, size:%d", start, size);
+		pr_err("invalid input: port:0x%x, size:%d", start, size);
 		return;
 	}
 
@@ -86,7 +87,7 @@ register_default_iohandler(int start, int size)
 }
 
 int
-emulate_inout(struct vmctx *ctx, int *pvcpu, struct pio_request *pio_request)
+emulate_inout(struct vmctx *ctx, int *pvcpu, struct acrn_pio_request *pio_request)
 {
 	int bytes, flags, in, port;
 	inout_func_t handler;
@@ -94,7 +95,7 @@ emulate_inout(struct vmctx *ctx, int *pvcpu, struct pio_request *pio_request)
 	int retval;
 
 	bytes = pio_request->size;
-	in = (pio_request->direction == REQUEST_READ);
+	in = (pio_request->direction == ACRN_IOREQ_DIR_READ);
 	port = pio_request->address;
 
 	if ((port + bytes - 1 >= MAX_IOPORTS) ||
@@ -105,7 +106,7 @@ emulate_inout(struct vmctx *ctx, int *pvcpu, struct pio_request *pio_request)
 	flags = inout_handlers[port].flags;
 	arg = inout_handlers[port].arg;
 
-	if (pio_request->direction == REQUEST_READ) {
+	if (pio_request->direction == ACRN_IOREQ_DIR_READ) {
 		if (!(flags & IOPORT_F_IN))
 			return -1;
 	} else {
@@ -133,7 +134,7 @@ init_inout(void)
 	SET_FOREACH(iopp, inout_port_set) {
 		iop = *iopp;
 		if (iop->port >= MAX_IOPORTS) {
-			printf("%s: invalid port:0x%x", __func__, iop->port);
+			pr_err("%s: invalid port:0x%x", __func__, iop->port);
 			continue;
 		}
 
@@ -150,7 +151,7 @@ register_inout(struct inout_port *iop)
 	int i;
 
 	if (!VERIFY_IOPORT(iop->port, iop->size)) {
-		printf("invalid input: port:0x%x, size:%d",
+		pr_err("invalid input: port:0x%x, size:%d",
 				iop->port, iop->size);
 		return -1;
 	}
@@ -181,7 +182,7 @@ unregister_inout(struct inout_port *iop)
 {
 
 	if (!VERIFY_IOPORT(iop->port, iop->size)) {
-		printf("invalid input: port:0x%x, size:%d",
+		pr_err("invalid input: port:0x%x, size:%d",
 				iop->port, iop->size);
 		return -1;
 	}

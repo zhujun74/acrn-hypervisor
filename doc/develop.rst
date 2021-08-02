@@ -1,63 +1,93 @@
 .. _develop_acrn:
 
-Develop using ACRN
-##################
+Advanced Guides
+###############
 
 
-Configuration Tools
-*******************
-
-- Offline configuration Tool (under developmemnt)
-
-Configuration Tutorials
+Configuration and Tools
 ***********************
 
-.. toctree::
-   :maxdepth: 1
-
-   tutorials/increase-uos-disk-size
-   tutorials/sign_clear_linux_image
-   tutorials/static-ip
-   tutorials/debug
-   tutorials/using_partition_mode_on_nuc
-   tutorials/using_partition_mode_on_up2
-   tutorials/using_sdc2_mode_on_nuc
-   tutorials/using_hybrid_mode_on_nuc
-
-User VM Tutorials
-*****************
+.. rst-class:: rst-columns2
 
 .. toctree::
+   :glob:
    :maxdepth: 1
 
-   tutorials/using_agl_as_uos
-   tutorials/agl-vms
-   tutorials/using_celadon_as_uos
-   tutorials/building_uos_from_clearlinux
-   tutorials/using_vxworks_as_uos
-   tutorials/using_windows_as_uos
-   tutorials/rt_linux
-   tutorials/using_zephyr_as_uos
+   tutorials/acrn_configuration_tool
+   reference/config-options
+   user-guides/hv-parameters
+   user-guides/kernel-parameters
+   user-guides/acrn-shell
+   user-guides/acrn-dm-parameters
+   misc/debug_tools/acrn_crashlog/README
+   misc/packaging/README
+   misc/debug_tools/**
+   misc/services/acrn_manager/**
 
 Service VM Tutorials
 ********************
 
+.. rst-class:: rst-columns2
+
 .. toctree::
    :maxdepth: 1
 
-   tutorials/using_ubuntu_as_sos
+   tutorials/running_deb_as_serv_vm
+   tutorials/using_yp
+
+User VM Tutorials
+*****************
+
+.. rst-class:: rst-columns2
+
+.. toctree::
+   :maxdepth: 1
+
+   tutorials/using_windows_as_uos
+   tutorials/running_ubun_as_user_vm
+   tutorials/running_deb_as_user_vm
+   tutorials/using_xenomai_as_uos
+   tutorials/using_vxworks_as_uos
+   tutorials/using_zephyr_as_uos
 
 Enable ACRN Features
 ********************
 
+.. rst-class:: rst-columns2
+
 .. toctree::
    :maxdepth: 1
 
-   tutorials/acrn-dm_QoS
-   tutorials/open_vswitch
-   tutorials/rtvm_workload_design_guideline
    tutorials/sgx_virtualization
-   tutorials/skl-nuc
-   tutorials/using_cat_on_up2
-   tutorials/using_sbl_on_up2
+   tutorials/nvmx_virtualization
+   tutorials/vuart_configuration
+   tutorials/rdt_configuration
+   tutorials/waag-secure-boot
+   tutorials/enable_s5
+   tutorials/cpu_sharing
+   tutorials/sriov_virtualization
+   tutorials/gpu-passthru
+   tutorials/run_kata_containers
    tutorials/trustyACRN
+   tutorials/rtvm_workload_design_guideline
+   tutorials/setup_openstack_libvirt
+   tutorials/acrn_on_qemu
+   tutorials/using_grub
+   tutorials/acrn-secure-boot-with-grub
+   tutorials/acrn-secure-boot-with-efi-stub
+   tutorials/pre-launched-rt
+   tutorials/enable_ivshmem
+   tutorials/enable_ptm
+
+Debug
+*****
+
+.. rst-class:: rst-columns2
+
+.. toctree::
+   :maxdepth: 1
+
+   tutorials/using_serial_port
+   tutorials/debug
+   tutorials/realtime_performance_tuning
+   tutorials/rtvm_performance_tips

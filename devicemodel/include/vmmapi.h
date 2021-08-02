@@ -32,8 +32,9 @@
 #include <sys/param.h>
 #include <uuid/uuid.h>
 #include "types.h"
-#include "vmm.h"
 #include "macros.h"
+#include "pm.h"
+#include "hsm_ioctl_defs.h"
 
 /*
  * API version for out-of-tree consumers for making compile time decisions.
@@ -66,7 +67,12 @@ struct vmctx {
 	void *tpm_dev;
 
 	/* BSP state. guest loader needs to fill it */
-	struct acrn_set_vcpu_regs bsp_regs;
+	struct acrn_vcpu_regs bsp_regs;
+
+	/* if gvt-g is enabled for current VM */
+	bool gvt_enabled;
+
+	void (*update_gvt_bar)(struct vmctx *ctx);
 };
 
 #define	PROT_RW		(PROT_READ | PROT_WRITE)
@@ -87,7 +93,7 @@ struct vm_isa_irq {
  *
  * Returns a pointer to the memory segment on success and MAP_FAILED otherwise.
  */
-struct	vmctx *vm_create(const char *name, uint64_t req_buf);
+struct	vmctx *vm_create(const char *name, uint64_t req_buf, int* vcpu_num);
 void	vm_pause(struct vmctx *ctx);
 void	vm_reset(struct vmctx *ctx);
 int	vm_create_ioreq_client(struct vmctx *ctx);
@@ -95,6 +101,7 @@ int	vm_destroy_ioreq_client(struct vmctx *ctx);
 int	vm_attach_ioreq_client(struct vmctx *ctx);
 int	vm_notify_request_done(struct vmctx *ctx, int vcpu);
 void	vm_clear_ioreq(struct vmctx *ctx);
+const char *vm_state_to_str(enum vm_suspend_how idx);
 void	vm_set_suspend_mode(enum vm_suspend_how how);
 #ifdef DM_DEBUG
 void	notify_vmloop_thread(void);
@@ -118,22 +125,24 @@ int	vm_run(struct vmctx *ctx);
 int	vm_suspend(struct vmctx *ctx, enum vm_suspend_how how);
 int	vm_lapic_msi(struct vmctx *ctx, uint64_t addr, uint64_t msg);
 int	vm_set_gsi_irq(struct vmctx *ctx, int gsi, uint32_t operation);
-int	vm_assign_ptdev(struct vmctx *ctx, int bus, int slot, int func);
-int	vm_unassign_ptdev(struct vmctx *ctx, int bus, int slot, int func);
+int	vm_assign_pcidev(struct vmctx *ctx, struct acrn_pcidev *pcidev);
+int	vm_deassign_pcidev(struct vmctx *ctx, struct acrn_pcidev *pcidev);
+int	vm_assign_mmiodev(struct vmctx *ctx, struct acrn_mmiodev *mmiodev);
+int	vm_deassign_mmiodev(struct vmctx *ctx, struct acrn_mmiodev *mmiodev);
 int	vm_map_ptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 			  vm_paddr_t gpa, size_t len, vm_paddr_t hpa);
 int	vm_unmap_ptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
 			  vm_paddr_t gpa, size_t len, vm_paddr_t hpa);
-int	vm_set_ptdev_msix_info(struct vmctx *ctx, struct ic_ptdev_irq *ptirq);
-int	vm_reset_ptdev_msix_info(struct vmctx *ctx, uint16_t virt_bdf, uint16_t phys_bdf,
-	int vector_count);
 int	vm_set_ptdev_intx_info(struct vmctx *ctx, uint16_t virt_bdf,
 	uint16_t phys_bdf, int virt_pin, int phys_pin, bool pic_pin);
 int	vm_reset_ptdev_intx_info(struct vmctx *ctx, uint16_t virt_bdf,
 	uint16_t phys_bdf, int virt_pin, bool pic_pin);
+int	vm_add_hv_vdev(struct vmctx *ctx, struct acrn_vdev *dev);
+int	vm_remove_hv_vdev(struct vmctx *ctx, struct acrn_vdev *dev);
 
-int	vm_create_vcpu(struct vmctx *ctx, uint16_t vcpu_id);
-int	vm_set_vcpu_regs(struct vmctx *ctx, struct acrn_set_vcpu_regs *cpu_regs);
+int	acrn_parse_cpu_affinity(char *arg);
+uint64_t vm_get_cpu_affinity_dm(void);
+int	vm_set_vcpu_regs(struct vmctx *ctx, struct acrn_vcpu_regs *cpu_regs);
 
 int	vm_get_cpu_state(struct vmctx *ctx, void *state_buf);
 int	vm_intr_monitor(struct vmctx *ctx, void *intr_buf);
@@ -142,4 +151,6 @@ void	vm_reset_watchdog(struct vmctx *ctx);
 
 int	vm_ioeventfd(struct vmctx *ctx, struct acrn_ioeventfd *args);
 int	vm_irqfd(struct vmctx *ctx, struct acrn_irqfd *args);
+int	vm_get_config(struct vmctx *ctx, struct acrn_vm_config_header *vm_cfg,
+		      struct acrn_platform_info *plat_info);
 #endif	/* _VMMAPI_H_ */

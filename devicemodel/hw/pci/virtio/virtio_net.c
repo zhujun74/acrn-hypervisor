@@ -39,6 +39,7 @@
 #include <sys/errno.h>
 #include <net/if.h>
 #include <linux/if_tun.h>
+#include <sys/socket.h>
 
 #include "dm.h"
 #include "pci_core.h"
@@ -121,8 +122,8 @@ struct virtio_net_rxhdr {
  * Debug printf
  */
 static int virtio_net_debug;
-#define DPRINTF(params) do { if (virtio_net_debug) printf params; } while (0)
-#define WPRINTF(params) (printf params)
+#define DPRINTF(params) do { if (virtio_net_debug) pr_dbg params; } while (0)
+#define WPRINTF(params) (pr_err params)
 
 /*
  * vhost device struct
@@ -489,7 +490,9 @@ virtio_net_ping_rxq(void *vdev, struct virtio_vq_info *vq)
 	 */
 	if (net->rx_ready == 0) {
 		net->rx_ready = 1;
-		vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+		if (vq->used != NULL) {
+			vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+		}
 	}
 }
 
@@ -639,7 +642,7 @@ virtio_net_parsemac(char *mac_str, uint8_t *mac_addr)
 		if (ea == NULL || ETHER_IS_MULTICAST(ea->ether_addr_octet) ||
 		    memcmp(ea->ether_addr_octet, zero_addr, ETHER_ADDR_LEN)
 				== 0) {
-			fprintf(stderr, "Invalid MAC %s\n", mac_str);
+			pr_err("Invalid MAC %s\n", mac_str);
 			return -1;
 		}
 		memcpy(mac_addr, ea->ether_addr_octet, ETHER_ADDR_LEN);
@@ -649,15 +652,79 @@ virtio_net_parsemac(char *mac_str, uint8_t *mac_addr)
 }
 
 static int
+virtio_net_get_ifindex(char *devname)
+{
+	struct ifreq ifr;
+	int fd;
+	int ifindex = -1;
+
+	fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		WPRINTF(("%s: Unable to open control socket", __func__));
+		return ifindex;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(ifr.ifr_name, devname, IFNAMSIZ);
+	ifr.ifr_name[IFNAMSIZ - 1] = '\0';
+
+	if (ioctl(fd, SIOCGIFINDEX, &ifr) < 0) {
+		WPRINTF(("%s: Unable to get interface index on this platform\n", __func__));
+	} else {
+		ifindex = ifr.ifr_ifindex;
+	}
+
+	close(fd);
+	return ifindex;
+}
+
+static bool
+virtio_net_is_macvtap(char *devname, int *ifindex)
+{
+	char tempbuf[IFNAMSIZ];
+	int rc;
+	int ifidx;
+
+	ifidx = virtio_net_get_ifindex(devname);
+	if (ifidx < 0)
+		return false;
+
+	/*check if the char device exists*/
+	rc = snprintf(tempbuf, IFNAMSIZ, "/dev/tap%d", ifidx);
+	if (rc < 0 || rc >= IFNAMSIZ) {
+		WPRINTF(("Failed to check interface name %s\n", tempbuf));
+		return false;
+	}
+
+	if (access(tempbuf, F_OK) != 0)
+		return false;
+
+	*ifindex = ifidx;
+	return true;
+}
+
+static int
 virtio_net_tap_open(char *devname)
 {
-	int tunfd, rc;
+	char tbuf[IFNAMSIZ];
+	int tunfd, rc, macvtap_index;
 	struct ifreq ifr;
 
-#define PATH_NET_TUN "/dev/net/tun"
-	tunfd = open(PATH_NET_TUN, O_RDWR);
+	/*Check if tun/tap or macvtap interface is used */
+	if (virtio_net_is_macvtap(devname, &macvtap_index)) {
+		rc = snprintf(tbuf, IFNAMSIZ, "/dev/tap%d", macvtap_index);
+	} else {
+		rc = snprintf(tbuf, IFNAMSIZ, "%s", "/dev/net/tun");
+	}
+
+	if (rc < 0 || rc >= IFNAMSIZ) {
+		WPRINTF(("Failed to set interface name %s\n", tbuf));
+		return -1;
+	}
+
+	tunfd = open(tbuf, O_RDWR);
 	if (tunfd < 0) {
-		WPRINTF(("open of tup device /dev/net/tun failed\n"));
+		WPRINTF(("Failed to open interface %s\n", tbuf));
 		return -1;
 	}
 
@@ -690,7 +757,7 @@ virtio_net_tap_setup(struct virtio_net *net, char *devname)
 
 	rc = snprintf(tbuf, IFNAMSIZ, "%s", devname);
 	if (rc < 0 || rc >= IFNAMSIZ) /* give warning if error or truncation happens */
-		WPRINTF(("Fail to set tap device name %s\n", tbuf));
+		WPRINTF(("Failed to set tap device name %s\n", tbuf));
 
 	net->virtio_net_rx = virtio_net_tap_rx;
 	net->virtio_net_tx = virtio_net_tap_tx;
@@ -835,8 +902,8 @@ virtio_net_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		return -1;
 	}
 
-	if (strncmp(devname, "tap", 3) == 0 ||
-	    strncmp(devname, "vmnet", 5) == 0)
+	if ((strstr(devname, "tap") != NULL) ||
+	    (strncmp(devname, "vmnet", 5) == 0))
 		virtio_net_tap_setup(net, devname);
 
 	free(devname);
@@ -866,7 +933,10 @@ virtio_net_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_set_cfgdata16(dev, PCIR_VENDOR, VIRTIO_VENDOR);
 	pci_set_cfgdata8(dev, PCIR_CLASS, PCIC_NETWORK);
 	pci_set_cfgdata16(dev, PCIR_SUBDEV_0, VIRTIO_TYPE_NET);
-	pci_set_cfgdata16(dev, PCIR_SUBVEND_0, VIRTIO_VENDOR);
+	if (is_winvm == true)
+		pci_set_cfgdata16(dev, PCIR_SUBVEND_0, ORACLE_VENDOR_ID);
+	else
+		pci_set_cfgdata16(dev, PCIR_SUBVEND_0, VIRTIO_VENDOR);
 
 	/* Link is up if we managed to open tap device */
 	net->config.status = (opts == NULL || net->tapfd >= 0);
@@ -995,8 +1065,9 @@ virtio_net_teardown(void *param)
 		close(net->tapfd);
 		net->tapfd = -1;
 	} else
-		fprintf(stderr, "net->tapfd is -1!\n");
+		pr_err("net->tapfd is -1!\n");
 
+	virtio_reset_dev(&net->base);
 	free(net);
 }
 
@@ -1024,7 +1095,7 @@ virtio_net_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 
 		DPRINTF(("%s: done\n", __func__));
 	} else
-		fprintf(stderr, "%s: NULL!\n", __func__);
+		pr_err("%s: NULL!\n", __func__);
 }
 
 static struct vhost_net *

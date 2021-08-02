@@ -27,22 +27,30 @@
 
 #define pr_prefix	"vpic: "
 
-#include <vm.h>
+#include <asm/guest/vm.h>
+#include <asm/guest/virq.h>
 #include <irq.h>
-#include <assign.h>
-#include <spinlock.h>
+#include <asm/guest/assign.h>
+#include <asm/lib/spinlock.h>
 #include <logmsg.h>
+#include <asm/ioapic.h>
+#include <asm/irq.h>
 
-#define ACRN_DBG_PIC	6U
+#define DBG_LEVEL_PIC	6U
 
 static void vpic_set_pinstate(struct acrn_vpic *vpic, uint32_t pin, uint8_t level);
+
+static inline struct acrn_vm *vpic2vm(const struct acrn_vpic *vpic)
+{
+	return container_of(container_of(vpic, struct vm_arch, vpic), struct acrn_vm, arch_vm);
+}
 
 struct acrn_vpic *vm_pic(const struct acrn_vm *vm)
 {
 	return (struct acrn_vpic *)&(vm->arch_vm.vpic);
 }
 
-static inline bool master_pic(const struct acrn_vpic *vpic, const struct i8259_reg_state *i8259)
+static inline bool primary_pic(const struct acrn_vpic *vpic, const struct i8259_reg_state *i8259)
 {
 	bool ret;
 
@@ -92,8 +100,8 @@ static inline uint32_t vpic_get_highest_irrpin(const struct i8259_reg_state *i82
 
 	/*
 	 * In 'Special Fully-Nested Mode' when an interrupt request from
-	 * a slave is in service, the slave is not locked out from the
-	 * master's priority logic.
+	 * a secondary PIC is in service, the secondary PIC is not locked out from the
+	 * primary PIC's priority logic.
 	 */
 	serviced = i8259->service;
 	if (i8259->sfn) {
@@ -144,35 +152,37 @@ static void vpic_notify_intr(struct acrn_vpic *vpic)
 	uint32_t pin;
 
 	/*
-	 * First check the slave.
+	 * First check the secondary vPIC.
 	 */
 	i8259 = &vpic->i8259[1];
 	pin = vpic_get_highest_irrpin(i8259);
 	if (!i8259->intr_raised && (pin < NR_VPIC_PINS_PER_CHIP)) {
-		dev_dbg(ACRN_DBG_PIC,
-		"pic slave notify pin = %hhu (imr 0x%x irr 0x%x isr 0x%x)\n",
+		dev_dbg(DBG_LEVEL_PIC,
+		"Secondary vPIC notify pin = %hhu (imr 0x%x irr 0x%x isr 0x%x)\n",
 		pin, i8259->mask, i8259->request, i8259->service);
 
 		/*
-		 * Cascade the request from the slave to the master.
+		 * Cascade the request from the secondary to the primary vPIC.
 		 */
 		i8259->intr_raised = true;
 		vpic_set_pinstate(vpic, 2U, 1U);
 		vpic_set_pinstate(vpic, 2U, 0U);
 	} else {
-		dev_dbg(ACRN_DBG_PIC,
-		"pic slave no eligible interrupt (imr 0x%x irr 0x%x isr 0x%x)",
+		dev_dbg(DBG_LEVEL_PIC,
+		"Secondary vPIC no eligible interrupt (imr 0x%x irr 0x%x isr 0x%x)",
 		i8259->mask, i8259->request, i8259->service);
 	}
 
 	/*
-	 * Then check the master.
+	 * Then check the primary vPIC.
 	 */
 	i8259 = &vpic->i8259[0];
 	pin = vpic_get_highest_irrpin(i8259);
 	if (!i8259->intr_raised && (pin < NR_VPIC_PINS_PER_CHIP)) {
-		dev_dbg(ACRN_DBG_PIC,
-		"pic master notify pin = %hhu (imr 0x%x irr 0x%x isr 0x%x)\n",
+		struct acrn_vm *vm = vpic2vm(vpic);
+
+		dev_dbg(DBG_LEVEL_PIC,
+		"Primary PIC notify pin = %hhu (imr 0x%x irr 0x%x isr 0x%x)\n",
 		pin, i8259->mask, i8259->request, i8259->service);
 
 		/*
@@ -201,25 +211,25 @@ static void vpic_notify_intr(struct acrn_vpic *vpic)
 		 * interrupt.
 		 */
 		i8259->intr_raised = true;
-		if (vpic->vm->wire_mode == VPIC_WIRE_INTR) {
-			struct acrn_vcpu *bsp = vcpu_from_vid(vpic->vm, BOOT_CPU_ID);
+		if (vm->wire_mode == VPIC_WIRE_INTR) {
+			struct acrn_vcpu *bsp = vcpu_from_vid(vm, BSP_CPU_ID);
 			vcpu_inject_extint(bsp);
 		} else {
 			/*
 			 * The input parameters here guarantee the return value of vlapic_set_local_intr is 0, means
 			 * success.
 			 */
-			(void)vlapic_set_local_intr(vpic->vm, BROADCAST_CPU_ID, APIC_LVT_LINT0);
+			(void)vlapic_set_local_intr(vm, BROADCAST_CPU_ID, APIC_LVT_LINT0);
 			/* notify vioapic pin0 if existing
-			 * For vPIC + vIOAPIC mode, vpic master irq connected
+			 * For vPIC + vIOAPIC mode, primary vPIC irq connected
 			 * to vioapic pin0 (irq2)
 			 * From MPSpec session 5.1
 			 */
-			vioapic_set_irqline_lock(vpic->vm, 0U, GSI_RAISING_PULSE);
+			vioapic_set_irqline_lock(vm, 0U, GSI_RAISING_PULSE);
 		}
 	} else {
-		dev_dbg(ACRN_DBG_PIC,
-		"pic master no eligible interrupt (imr 0x%x irr 0x%x isr 0x%x)",
+		dev_dbg(DBG_LEVEL_PIC,
+		"Primary vPIC has no eligible interrupt (imr 0x%x irr 0x%x isr 0x%x)",
 		i8259->mask, i8259->request, i8259->service);
 	}
 }
@@ -228,8 +238,7 @@ static int32_t vpic_icw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 {
 	int32_t ret;
 
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 icw1 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 icw1 0x%x\n", vpic2vm(vpic), val);
 
 	i8259->ready = false;
 
@@ -242,10 +251,10 @@ static int32_t vpic_icw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 	i8259->smm = 0U;
 
 	if ((val & ICW1_SNGL) != 0U) {
-		dev_dbg(ACRN_DBG_PIC, "vpic cascade mode required\n");
+		dev_dbg(DBG_LEVEL_PIC, "vpic cascade mode required\n");
 		ret = -1;
 	} else if ((val & ICW1_IC4) == 0U) {
-		dev_dbg(ACRN_DBG_PIC, "vpic icw4 required\n");
+		dev_dbg(DBG_LEVEL_PIC, "vpic icw4 required\n");
 		ret = -1;
 	} else {
 		i8259->icw_num++;
@@ -257,8 +266,7 @@ static int32_t vpic_icw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 
 static int32_t vpic_icw2(const struct acrn_vpic *vpic, struct i8259_reg_state *i8259, uint8_t val)
 {
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 icw2 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 icw2 0x%x\n", vpic2vm(vpic), val);
 
 	i8259->irq_base = val & 0xf8U;
 
@@ -269,8 +277,7 @@ static int32_t vpic_icw2(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 
 static int32_t vpic_icw3(const struct acrn_vpic *vpic, struct i8259_reg_state *i8259, uint8_t val)
 {
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 icw3 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 icw3 0x%x\n", vpic2vm(vpic), val);
 
 	i8259->icw_num++;
 
@@ -281,11 +288,10 @@ static int32_t vpic_icw4(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 {
 	int32_t ret;
 
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 icw4 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 icw4 0x%x\n", vpic2vm(vpic), val);
 
 	if ((val & ICW4_8086) == 0U) {
-		dev_dbg(ACRN_DBG_PIC,
+		dev_dbg(DBG_LEVEL_PIC,
 			"vpic microprocessor mode required\n");
 	        ret = -1;
 	} else {
@@ -294,11 +300,11 @@ static int32_t vpic_icw4(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 		}
 
 		if ((val & ICW4_SFNM) != 0U) {
-			if (master_pic(vpic, i8259)) {
+			if (primary_pic(vpic, i8259)) {
 				i8259->sfn = true;
 			} else {
-				dev_dbg(ACRN_DBG_PIC,
-				"Ignoring special fully nested mode on slave pic: %#x",
+				dev_dbg(DBG_LEVEL_PIC,
+				"Ignoring special fully nested mode on secondary pic: %#x",
 				val);
 			}
 		}
@@ -311,13 +317,86 @@ static int32_t vpic_icw4(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 	return ret;
 }
 
+static uint32_t vpin_to_vgsi(const struct acrn_vm *vm, uint32_t vpin)
+{
+	uint32_t vgsi = vpin;
+
+	/*
+	 * Remap depending on the type of VM
+	 */
+
+	if (is_sos_vm(vm)) {
+		/*
+		 * For SOS VM vPIC pin to GSI is same as the one
+		 * that is used for platform
+		 */
+		vgsi = get_pic_pin_from_ioapic_pin(vpin);
+	} else if (is_postlaunched_vm(vm)) {
+		/*
+		 * Devicemodel provides Interrupt Source Override Structure
+		 * via ACPI to Post-Launched VM.
+		 * 
+		 * 1) Interrupt source connected to vPIC pin 0 is connected to vIOAPIC pin 2
+		 * 2) Devicemodel, as of today, does not request to hold ptirq entry with vPIC as 
+		 *    interrupt controller, for a Post-Launched VM.
+		 */
+		if (vpin == 0U) {
+			vgsi = 2U;
+		}
+	} else {
+		/*
+		 * For Pre-launched VMs, Interrupt Source Override Structure
+		 * and IO-APIC Structure are not provided in the VM's ACPI info.
+		 * No remapping needed.
+		 */
+	}
+	return vgsi;
+}
+
+static uint32_t vgsi_to_vpin(const struct acrn_vm *vm, uint32_t vgsi)
+{
+	uint32_t vpin = vgsi;
+
+	/*
+	 * Remap depending on the type of VM
+	 */
+
+	if (is_sos_vm(vm)) {
+		/*
+		 * For SOS VM vPIC pin to GSI is same as the one
+		 * that is used for platform
+		 */
+		vpin = get_pic_pin_from_ioapic_pin(vgsi);
+	} else if (is_postlaunched_vm(vm)) {
+		/*
+		 * Devicemodel provides Interrupt Source Override Structure
+		 * via ACPI to Post-Launched VM.
+		 * 
+		 * 1) Interrupt source connected to vPIC pin 0 is connected to vIOAPIC pin 2
+		 * 2) Devicemodel, as of today, does not request to hold ptirq entry with vPIC as 
+		 *    interrupt controller, for a Post-Launched VM.
+		 */
+		if (vgsi == 2U) {
+			vpin = 0U;
+		}
+	} else {
+		/*
+		 * For Pre-launched VMs, Interrupt Source Override Structure
+		 * and IO-APIC Structure are not provided in the VM's ACPI info.
+		 * No remapping needed.
+		 */
+	}
+	return vpin;
+
+}
+
 static int32_t vpic_ocw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i8259, uint8_t val)
 {
 	uint32_t pin, i, bit;
 	uint8_t old = i8259->mask;
+	struct acrn_vm *vm = vpic2vm(vpic);
 
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 ocw1 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 ocw1 0x%x\n", vm, val);
 
 	i8259->mask = val & 0xffU;
 	pin = (i8259->lowprio + 1U) & 0x7U;
@@ -331,18 +410,21 @@ static int32_t vpic_ocw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 		 */
 		if (((i8259->mask & bit) == 0U) && ((old & bit) != 0U)) {
 			uint32_t virt_pin;
+			uint32_t vgsi;
 
-			/* master i8259 pin2 connect with slave i8259,
+			/* Primary i8259 pin2 connect with secondary i8259,
 			 * not device, so not need pt remap
 			 */
-			if ((pin == 2U) && master_pic(vpic, i8259)) {
+			if ((pin == 2U) && primary_pic(vpic, i8259)) {
 				pin = (pin + 1U) & 0x7U;
 				continue;
 			}
 
-			virt_pin = (master_pic(vpic, i8259)) ?
+			virt_pin = (primary_pic(vpic, i8259)) ?
 					pin : (pin + 8U);
-			(void)ptirq_intx_pin_remap(vpic->vm, virt_pin, PTDEV_VPIN_PIC);
+
+			vgsi = vpin_to_vgsi(vm, virt_pin);
+			(void)ptirq_intx_pin_remap(vm, vgsi, INTX_CTLR_PIC);
 		}
 		pin = (pin + 1U) & 0x7U;
 	}
@@ -352,13 +434,15 @@ static int32_t vpic_ocw1(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 
 static int32_t vpic_ocw2(const struct acrn_vpic *vpic, struct i8259_reg_state *i8259, uint8_t val)
 {
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 ocw2 0x%x\n",
-		vpic->vm, val);
+	struct acrn_vm *vm = vpic2vm(vpic);
+
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 ocw2 0x%x\n", vm, val);
 
 	i8259->rotate = ((val & OCW2_R) != 0U);
 
 	if ((val & OCW2_EOI) != 0U) {
 		uint32_t isr_bit;
+		uint32_t vgsi;
 
 		if ((val & OCW2_SL) != 0U) {
 			/* specific EOI */
@@ -378,8 +462,8 @@ static int32_t vpic_ocw2(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 
 		/* if level ack PTDEV */
 		if ((i8259->elc & (1U << (isr_bit & 0x7U))) != 0U) {
-			ptirq_intx_ack(vpic->vm, (master_pic(vpic, i8259) ? isr_bit : isr_bit + 8U),
-					PTDEV_VPIN_PIC);
+			vgsi = vpin_to_vgsi(vm, (primary_pic(vpic, i8259) ? isr_bit : isr_bit + 8U));
+			ptirq_intx_ack(vm, vgsi, INTX_CTLR_PIC);
 		}
 	} else if (((val & OCW2_SL) != 0U) && i8259->rotate) {
 		/* specific priority */
@@ -393,13 +477,12 @@ static int32_t vpic_ocw2(const struct acrn_vpic *vpic, struct i8259_reg_state *i
 
 static int32_t vpic_ocw3(const struct acrn_vpic *vpic, struct i8259_reg_state *i8259, uint8_t val)
 {
-	dev_dbg(ACRN_DBG_PIC, "vm 0x%x: i8259 ocw3 0x%x\n",
-		vpic->vm, val);
+	dev_dbg(DBG_LEVEL_PIC, "vm 0x%x: i8259 ocw3 0x%x\n", vpic2vm(vpic), val);
 
 	if ((val & OCW3_ESMM) != 0U) {
 		i8259->smm = ((val & OCW3_SMM) != 0U) ? 1U : 0U;
-		dev_dbg(ACRN_DBG_PIC, "%s i8259 special mask mode %s\n",
-		    master_pic(vpic, i8259) ? "master" : "slave",
+		dev_dbg(DBG_LEVEL_PIC, "%s i8259 special mask mode %s\n",
+		    primary_pic(vpic, i8259) ? "primary vPIC" : "secondary vPIC",
 		    (i8259->smm != 0U) ?  "enabled" : "disabled");
 	}
 
@@ -436,16 +519,16 @@ static void vpic_set_pinstate(struct acrn_vpic *vpic, uint32_t pin, uint8_t leve
 
 		if (((old_lvl == 0U) && (level == 1U)) || ((level == 1U) && lvl_trigger)) {
 			/* raising edge or level */
-			dev_dbg(ACRN_DBG_PIC, "pic pin%hhu: asserted\n", pin);
+			dev_dbg(DBG_LEVEL_PIC, "pic pin%hhu: asserted\n", pin);
 			i8259->request |= (uint8_t)(1U << (pin & 0x7U));
 		} else if ((old_lvl == 1U) && (level == 0U)) {
 			/* falling edge */
-			dev_dbg(ACRN_DBG_PIC, "pic pin%hhu: deasserted\n", pin);
+			dev_dbg(DBG_LEVEL_PIC, "pic pin%hhu: deasserted\n", pin);
 			if (lvl_trigger) {
 				i8259->request &= ~(uint8_t)(1U << (pin & 0x7U));
 			}
 		} else {
-			dev_dbg(ACRN_DBG_PIC, "pic pin%hhu: %s, ignored\n",
+			dev_dbg(DBG_LEVEL_PIC, "pic pin%hhu: %s, ignored\n",
 				pin, (level != 0U) ? "asserted" : "deasserted");
 		}
 	}
@@ -461,17 +544,17 @@ static void vpic_set_pinstate(struct acrn_vpic *vpic, uint32_t pin, uint8_t leve
  *
  * @return None
  */
-void vpic_set_irqline(struct acrn_vpic *vpic, uint32_t irqline, uint32_t operation)
+void vpic_set_irqline(struct acrn_vpic *vpic, uint32_t vgsi, uint32_t operation)
 {
 	struct i8259_reg_state *i8259;
 	uint32_t pin;
 	uint64_t rflags;
 
-	if (irqline < NR_VPIC_PINS_TOTAL) {
-		i8259 = &vpic->i8259[irqline >> 3U];
-		pin = irqline;
+	if (vgsi < NR_VPIC_PINS_TOTAL) {
+		i8259 = &vpic->i8259[vgsi >> 3U];
 
 		if (i8259->ready) {
+			pin = vgsi_to_vpin(vpic2vm(vpic), vgsi);
 			spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 			switch (operation) {
 			case GSI_SET_HIGH:
@@ -511,9 +594,11 @@ vpic_pincount(void)
  * @pre irqline < NR_VPIC_PINS_TOTAL
  * @pre this function should be called after vpic_init()
  */
-void vpic_get_irqline_trigger_mode(const struct acrn_vpic *vpic, uint32_t irqline,
+void vpic_get_irqline_trigger_mode(const struct acrn_vpic *vpic, uint32_t vgsi,
 		enum vpic_trigger *trigger)
 {
+	uint32_t irqline = vgsi_to_vpin(vpic2vm(vpic), vgsi);
+	
 	if ((vpic->i8259[irqline >> 3U].elc & (1U << (irqline & 0x7U))) != 0U) {
 		*trigger = LEVEL_TRIGGER;
 	} else {
@@ -535,10 +620,11 @@ void vpic_pending_intr(struct acrn_vpic *vpic, uint32_t *vecptr)
 {
 	struct i8259_reg_state *i8259;
 	uint32_t pin;
+	uint64_t rflags;
 
 	i8259 = &vpic->i8259[0];
 
-	spinlock_obtain(&(vpic->lock));
+	spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 
 	pin = vpic_get_highest_irrpin(i8259);
 	if (pin == 2U) {
@@ -555,10 +641,10 @@ void vpic_pending_intr(struct acrn_vpic *vpic, uint32_t *vecptr)
 	} else {
 		*vecptr = i8259->irq_base + pin;
 
-		dev_dbg(ACRN_DBG_PIC, "Got pending vector 0x%x\n", *vecptr);
+		dev_dbg(DBG_LEVEL_PIC, "Got pending vector 0x%x\n", *vecptr);
 	}
 
-	spinlock_release(&(vpic->lock));
+	spinlock_irqrestore_release(&(vpic->lock), rflags);
 }
 
 static void vpic_pin_accepted(struct i8259_reg_state *i8259, uint32_t pin)
@@ -593,15 +679,16 @@ static void vpic_pin_accepted(struct i8259_reg_state *i8259, uint32_t pin)
 void vpic_intr_accepted(struct acrn_vpic *vpic, uint32_t vector)
 {
 	uint32_t pin;
+	uint64_t rflags;
 
-	spinlock_obtain(&(vpic->lock));
+	spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 
 	pin = (vector & 0x7U);
 
 	if ((vector & ~0x7U) == vpic->i8259[1].irq_base) {
 		vpic_pin_accepted(&vpic->i8259[1], pin);
 		/*
-		 * If this vector originated from the slave,
+		 * If this vector originated from the secondary vPIC,
 		 * accept the cascaded interrupt too.
 		 */
 		vpic_pin_accepted(&vpic->i8259[0], 2U);
@@ -611,15 +698,16 @@ void vpic_intr_accepted(struct acrn_vpic *vpic, uint32_t vector)
 
 	vpic_notify_intr(vpic);
 
-	spinlock_release(&(vpic->lock));
+	spinlock_irqrestore_release(&(vpic->lock), rflags);
 }
 
 static int32_t vpic_read(struct acrn_vpic *vpic, struct i8259_reg_state *i8259,
 		uint16_t port, uint32_t *eax)
 {
 	uint32_t pin;
+	uint64_t rflags;
 
-	spinlock_obtain(&(vpic->lock));
+	spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 
 	if (i8259->poll) {
 		i8259->poll = false;
@@ -645,7 +733,7 @@ static int32_t vpic_read(struct acrn_vpic *vpic, struct i8259_reg_state *i8259,
 		}
 	}
 
-	spinlock_release(&(vpic->lock));
+	spinlock_irqrestore_release(&(vpic->lock), rflags);
 
 	return 0;
 }
@@ -655,11 +743,12 @@ static int32_t vpic_write(struct acrn_vpic *vpic, struct i8259_reg_state *i8259,
 {
 	int32_t error;
 	uint8_t val;
+	uint64_t rflags;
 
 	error = 0;
 	val = (uint8_t)*eax;
 
-	spinlock_obtain(&(vpic->lock));
+	spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 
 	if ((port & ICU_IMR_OFFSET) != 0U) {
 		switch (i8259->icw_num) {
@@ -694,12 +783,12 @@ static int32_t vpic_write(struct acrn_vpic *vpic, struct i8259_reg_state *i8259,
 		vpic_notify_intr(vpic);
 	}
 
-	spinlock_release(&(vpic->lock));
+	spinlock_irqrestore_release(&(vpic->lock), rflags);
 
 	return error;
 }
 
-static int32_t vpic_master_handler(struct acrn_vpic *vpic, bool in, uint16_t port,
+static int32_t vpic_primary_handler(struct acrn_vpic *vpic, bool in, uint16_t port,
 		size_t bytes, uint32_t *eax)
 {
 	struct i8259_reg_state *i8259;
@@ -722,12 +811,12 @@ static int32_t vpic_master_handler(struct acrn_vpic *vpic, bool in, uint16_t por
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
  */
-static bool vpic_master_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t width)
+static bool vpic_primary_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t width)
 {
-	struct pio_request *pio_req = &vcpu->req.reqs.pio;
+	struct acrn_pio_request *pio_req = &vcpu->req.reqs.pio_request;
 
-	if (vpic_master_handler(vm_pic(vcpu->vm), true, addr, width, &pio_req->value) < 0) {
-		pr_err("pic master read port 0x%x width=%d failed\n",
+	if (vpic_primary_handler(vm_pic(vcpu->vm), true, addr, width, &pio_req->value) < 0) {
+		pr_err("Primary vPIC read port 0x%x width=%d failed\n",
 				addr, width);
 	}
 
@@ -738,12 +827,12 @@ static bool vpic_master_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t wi
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
  */
-static bool vpic_master_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
+static bool vpic_primary_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
 				uint32_t v)
 {
 	uint32_t val = v;
 
-	if (vpic_master_handler(vm_pic(vcpu->vm), false, addr, width, &val) < 0) {
+	if (vpic_primary_handler(vm_pic(vcpu->vm), false, addr, width, &val) < 0) {
 		pr_err("%s: write port 0x%x width=%d value 0x%x failed\n",
 				__func__, addr, width, val);
 	}
@@ -751,7 +840,7 @@ static bool vpic_master_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t w
 	return true;
 }
 
-static int32_t vpic_slave_handler(struct acrn_vpic *vpic, bool in, uint16_t port,
+static int32_t vpic_secondary_handler(struct acrn_vpic *vpic, bool in, uint16_t port,
 		size_t bytes, uint32_t *eax)
 {
 	struct i8259_reg_state *i8259;
@@ -774,12 +863,12 @@ static int32_t vpic_slave_handler(struct acrn_vpic *vpic, bool in, uint16_t port
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
  */
-static bool vpic_slave_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t width)
+static bool vpic_secondary_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t width)
 {
-	struct pio_request *pio_req = &vcpu->req.reqs.pio;
+	struct acrn_pio_request *pio_req = &vcpu->req.reqs.pio_request;
 
-	if (vpic_slave_handler(vm_pic(vcpu->vm), true, addr, width, &pio_req->value) < 0) {
-		pr_err("pic slave read port 0x%x width=%d failed\n",
+	if (vpic_secondary_handler(vm_pic(vcpu->vm), true, addr, width, &pio_req->value) < 0) {
+		pr_err("Secondary vPIC read port 0x%x width=%d failed\n",
 				addr, width);
 	}
 	return true;
@@ -789,12 +878,12 @@ static bool vpic_slave_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t wid
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
  */
-static bool vpic_slave_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
+static bool vpic_secondary_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
 				uint32_t v)
 {
 	uint32_t val = v;
 
-	if (vpic_slave_handler(vm_pic(vcpu->vm), false, addr, width, &val) < 0) {
+	if (vpic_secondary_handler(vm_pic(vcpu->vm), false, addr, width, &val) < 0) {
 		pr_err("%s: write port 0x%x width=%d value 0x%x failed\n",
 				__func__, addr, width, val);
 	}
@@ -805,39 +894,41 @@ static bool vpic_slave_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t wi
 static int32_t vpic_elc_handler(struct acrn_vpic *vpic, bool in, uint16_t port, size_t bytes,
 		uint32_t *eax)
 {
-	bool is_master;
+	bool is_primary_vpic;
 	int32_t ret;
 
-	is_master = (port == IO_ELCR1);
+	is_primary_vpic = (port == IO_ELCR1);
 
 	if (bytes == 1U) {
-		spinlock_obtain(&(vpic->lock));
+		uint64_t rflags;
+
+		spinlock_irqsave_obtain(&(vpic->lock), &rflags);
 
 		if (in) {
-			if (is_master) {
+			if (is_primary_vpic) {
 				*eax = vpic->i8259[0].elc;
 			} else {
 				*eax = vpic->i8259[1].elc;
 			}
 		} else {
 			/*
-			 * For the master PIC the cascade channel (IRQ2), the
+			 * For the primary vPIC the cascade channel (IRQ2), the
 			 * heart beat timer (IRQ0), and the keyboard
 			 * controller (IRQ1) cannot be programmed for level
 			 * mode.
 			 *
-			 * For the slave PIC the real time clock (IRQ8) and
+			 * For the secondary vPIC the real time clock (IRQ8) and
 			 * the floating point error interrupt (IRQ13) cannot
 			 * be programmed for level mode.
 			 */
-			if (is_master) {
+			if (is_primary_vpic) {
 				vpic->i8259[0].elc = (uint8_t)(*eax & 0xf8U);
 			} else {
 				vpic->i8259[1].elc = (uint8_t)(*eax & 0xdeU);
 			}
 		}
 
-		spinlock_release(&(vpic->lock));
+		spinlock_irqrestore_release(&(vpic->lock), rflags);
 		ret = 0;
 	} else {
 	        ret = -1;
@@ -852,7 +943,7 @@ static int32_t vpic_elc_handler(struct acrn_vpic *vpic, bool in, uint16_t port, 
  */
 static bool vpic_elc_io_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t width)
 {
-	struct pio_request *pio_req = &vcpu->req.reqs.pio;
+	struct acrn_pio_request *pio_req = &vcpu->req.reqs.pio_request;
 
 	if (vpic_elc_handler(vm_pic(vcpu->vm), true, addr, width, &pio_req->value) < 0) {
 		pr_err("pic elc read port 0x%x width=%d failed", addr, width);
@@ -880,11 +971,11 @@ static bool vpic_elc_io_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t widt
 
 static void vpic_register_io_handler(struct acrn_vm *vm)
 {
-	struct vm_io_range master_range = {
+	struct vm_io_range primary_vPIC_range = {
 		.base = 0x20U,
 		.len = 2U
 	};
-	struct vm_io_range slave_range = {
+	struct vm_io_range secondary_vPIC_range = {
 		.base = 0xa0U,
 		.len = 2U
 	};
@@ -893,10 +984,10 @@ static void vpic_register_io_handler(struct acrn_vm *vm)
 		.len = 2U
 	};
 
-	register_pio_emulation_handler(vm, PIC_MASTER_PIO_IDX, &master_range,
-			vpic_master_io_read, vpic_master_io_write);
-	register_pio_emulation_handler(vm, PIC_SLAVE_PIO_IDX, &slave_range,
-			vpic_slave_io_read, vpic_slave_io_write);
+	register_pio_emulation_handler(vm, PIC_PRIMARY_PIO_IDX, &primary_vPIC_range,
+			vpic_primary_io_read, vpic_primary_io_write);
+	register_pio_emulation_handler(vm, PIC_SECONDARY_PIO_IDX, &secondary_vPIC_range,
+			vpic_secondary_io_read, vpic_secondary_io_write);
 	register_pio_emulation_handler(vm, PIC_ELC_PIO_IDX, &elcr_range,
 			vpic_elc_io_read, vpic_elc_io_write);
 }
@@ -905,7 +996,6 @@ void vpic_init(struct acrn_vm *vm)
 {
 	struct acrn_vpic *vpic = vm_pic(vm);
 	vpic_register_io_handler(vm);
-	vpic->vm = vm;
 	vpic->i8259[0].mask = 0xffU;
 	vpic->i8259[1].mask = 0xffU;
 

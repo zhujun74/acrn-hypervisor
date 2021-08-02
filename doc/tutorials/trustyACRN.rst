@@ -1,7 +1,7 @@
 .. _trusty-security-services:
 
-Trusty and Security Services in ACRN
-####################################
+Trusty and Security Services Reference
+######################################
 
 This document provides an overview of the Trusty architecture for
 Linux-based system, what security services Trusty provides, and how
@@ -61,7 +61,7 @@ Space Layout Randomization), and stack overflow protector.
 
 There are a couple of built-in Trusted Apps running in user mode of
 Trusty OS. However, an OEM can add more Trusted Apps in Trusty OS to
-serve any other customized security services.For security reasons and
+serve any other customized security services. For security reasons and
 for serving early-boot time security requests (e.g. disk decryption),
 Trusty OS and Apps are typically started before Normal world OS.
 
@@ -102,7 +102,7 @@ malware detection.
 
 In embedded products such as an automotive IVI system, the most important
 security services requested by customers are keystore and secure
-storage. In this article we will focus on these two services.
+storage. In this article, we will focus on these two services.
 
 Keystore
 ========
@@ -126,20 +126,21 @@ and are permanently bound to the key, ensuring the key cannot be used in
 any other way.
 
 In addition to the list above, there is one more service that Keymaster
-implementations provide, but which is not exposed as an API: Random
+implementations provide, but is not exposed as an API: Random
 number generation. This is used internally for generation of keys,
 Initialization Vectors (IVs), random padding, and other elements of
 secure protocols that require randomness.
 
 Using Android as an example, Keystore functions are explained in greater
 details in this `Android keymaster functions document
-<https://source.android.com/security/keystore/implementer-ref>`_
+<https://source.android.com/security/keystore/implementer-ref>`_.
 
 .. figure:: images/trustyacrn-image3.png
    :align: center
    :width: 600px
    :name: keymaster-app
 
+   Keystore service and Keymaster HAL
 
 As shown in :numref:`keymaster-app` above, the Keymaster HAL is a
 dynamically-loadable library used by the Keystore service to provide
@@ -161,7 +162,7 @@ You can read the `eMMC/UFS JEDEC specification
 to understand that.
 
 This secure storage can provide data confidentiality, integrity, and
-anti-replay protection.Confidentiality is guaranteed by data encryption
+anti-replay protection. Confidentiality is guaranteed by data encryption
 with a root key derived from the platform chipset's unique key/secret.
 
 RPMB partition is a fixed size partition (128KB ~ 16MB) in eMMC (or UFS)
@@ -178,11 +179,11 @@ key).  See `Android Key and ID Attestation
 for details.
 
 In Trusty, the secure storage architecture is shown in the figure below.
-In the secure world, there is a SS (Secure Storage) TA, which has an
+In the secure world, there is an SS (Secure Storage) TA, which has an
 RPMB authentication key (AuthKey, an HMAC key) and uses this Authkey to
 talk with the RPMB controller in the eMMC device. Since the eMMC device
 is controlled by normal world driver, Trusty needs to send an RPMB data
-frame ( encrypted by hardware-backed unique encryption key and signed by
+frame (encrypted by hardware-backed unique encryption key and signed by
 AuthKey) over Trusty IPC channel to Trusty SS proxy daemon, which then
 forwards RPMB data frame to physical RPMB partition in eMMC.
 
@@ -190,6 +191,8 @@ forwards RPMB data frame to physical RPMB partition in eMMC.
    :align: center
    :width: 600px
    :name: trusty-ss-ta
+
+   Trusty Secure Storage Trusted App
 
 As shown in :numref:`trusty-ss-ta` above, Trusty SS TA provides two different services
 simultaneously:
@@ -227,6 +230,8 @@ open/creation/deletion/read/write operations.
    :width: 600px
    :name: trusty-ss-ta-storage
 
+   Trusty Secure Storage Trusted App Storage
+
 Here is a simple example showing data signing:
 
 #. An OEM Client App sends the message that needs signing to the OEM
@@ -250,7 +255,7 @@ section, we'll focus on two major components:
 
 * one is the basic idea of
   secure world and insecure world isolation (so called one-vm,
-  two-worlds), 
+  two-worlds),
 * the other one is the secure storage virtualization in ACRN.
 
 See :ref:`trusty_tee` for additional details of Trusty implementation in
@@ -260,7 +265,7 @@ One-VM, Two-Worlds
 ==================
 
 As previously mentioned, Trusty Secure Monitor could be any
-hypervisor. In the ACRN project the ACRN hypervisor will behave as the
+hypervisor. In the ACRN project, the ACRN hypervisor will behave as the
 secure monitor to schedule in/out Trusty secure world.
 
 .. figure:: images/trustyacrn-image4.png
@@ -268,8 +273,10 @@ secure monitor to schedule in/out Trusty secure world.
    :width: 600px
    :name: trusty-isolated
 
+   Trusty Secure World Isolated User VM
+
 As shown in :numref:`trusty-isolated` above, the hypervisor creates an
-isolated secure world UOS to support a Trusty OS running in a UOS on
+isolated secure world User VM to support a Trusty OS running in a User VM on
 ACRN.
 
 :numref:`trusty-lhs-rhs` below shows further implementation details. The RHS
@@ -282,6 +289,8 @@ Linux-based system (e.g. Android) runs.
    :width: 600px
    :name: trusty-lhs-rhs
 
+   Trusty Secure World Isolation Details
+
 The secure world is configured by the hypervisor so it has read/write
 access to a non-secure world's memory space. But non-secure worlds do
 not have access to a secure world's memory. This is guaranteed by
@@ -290,7 +299,7 @@ invoked. The WS Hypercall has parameters to specify the services cmd ID
 requested from the non-secure world.
 
 In the ACRN hypervisor design of the "one VM, two worlds"
-architecture, there is a single UOS/VM structure per-UOS in the
+architecture, there is a single User VM structure per-User VM in the
 Hypervisor, but two vCPU structures that save the LHS/RHS virtual
 logical processor states respectively.
 
@@ -311,7 +320,7 @@ implementation, secure storage is built in the RPMB partition in eMMC
 
 Currently the eMMC in the APL SoC platform only has a single RPMB
 partition for tamper-resistant and anti-replay secure storage. The
-secure storage (RPMB) is virtualized to support multiple guest UOS VMs.
+secure storage (RPMB) is virtualized to support multiple guest User VM VMs.
 Although newer generations of flash storage (e.g. UFS 3.0, and NVMe)
 support multiple RPMB partitions, this article only discusses the
 virtualization solution for single-RPMB flash storage device in APL SoC
@@ -325,14 +334,15 @@ high-level architecture.
    :width: 600px
    :name: trusty-rpmb
 
+   Virtualized Secure Storage Architecture
 
 In :numref:`trusty-rpmb`, the rKey (RPMB AuthKey) is the physical RPMB
 authentication key used for data authenticated read/write access between
-SOS kernel and physical RPMB controller in eMMC device. The VrKey is the
-virtual RPMB authentication key used for authentication between SOS DM
-module and its corresponding UOS secure software. Each UOS (if secure
+Service VM kernel and physical RPMB controller in eMMC device. The VrKey is the
+virtual RPMB authentication key used for authentication between Service VM DM
+module and its corresponding User VM secure software. Each User VM (if secure
 storage is supported) has its own VrKey, generated randomly when the DM
-process starts, and is securely distributed to UOS secure world for each
+process starts, and is securely distributed to User VM secure world for each
 reboot. The rKey is fixed on a specific platform unless the eMMC is
 replaced with another one.
 
@@ -344,27 +354,27 @@ provisioning are out of scope for this document.)
 For each reboot, the BIOS/SBL retrieves the rKey from CSE FW (or
 generated from a special unique secret that is retrieved from CSE FW),
 and SBL hands it off to the ACRN hypervisor, and the hypervisor in turn
-sends the key to the SOS kernel.
+sends the key to the Service VM kernel.
 
 As an example, secure storage virtualization workflow for data write
 access is like this:
 
-#. UOS Secure world (e.g. Trusty) packs the encrypted data and signs it
+#. User VM Secure world (e.g. Trusty) packs the encrypted data and signs it
    with the vRPMB authentication key (VrKey), and sends the data along
-   with its signature over the RPMB FE driver in UOS non-secure world.
-#. After DM process in SOS receives the data and signature, the vRPMB
+   with its signature over the RPMB FE driver in User VM non-secure world.
+#. After DM process in Service VM receives the data and signature, the vRPMB
    module in DM verifies them with the shared secret (vRPMB
    authentication key, VrKey),
 #. If verification is success, the vRPMB module does data address
-   remapping (remembering that the multiple UOS VMs share a single
-   physical RPMB partition), and forwards those data to SOS kernel, then
+   remapping (remembering that the multiple User VM VMs share a single
+   physical RPMB partition), and forwards those data to Service VM kernel, then
    kernel packs the data and signs it with the physical RPMB
    authentication key (rKey). Eventually, the data and its signature
    will be sent to physical eMMC device.
 #. If the verification is successful in the eMMC RPMB controller, the
    data will be written into the storage device.
 
-The work flow of authenticated data read is very similar to this flow
+The workflow of authenticated data read is very similar to this flow
 above in reverse order.
 
 Note that there are some security considerations in this architecture:
@@ -372,18 +382,18 @@ Note that there are some security considerations in this architecture:
 -  The rKey protection is very critical in this system. If the key is
    leaked, an attacker can change/overwrite the data on RPMB, bypassing
    the "tamper-resistant & anti-replay" capability.
--  Typically, the vRPMB module in DM process of SOS system can filter
-   data access, i.e. it doesn't allow one UOS to perform read/write
-   access to the data from another UOS VM.
-   If the vRPMB module in DM process is compromised, a UOS could
-   change/overwrite the secure data of other UOSs.
+-  Typically, the vRPMB module in DM process of Service VM system can filter
+   data access, i.e. it doesn't allow one User VM to perform read/write
+   access to the data from another User VM.
+   If the vRPMB module in DM process is compromised, a User VM could
+   change/overwrite the secure data of other User VMs.
 
-Keeping SOS system as secure as possible is a very important goal in the
-system security design. In practice, the SOS designer and implementer
+Keeping Service VM system as secure as possible is a very important goal in the
+system security design. In practice, the Service VM designer and implementer
 should obey these following rules (and more):
 
--  Make sure the SOS is a closed system and doesn't allow users to
-   install any unauthorized 3rd party software or components.
+-  Make sure the Service VM is a closed system and doesn't allow users to
+   install any unauthorized third-party software or components.
 -  External peripherals are constrained.
 -  Enable kernel-based hardening techniques, e.g., dm-verity (to make
    sure integrity of DM and vBIOS/vOSloaders), kernel module signing,
@@ -393,7 +403,7 @@ should obey these following rules (and more):
 Detailed configurations and policies are out of scope in this article.
 Good references for OS system security hardening and enhancement
 include: `AGL security
-<http://docs.automotivelinux.org/master/docs/architecture/en/dev/reference/security/part-2/0_Abstract.html>`_
+<https://docs.automotivelinux.org/docs/en/master/architecture/reference/security/part-2/0_Abstract.html>`_
 and `Android security
 <https://source.android.com/security/>`_
 

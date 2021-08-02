@@ -15,9 +15,12 @@
 /** Roundup (x/y) to ( x/y + (x%y) ? 1 : 0) **/
 #define INT_DIV_ROUNDUP(x, y)	((((x)+(y))-1)/(y))
 
-#define min(x, y)	((x) < (y)) ? (x) : (y)
+/** Roundup (x) to (y) aligned **/
+#define roundup(x, y)  (((x) + ((y) - 1UL)) & (~((y) - 1UL)))
 
-#define max(x, y)	((x) < (y)) ? (y) : (x)
+#define min(x, y)	(((x) < (y)) ? (x) : (y))
+
+#define max(x, y)	(((x) < (y)) ? (y) : (x))
 
 /** Replaces 'x' by the string "x". */
 #define STRINGIFY(x) #x
@@ -29,6 +32,29 @@
 static inline bool mem_aligned_check(uint64_t value, uint64_t req_align)
 {
 	return ((value & (req_align - 1UL)) == 0UL);
+}
+
+/**
+ * @pre buf != NULL
+ */
+static inline uint8_t calculate_sum8(const void *buf, uint32_t length)
+{
+	uint32_t i;
+	uint8_t sum = 0U;
+
+	for (i = 0U; i < length; i++) {
+		sum += *((const uint8_t *)buf + i);
+	}
+
+	return sum;
+}
+
+/**
+ * @pre buf != NULL
+ */
+static inline uint8_t calculate_checksum8(const void *buf, uint32_t len)
+{
+	return (uint8_t)(0x100U - calculate_sum8(buf, len));
 }
 
 #endif /* UTIL_H */

@@ -26,134 +26,141 @@
 *
 * $FreeBSD$
 */
-#include <vm.h>
+#include <asm/guest/vm.h>
 #include <errno.h>
-#include <ept.h>
-#include <mmu.h>
-#include <vmx.h>
+#include <ptdev.h>
+#include <asm/guest/assign.h>
+#include <asm/vtd.h>
+#include <asm/guest/ept.h>
+#include <asm/mmu.h>
+#include <asm/io.h>
 #include <logmsg.h>
 #include "vpci_priv.h"
 
 /**
- * @brief get bar's full base address in 64-bit
- * @pre idx < nr_bars
- * For 64-bit MMIO bar, its lower 32-bits base address and upper 32-bits base are combined
- * into one 64-bit base address
+ * @pre vdev != NULL
  */
-static uint64_t pci_bar_2_bar_base(const struct pci_bar *pbars, uint32_t nr_bars, uint32_t idx)
+static inline struct msix_table_entry *get_msix_table_entry(const struct pci_vdev *vdev, uint32_t index)
 {
-	uint64_t base = 0UL;
-	uint64_t tmp;
-	const struct pci_bar *bar;
+	void *hva = hpa2hva(vdev->msix.mmio_hpa + vdev->msix.table_offset);
 
-	bar = &pbars[idx];
+	return ((struct msix_table_entry *)hva + index);
+}
 
-	if (bar->is_64bit_high) {
-		ASSERT(idx > 0U, "idx for upper 32-bit of the 64-bit bar should be greater than 0!");
-		if (idx > 0U) {
-			const struct pci_bar *prev_bar = &pbars[idx - 1U];
+/**
+ * @brief Writing MSI-X Capability Structure
+ *
+ * @pre vdev != NULL
+ * @pre vdev->pdev != NULL
+ */
+void write_pt_vmsix_cap_reg(struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t val)
+{
+	uint32_t msgctrl;
 
-			/* Upper 32-bit of 64-bit bar (does not have flags portion) */
-			base = (uint64_t)(bar->reg.value);
-			base <<= 32U;
-
-			/* Lower 32-bit of a 64-bit bar (BITS 31-4 = base address, 16-byte aligned) */
-			tmp = (uint64_t)(prev_bar->reg.bits.mem.base);
-			tmp <<= 4U;
-
-			base |= tmp;
+	if (write_vmsix_cap_reg(vdev, offset, bytes, val)) {
+		msgctrl = pci_vdev_read_vcfg(vdev, vdev->msix.capoff + PCIR_MSIX_CTRL, 2U);
+		/* If MSI Enable is being set, make sure INTxDIS bit is set */
+		if ((msgctrl & PCIM_MSIXCTRL_MSIX_ENABLE) != 0U) {
+			enable_disable_pci_intx(vdev->pdev->bdf, false);
 		}
-	} else {
-		enum pci_bar_type type = pci_get_bar_type(bar->reg.value);
+		pci_pdev_write_cfg(vdev->pdev->bdf, vdev->msix.capoff + PCIR_MSIX_CTRL, 2U, msgctrl);
+	}
+}
 
-		switch (type) {
-		case PCIBAR_IO_SPACE:
-			/* IO bar, BITS 31-2 = base address, 4-byte aligned */
-			base = (uint64_t)(bar->reg.bits.io.base);
-			base <<= 2U;
-			break;
+/**
+ * @pre vdev != NULL
+ */
+static void mask_one_msix_vector(const struct pci_vdev *vdev, uint32_t index)
+{
+	uint32_t vector_control;
+	struct msix_table_entry *pentry = get_msix_table_entry(vdev, index);
 
-		case PCIBAR_MEM32:
-			base = (uint64_t)(bar->reg.bits.mem.base);
-			base <<= 4U;
-			break;
+	stac();
+	vector_control = pentry->vector_control | PCIM_MSIX_VCTRL_MASK;
+	mmio_write32(vector_control, (void *)&(pentry->vector_control));
+	clac();
+}
 
-		case PCIBAR_MEM64:
-			ASSERT((idx + 1U) < nr_bars, "idx for upper 32-bit of the 64-bit bar is out of range!");
-			if ((idx + 1U) < nr_bars) {
-				const struct pci_bar *next_bar = &pbars[idx + 1U];
 
-				/* Upper 32-bit of 64-bit bar */
-				base = (uint64_t)(next_bar->reg.value);
-				base <<= 32U;
+/**
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
+ * @pre vdev->pdev != NULL
+ */
+static void remap_one_vmsix_entry(const struct pci_vdev *vdev, uint32_t index)
+{
+	const struct msix_table_entry *ventry;
+	struct msix_table_entry *pentry;
+	struct msi_info info = {};
+	int32_t ret;
 
-				/* Lower 32-bit of a 64-bit bar (BITS 31-4 = base address, 16-byte aligned) */
-				tmp = (uint64_t)(bar->reg.bits.mem.base);
-				tmp <<= 4U;
+	mask_one_msix_vector(vdev, index);
+	ventry = &vdev->msix.table_entries[index];
+	if ((ventry->vector_control & PCIM_MSIX_VCTRL_MASK) == 0U) {
+		info.addr.full = vdev->msix.table_entries[index].addr;
+		info.data.full = vdev->msix.table_entries[index].data;
 
-				base |= tmp;
+		ret = ptirq_prepare_msix_remap(vpci2vm(vdev->vpci), vdev->bdf.value, vdev->pdev->bdf.value,
+					       (uint16_t)index, &info, INVALID_IRTE_ID);
+		if (ret == 0) {
+			/* Write the table entry to the physical structure */
+			pentry = get_msix_table_entry(vdev, index);
+
+			/*
+			 * PCI 3.0 Spec allows writing to Message Address and Message Upper Address
+			 * fields with a single QWORD write, but some hardware can accept 32 bits
+			 * write only
+			 */
+			stac();
+			mmio_write32((uint32_t)(info.addr.full), (void *)&(pentry->addr));
+			mmio_write32((uint32_t)(info.addr.full >> 32U), (void *)((char *)&(pentry->addr) + 4U));
+
+			mmio_write32(info.data.full, (void *)&(pentry->data));
+			mmio_write32(vdev->msix.table_entries[index].vector_control, (void *)&(pentry->vector_control));
+			clac();
+		}
+	}
+
+}
+
+/**
+ * @pre io_req != NULL
+ * @pre priv_data != NULL
+ */
+static int32_t pt_vmsix_handle_table_mmio_access(struct io_request *io_req, void *priv_data)
+{
+	struct acrn_mmio_request *mmio = &io_req->reqs.mmio_request;
+	struct pci_vdev *vdev;
+	uint32_t index;
+	int32_t ret = 0;
+
+	vdev = (struct pci_vdev *)priv_data;
+	if (vdev->user == vdev) {
+		index = rw_vmsix_table(vdev, io_req);
+
+		if ((mmio->direction == ACRN_IOREQ_DIR_WRITE) && (index < vdev->msix.table_count)) {
+			if (vdev->msix.is_vmsix_on_msi) {
+				remap_one_vmsix_entry_on_msi(vdev, index);
+			} else {
+				remap_one_vmsix_entry(vdev, index);
 			}
-			break;
-
-		default:
-			/* Nothing to do */
-			break;
 		}
-	}
-
-	return base;
-}
-
-/**
- * @brief get vbar's full base address in 64-bit
- * For 64-bit MMIO bar, its lower 32-bits base address and upper 32-bits base are combined
- * into one 64-bit base address
- * @pre vdev != NULL
- */
-static uint64_t get_vbar_base(const struct pci_vdev *vdev, uint32_t idx)
-{
-	return pci_bar_2_bar_base(&vdev->bar[0], vdev->nr_bars, idx);
-}
-
-/**
- * @brief get pbar's full address in 64-bit
- * For 64-bit MMIO bar, its lower 32-bits base address and upper 32-bits base are combined
- * into one 64-bit base address
- * @pre pdev != NULL
- */
-static uint64_t get_pbar_base(const struct pci_pdev *pdev, uint32_t idx)
-{
-	return pci_bar_2_bar_base(&pdev->bar[0], pdev->nr_bars, idx);
-}
-
-/**
- * @pre vdev != NULL
- */
-void vdev_pt_read_cfg(const struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t *val)
-{
-	/* bar access must be 4 bytes and offset must also be 4 bytes aligned */
-	if ((bytes == 4U) && ((offset & 0x3U) == 0U)) {
-		*val = pci_vdev_read_cfg(vdev, offset, bytes);
 	} else {
-		*val = ~0U;
+		ret = -EFAULT;
 	}
+
+	return ret;
 }
 
-/**
-* @pre vdev != NULL
-* @pre vdev->vpci != NULL
-* @pre vdev->vpci->vm != NULL
-* @pre vdev->pdev != NULL
-* @pre vdev->pdev->msix.table_bar < vdev->nr_bars
-*/
-static void vdev_pt_remap_msix_table_vbar(struct pci_vdev *vdev)
+/*
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
+ */
+static void vdev_pt_unmap_msix(struct pci_vdev *vdev)
 {
 	uint32_t i;
+	uint64_t addr_hi, addr_lo;
 	struct pci_msix *msix = &vdev->msix;
-	struct pci_pdev *pdev = vdev->pdev;
-	struct pci_bar *pbar;
-
-	ASSERT(vdev->pdev->msix.table_bar < vdev->nr_bars, "msix->table_bar is out of range");
 
 	/* Mask all table entries */
 	for (i = 0U; i < msix->table_count; i++) {
@@ -162,159 +169,82 @@ static void vdev_pt_remap_msix_table_vbar(struct pci_vdev *vdev)
 		msix->table_entries[i].data = 0U;
 	}
 
-	pbar = &pdev->bar[msix->table_bar];
-	if (pbar != NULL) {
-		uint64_t pbar_base = get_pbar_base(pdev, msix->table_bar); /* pbar (hpa) */
-
-		msix->mmio_hpa = pbar_base;
-		if (is_prelaunched_vm(vdev->vpci->vm)) {
-			msix->mmio_gpa = get_vbar_base(vdev, msix->table_bar);
-		} else {
-			msix->mmio_gpa = sos_vm_hpa2gpa(pbar_base);
-		}
-		msix->mmio_size = pbar->size;
-	}
-
-	/*
-	 *    For SOS:
-	 *    --------
-	 *    MSI-X Table BAR Contains:
-	 *    Other Info + Tables + PBA	        Other info already mapped into EPT (since SOS)
-	 *    					Tables are handled by HV MMIO handler (4k adjusted up and down)
-	 *    						and remaps interrupts
-	 *    					PBA already mapped into EPT (since SOS)
-	 *
-	 *    Other Info + Tables		Other info already mapped into EPT (since SOS)
-	 *					Tables are handled by HV MMIO handler (4k adjusted up and down)
-	 *						and remaps interrupts
-	 *
-	 *    Tables				Tables are handled by HV MMIO handler (4k adjusted up and down)
-	 *    						and remaps interrupts
-	 *
-	 *    For UOS (launched by DM):
-	 *    -------------------------
-	 *    MSI-X Table BAR Contains:
-	 *    Other Info + Tables + PBA		Other info  mapped into EPT (4k adjusted) by DM
-	 *    					Tables are handled by DM MMIO handler (4k adjusted up and down) and SOS writes to tables,
-	 *    						intercepted by HV MMIO handler and HV remaps interrupts
-	 *    					PBA already mapped into EPT by DM
-	 *
-	 *    Other Info + Tables		Other info mapped into EPT by DM
-	 *    					Tables are handled by DM MMIO handler (4k adjusted up and down) and SOS writes to tables,
-	 *    						intercepted by HV MMIO handler and HV remaps interrupts.
-	 *
-	 *    Tables				Tables are handled by DM MMIO handler (4k adjusted up and down) and SOS writes to tables,
-	 *    						intercepted by HV MMIO handler and HV remaps interrupts.
-	 *
-	 *    For Pre-launched VMs (no SOS/DM):
-	 *    --------------------------------
-	 *    MSI-X Table BAR Contains:
-	 *    All 3 cases:			Writes to MMIO region in MSI-X Table BAR handled by HV MMIO handler
-	 *    					If the offset falls within the MSI-X table [offset, offset+tables_size), HV remaps
-	 *    						interrupts.
-	 *    					Else, HV writes/reads to/from the corresponding HPA
-	 */
-
-
 	if (msix->mmio_gpa != 0UL) {
-		uint64_t addr_hi, addr_lo;
-
-		if (is_prelaunched_vm(vdev->vpci->vm)) {
-			addr_hi = msix->mmio_gpa + msix->mmio_size;
-			addr_lo = msix->mmio_gpa;
-		} else {
-			/*
-			* PCI Spec: a BAR may also map other usable address space that is not associated
-			* with MSI-X structures, but it must not share any naturally aligned 4 KB
-			* address range with one where either MSI-X structure resides.
-			* The MSI-X Table and MSI-X PBA are permitted to co-reside within a naturally
-			* aligned 4 KB address range.
-			*
-			* If PBA or others reside in the same BAR with MSI-X Table, devicemodel could
-			* emulate them and maps these memory range at the 4KB boundary. Here, we should
-			* make sure only intercept the minimum number of 4K pages needed for MSI-X table.
-			*/
-
-			/* The higher boundary of the 4KB aligned address range for MSI-X table */
-			addr_hi = msix->mmio_gpa + msix->table_offset + (msix->table_count * MSIX_TABLE_ENTRY_SIZE);
-			addr_hi = round_page_up(addr_hi);
-
-			/* The lower boundary of the 4KB aligned address range for MSI-X table */
-			addr_lo = round_page_down(msix->mmio_gpa + msix->table_offset);
-		}
-
-		if (vdev->bar_base_mapped[msix->table_bar] != addr_lo) {
-			register_mmio_emulation_handler(vdev->vpci->vm, vmsix_table_mmio_access_handler,
-				addr_lo, addr_hi, vdev);
-			/* Remember the previously registered MMIO vbar base */
-			vdev->bar_base_mapped[msix->table_bar] = addr_lo;
-		}
+		addr_lo = msix->mmio_gpa + msix->table_offset;
+		addr_hi = addr_lo + (msix->table_count * MSIX_TABLE_ENTRY_SIZE);
+		addr_lo = round_page_down(addr_lo);
+		addr_hi = round_page_up(addr_hi);
+		unregister_mmio_emulation_handler(vpci2vm(vdev->vpci), addr_lo, addr_hi);
+		msix->mmio_gpa = 0UL;
 	}
 }
 
-/**
- * @brief Remaps guest MMIO BARs other than MSI-x Table BAR
- * This API is invoked upon guest re-programming PCI BAR with MMIO region
- * after a new vbar is set.
+/*
  * @pre vdev != NULL
  * @pre vdev->vpci != NULL
- * @pre vdev->vpci->vm != NULL
  */
-static void vdev_pt_remap_generic_mem_vbar(struct pci_vdev *vdev, uint32_t idx)
+void vdev_pt_map_msix(struct pci_vdev *vdev, bool hold_lock)
 {
-	struct acrn_vm *vm = vdev->vpci->vm;
-	struct pci_bar *vbar;
-	uint64_t vbar_base = get_vbar_base(vdev, idx); /* vbar (gpa) */
+	struct pci_vbar *vbar;
+	uint64_t addr_hi, addr_lo;
+	struct pci_msix *msix = &vdev->msix;
 
-	vbar = &vdev->bar[idx];
+	vbar = &vdev->vbars[msix->table_bar];
+	if (vbar->base_gpa != 0UL) {
+		struct acrn_vm *vm = vpci2vm(vdev->vpci);
 
-	/* If the old vbar is mapped before, unmap it first */
-	if (vdev->bar_base_mapped[idx] != 0UL) {
-		ept_del_mr(vm, (uint64_t *)(vm->arch_vm.nworld_eptp),
-			vdev->bar_base_mapped[idx], /* GPA (old vbar) */
-			vbar->size);
-		vdev->bar_base_mapped[idx] = 0UL;
-	}
-
-	/* If a new vbar is set (nonzero), set the EPT mapping accordingly */
-	if (vbar_base != 0UL) {
-		uint64_t hpa = gpa2hpa(vdev->vpci->vm, vbar_base);
-		uint64_t pbar_base = get_pbar_base(vdev->pdev, idx); /* pbar (hpa) */
-
-		if (hpa != pbar_base) {
-			/* Unmap the existing mapping for new vbar */
-			if (hpa != INVALID_HPA) {
-				ept_del_mr(vm, (uint64_t *)(vm->arch_vm.nworld_eptp),
-				vbar_base, /* GPA (new vbar) */
-				vbar->size);
-			}
-
-			/* Map the physical BAR in the guest MMIO space */
-			ept_add_mr(vm, (uint64_t *)(vm->arch_vm.nworld_eptp),
-				pbar_base, /* HPA (pbar) */
-				vbar_base, /* GPA (new vbar) */
-				vbar->size,
-				EPT_WR | EPT_RD | EPT_UNCACHED);
-
-			/* Remember the previously mapped MMIO vbar */
-			vdev->bar_base_mapped[idx] = vbar_base;
-		}
+		addr_lo = vbar->base_gpa + msix->table_offset;
+		addr_hi = addr_lo + (msix->table_count * MSIX_TABLE_ENTRY_SIZE);
+		addr_lo = round_page_down(addr_lo);
+		addr_hi = round_page_up(addr_hi);
+		register_mmio_emulation_handler(vm, pt_vmsix_handle_table_mmio_access,
+				addr_lo, addr_hi, vdev, hold_lock);
+		ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, addr_lo, addr_hi - addr_lo);
+		msix->mmio_gpa = vbar->base_gpa;
 	}
 }
 
 /**
  * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
  */
-static void vdev_pt_remap_mem_vbar(struct pci_vdev *vdev, uint32_t idx)
+static void vdev_pt_unmap_mem_vbar(struct pci_vdev *vdev, uint32_t idx)
 {
-	bool is_msix_table_bar;
+	struct pci_vbar *vbar = &vdev->vbars[idx];
 
-	is_msix_table_bar = (has_msix_cap(vdev) && (idx == vdev->msix.table_bar));
+	if (vbar->base_gpa != 0UL) {
+		struct acrn_vm *vm = vpci2vm(vdev->vpci);
 
-	if (is_msix_table_bar) {
-		vdev_pt_remap_msix_table_vbar(vdev);
-	} else {
-		vdev_pt_remap_generic_mem_vbar(vdev, idx);
+		ept_del_mr(vm, (uint64_t *)(vm->arch_vm.nworld_eptp),
+			vbar->base_gpa, /* GPA (old vbar) */
+			vbar->size);
+	}
+
+	if ((has_msix_cap(vdev) && (idx == vdev->msix.table_bar))) {
+		vdev_pt_unmap_msix(vdev);
+	}
+}
+
+/**
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
+ */
+static void vdev_pt_map_mem_vbar(struct pci_vdev *vdev, uint32_t idx)
+{
+	struct pci_vbar *vbar = &vdev->vbars[idx];
+
+	if (vbar->base_gpa != 0UL) {
+		struct acrn_vm *vm = vpci2vm(vdev->vpci);
+
+		ept_add_mr(vm, (uint64_t *)(vm->arch_vm.nworld_eptp),
+			vbar->base_hpa, /* HPA (pbar) */
+			vbar->base_gpa, /* GPA (new vbar) */
+			vbar->size,
+			EPT_WR | EPT_RD | EPT_UNCACHED);
+	}
+
+	if (has_msix_cap(vdev) && (idx == vdev->msix.table_bar)) {
+		vdev_pt_map_msix(vdev, true);
 	}
 }
 
@@ -322,127 +252,50 @@ static void vdev_pt_remap_mem_vbar(struct pci_vdev *vdev, uint32_t idx)
  * @brief Allow IO bar access
  * @pre vdev != NULL
  * @pre vdev->vpci != NULL
- * @pre vdev->vpci->vm != NULL
  */
 static void vdev_pt_allow_io_vbar(struct pci_vdev *vdev, uint32_t idx)
 {
-	struct pci_bar *vbar;
-	uint64_t vbar_base = get_vbar_base(vdev, idx); /* vbar (gpa) */
-
-	vbar = &vdev->bar[idx];
+	struct acrn_vm *vm = vpci2vm(vdev->vpci);
 
 	/* For SOS, all port IO access is allowed by default, so skip SOS here */
-	if ((vdev->bar_base_mapped[idx] != vbar_base) && !is_sos_vm(vdev->vpci->vm)) {
-		if (vdev->bar_base_mapped[idx] != 0UL) {
-			deny_guest_pio_access(vdev->vpci->vm, (uint16_t)(vdev->bar_base_mapped[idx]),
-				(uint32_t)(vbar->size));
+	if (!is_sos_vm(vm)) {
+		struct pci_vbar *vbar = &vdev->vbars[idx];
+		if (vbar->base_gpa != 0UL) {
+			allow_guest_pio_access(vm, (uint16_t)vbar->base_gpa, (uint32_t)(vbar->size));
 		}
-
-		allow_guest_pio_access(vdev->vpci->vm, (uint16_t)vbar_base, (uint32_t)(vbar->size));
-
-		/* Remember the previously allowed IO vbar base */
-		vdev->bar_base_mapped[idx] = vbar_base;
 	}
 }
 
 /**
- * @brief Set the base address portion of the vbar base address register (32-bit)
- * base: bar value with flags portion masked off
- * @pre vbar != NULL
+ * @brief Deny IO bar access
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
  */
-static void set_vbar_base(struct pci_bar *vbar, uint32_t base)
+static void vdev_pt_deny_io_vbar(struct pci_vdev *vdev, uint32_t idx)
 {
-	union pci_bar_reg bar_reg;
+	struct acrn_vm *vm = vpci2vm(vdev->vpci);
 
-	bar_reg.value = base;
+	/* For SOS, all port IO access is allowed by default, so skip SOS here */
+	if (!is_sos_vm(vm)) {
+		struct pci_vbar *vbar = &vdev->vbars[idx];
+		if (vbar->base_gpa != 0UL) {
+			deny_guest_pio_access(vm, (uint16_t)(vbar->base_gpa), (uint32_t)(vbar->size));
+		}
 
-	if (vbar->is_64bit_high) {
-		/* Upper 32-bit of a 64-bit bar does not have the flags portion */
-		vbar->reg.value = bar_reg.value;
-	} else if (vbar->reg.bits.io.is_io == 1U) {
-		/* IO bar, BITS 31-2 = base address, 4-byte aligned */
-		vbar->reg.bits.io.base = bar_reg.bits.io.base;
-	} else {
-		/* MMIO bar, BITS 31-4 = base address, 16-byte aligned */
-		vbar->reg.bits.mem.base = bar_reg.bits.mem.base;
 	}
 }
 
 /**
  * @pre vdev != NULL
  */
-static void vdev_pt_write_vbar(struct pci_vdev *vdev, uint32_t offset, uint32_t val)
+void vdev_pt_write_vbar(struct pci_vdev *vdev, uint32_t idx, uint32_t val)
 {
-	uint32_t idx;
-	uint64_t base;
-	bool bar_update_normal;
-	struct pci_bar *vbar;
+	struct pci_vbar *vbar = &vdev->vbars[idx];
 
-	base = 0UL;
-	idx = (offset - pci_bar_offset(0U)) >> 2U;
-	bar_update_normal = (val != (uint32_t)~0U);
-
-	vbar = &vdev->bar[idx];
-
-	if (vbar->is_64bit_high) {
-		if (idx > 0U) {
-			uint32_t prev_idx = idx - 1U;
-
-			base = git_size_masked_bar_base(vdev->bar[prev_idx].size, ((uint64_t)val) << 32U) >> 32U;
-			set_vbar_base(vbar, (uint32_t)base);
-
-			if (bar_update_normal) {
-				vdev_pt_remap_mem_vbar(vdev, prev_idx);
-			}
-		} else {
-			ASSERT(false, "idx for upper 32-bit of the 64-bit bar should be greater than 0!");
-		}
-	} else {
-		enum pci_bar_type type = pci_get_bar_type(vbar->reg.value);
-
-		switch (type) {
-		case PCIBAR_IO_SPACE:
-			base = git_size_masked_bar_base(vbar->size, (uint64_t)val) & 0xffffUL;
-			set_vbar_base(vbar, (uint32_t)base);
-
-			if (bar_update_normal) {
-				vdev_pt_allow_io_vbar(vdev, idx);
-			}
-			break;
-
-		case PCIBAR_MEM32:
-			base = git_size_masked_bar_base(vbar->size, (uint64_t)val);
-			set_vbar_base(vbar, (uint32_t)base);
-
-			if (bar_update_normal) {
-				vdev_pt_remap_mem_vbar(vdev, idx);
-			}
-			break;
-
-		case PCIBAR_MEM64:
-			base = git_size_masked_bar_base(vbar->size, (uint64_t)val);
-			set_vbar_base(vbar, (uint32_t)base);
-			break;
-
-		default:
-			/* Nothing to do */
-			break;
-		}
-	}
-
-	/* Write the vbar value to corresponding virtualized vbar reg */
-	pci_vdev_write_cfg_u32(vdev, offset, vbar->reg.value);
-}
-
-/**
- * @pre vdev != NULL
- * bar write access must be 4 bytes and offset must also be 4 bytes aligned, it will be dropped otherwise
- */
-void vdev_pt_write_cfg(struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t val)
-{
-	/* bar write access must be 4 bytes and offset must also be 4 bytes aligned */
-	if ((bytes == 4U) && ((offset & 0x3U) == 0U)) {
-		vdev_pt_write_vbar(vdev, offset, val);
+	if (is_pci_io_bar(vbar)) {
+		vpci_update_one_vbar(vdev, idx, val, vdev_pt_allow_io_vbar, vdev_pt_deny_io_vbar);
+	} else if (is_pci_mem_bar(vbar)) {
+		vpci_update_one_vbar(vdev, idx, val, vdev_pt_map_mem_vbar, vdev_pt_unmap_mem_vbar);
 	}
 }
 
@@ -466,84 +319,259 @@ void vdev_pt_write_cfg(struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, u
  * Hypervisor traps guest changes to the mmio vbar (gpa) to establish ept mapping
  * between vbar(gpa) and pbar(hpa). pbar should always align on 4K boundary.
  *
+ * @param vdev         Pointer to a vdev structure
+ * @param is_sriov_bar When the first parameter vdev is a SRIOV PF vdev, the function
+ *                     init_bars is used to initialize normal PCIe BARs of PF vdev if the
+ *                     parameter is_sriov_bar is false, the function init_bars is used to
+ *                     initialize SRIOV VF BARs of PF vdev if parameter is_sriov_bar is true
+ *                     Otherwise, the parameter is_sriov_bar should be false if the first
+ *                     parameter vdev is not SRIOV PF vdev
+ *
  * @pre vdev != NULL
  * @pre vdev->vpci != NULL
- * @pre vdev->vpci->vm != NULL
  * @pre vdev->pdev != NULL
+ *
+ * @return None
  */
-void init_vdev_pt(struct pci_vdev *vdev)
+static void init_bars(struct pci_vdev *vdev, bool is_sriov_bar)
 {
-	uint32_t idx;
-	struct pci_bar *pbar, *vbar;
-	uint16_t pci_command;
-	uint64_t vbar_base;
+	uint32_t idx, bar_cnt;
+	struct pci_vbar *vbar;
+	uint32_t size32, offset, lo, hi = 0U;
+	union pci_bdf pbdf;
+	uint64_t mask;
 
-	vdev->nr_bars = vdev->pdev->nr_bars;
+	if (is_sriov_bar) {
+		bar_cnt = PCI_BAR_COUNT;
+	} else {
+		vdev->nr_bars = vdev->pdev->nr_bars;
+		bar_cnt = vdev->nr_bars;
+	}
+	pbdf.value = vdev->pdev->bdf.value;
 
-	ASSERT(vdev->nr_bars > 0U, "vdev->nr_bars should be greater than 0!");
-
-	for (idx = 0U; idx < vdev->nr_bars; idx++) {
-		pbar = &vdev->pdev->bar[idx];
-		vbar = &vdev->bar[idx];
-
-		vbar->size = 0UL;
-		vbar->reg.value = pbar->reg.value;
-		vbar->is_64bit_high = pbar->is_64bit_high;
-
-		if (pbar->is_64bit_high) {
-			ASSERT(idx > 0U, "idx for upper 32-bit of the 64-bit bar should be greater than 0!");
-
-			if (is_sos_vm(vdev->vpci->vm)) {
-				/* For SOS: vbar base (GPA) = pbar base (HPA) */
-				vbar_base = get_pbar_base(vdev->pdev, idx);
-			} else if (idx > 0U) {
-				/* For pre-launched VMs: vbar base is predefined in vm_config */
-				vbar_base = vdev->pci_dev_config->vbar_base[idx - 1U];
-			} else {
-				vbar_base = 0UL;
-			}
-			/* Write the upper 32-bit of a 64-bit bar */
-			vdev_pt_write_vbar(vdev, pci_bar_offset(idx), (uint32_t)(vbar_base >> 32U));
+	for (idx = 0U; idx < bar_cnt; idx++) {
+		if (is_sriov_bar) {
+			vbar = &vdev->sriov.vbars[idx];
+			offset = sriov_bar_offset(vdev, idx);
 		} else {
-			enum pci_bar_type type = pci_get_bar_type(pbar->reg.value);
+			vbar = &vdev->vbars[idx];
+			offset = pci_bar_offset(idx);
+		}
+		lo = pci_pdev_read_cfg(pbdf, offset, 4U);
+		vbar->bar_type.bits = lo;
 
-			switch (type) {
-			case PCIBAR_MEM32:
-			case PCIBAR_MEM64:
-				/**
-				 * If vbar->base is 0 (unassigned), Linux kernel will reprogram the vbar on
-				 * its bar size boundary, so in order to ensure the MMIO vbar allocated by guest
-				 * is 4k aligned, set its size to be 4K aligned.
-				 */
-				vbar->size = round_page_up(pbar->size);
+		if (is_pci_reserved_bar(vbar)) {
+			continue;
+		}
+		mask = (is_pci_io_bar(vbar)) ? PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK;
+		vbar->base_hpa = (uint64_t)lo & mask;
 
-				if (is_sos_vm(vdev->vpci->vm)) {
-					/* For SOS: vbar base (GPA) = pbar base (HPA) */
-					vbar_base = get_pbar_base(vdev->pdev, idx);
+		if (is_pci_mem64lo_bar(vbar)) {
+			hi = pci_pdev_read_cfg(pbdf, offset + 4U, 4U);
+			vbar->base_hpa |= ((uint64_t)hi << 32U);
+		}
+
+		if (vbar->base_hpa != 0UL) {
+			pci_pdev_write_cfg(pbdf, offset, 4U, ~0U);
+			size32 = pci_pdev_read_cfg(pbdf, offset, 4U);
+			pci_pdev_write_cfg(pbdf, offset, 4U, lo);
+
+			vbar->mask = size32 & mask;
+			vbar->bar_type.bits &= (~mask);
+			vbar->size = (uint64_t)size32 & mask;
+
+			if (is_prelaunched_vm(vpci2vm(vdev->vpci))) {
+				lo = (uint32_t)vdev->pci_dev_config->vbar_base[idx];
+			}
+
+			if (is_pci_mem64lo_bar(vbar)) {
+				idx++;
+				if (is_sriov_bar) {
+					offset = sriov_bar_offset(vdev, idx);
 				} else {
-					/* For pre-launched VMs: vbar base is predefined in vm_config */
-					vbar_base = vdev->pci_dev_config->vbar_base[idx];
+					offset = pci_bar_offset(idx);
 				}
-				vdev_pt_write_vbar(vdev, pci_bar_offset(idx), (uint32_t)vbar_base);
-				break;
+				pci_pdev_write_cfg(pbdf, offset, 4U, ~0U);
+				size32 = pci_pdev_read_cfg(pbdf, offset, 4U);
+				pci_pdev_write_cfg(pbdf, offset, 4U, hi);
 
-			case PCIBAR_IO_SPACE:
-				vbar->size = pbar->size;
-				vdev_pt_write_vbar(vdev, pci_bar_offset(idx), (uint32_t)get_pbar_base(vdev->pdev, idx));
-				break;
+				vbar->size |= ((uint64_t)size32 << 32U);
+				vbar->size = vbar->size & ~(vbar->size - 1UL);
+				vbar->size = round_page_up(vbar->size);
 
-			default:
-				/* Nothing to do in this case */
-				break;
+				if (is_sriov_bar) {
+					vbar = &vdev->sriov.vbars[idx];
+				} else {
+					vbar = &vdev->vbars[idx];
+				}
+
+				vbar->mask = size32;
+				vbar->is_mem64hi = true;
+
+				if (is_prelaunched_vm(vpci2vm(vdev->vpci))) {
+					hi = (uint32_t)(vdev->pci_dev_config->vbar_base[idx - 1U] >> 32U);
+				}
+				/* if it is parsing SRIOV VF BARs, no need to write vdev bars */
+				if (!is_sriov_bar) {
+					pci_vdev_write_vbar(vdev, idx - 1U, lo);
+					pci_vdev_write_vbar(vdev, idx, hi);
+				}
+			} else {
+				vbar->size = vbar->size & ~(vbar->size - 1UL);
+				if (is_pci_mem32_bar(vbar)) {
+					vbar->size = round_page_up(vbar->size);
+				}
+
+				/* if it is parsing SRIOV VF BARs, no need to write vdev bar */
+				if (!is_sriov_bar) {
+					pci_vdev_write_vbar(vdev, idx, lo);
+				}
 			}
 		}
 	}
 
-	if (is_prelaunched_vm(vdev->vpci->vm)) {
-		pci_command = (uint16_t)pci_pdev_read_cfg(vdev->pdev->bdf, PCIR_COMMAND, 2U);
+	/* Initialize MSIx mmio hpa and size after BARs initialization */
+	if (has_msix_cap(vdev) && (!is_sriov_bar)) {
+		vdev->msix.mmio_hpa = vdev->vbars[vdev->msix.table_bar].base_hpa;
+		vdev->msix.mmio_size = vdev->vbars[vdev->msix.table_bar].size;
+	}
+}
 
-		/* Disable INTX */
-		pci_command |= 0x400U;
-		pci_pdev_write_cfg(vdev->pdev->bdf, PCIR_COMMAND, 2U, pci_command);
+/**
+ * @pre vdev != NULL
+ * @pre vdev->pdev != NULL
+ */
+void init_vmsix_pt(struct pci_vdev *vdev)
+{
+	struct pci_pdev *pdev = vdev->pdev;
+
+	vdev->msix.capoff = pdev->msix.capoff;
+	vdev->msix.caplen = pdev->msix.caplen;
+	vdev->msix.table_bar = pdev->msix.table_bar;
+	vdev->msix.table_offset = pdev->msix.table_offset;
+	vdev->msix.table_count = pdev->msix.table_count;
+
+	if (has_msix_cap(vdev)) {
+		(void)memcpy_s((void *)&vdev->cfgdata.data_8[pdev->msix.capoff], pdev->msix.caplen,
+			(void *)&pdev->msix.cap[0U], pdev->msix.caplen);
+	}
+}
+
+/**
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
+ */
+void deinit_vmsix_pt(struct pci_vdev *vdev)
+{
+	if (has_msix_cap(vdev)) {
+		if (vdev->msix.table_count != 0U) {
+			ptirq_remove_msix_remapping(vpci2vm(vdev->vpci), vdev->pdev->bdf.value, vdev->msix.table_count);
+			(void)memset((void *)&vdev->msix.table_entries, 0U, sizeof(vdev->msix.table_entries));
+			vdev->msix.is_vmsix_on_msi_programmed = false;
+		}
+	}
+}
+
+void vdev_pt_hide_sriov_cap(struct pci_vdev *vdev)
+{
+	uint32_t pre_pos = vdev->pdev->sriov.pre_pos;
+	uint32_t pre_hdr, hdr, vhdr;
+
+	pre_hdr = pci_pdev_read_cfg(vdev->pdev->bdf, pre_pos, 4U);
+	hdr = pci_pdev_read_cfg(vdev->pdev->bdf, vdev->pdev->sriov.capoff, 4U);
+
+	vhdr = pre_hdr & 0xfffffU;
+	vhdr |= hdr & 0xfff00000U;
+	pci_vdev_write_vcfg(vdev, pre_pos, 4U, vhdr);
+	vdev->pdev->sriov.hide_sriov = true;
+
+	pr_acrnlog("Hide sriov cap for %02x:%02x.%x", vdev->pdev->bdf.bits.b, vdev->pdev->bdf.bits.d, vdev->pdev->bdf.bits.f);
+}
+/*
+ * @brief Initialize a specified passthrough vdev structure.
+ *
+ * The function init_vdev_pt is used to initialize a vdev structure. If a vdev structure supports
+ * SRIOV capability that the vdev represents a SRIOV physical function(PF) virtual device, then
+ * function init_vdev_pt can initialize PF vdev SRIOV capability if parameter is_pf_vdev is true.
+ *
+ * @param vdev        pointer to vdev data structure
+ * @param is_pf_vdev  indicate the first parameter vdev is the data structure of a PF, which contains
+ *                    the SR-IOV capability
+ *
+ * @pre vdev != NULL
+ * @pre vdev->vpci != NULL
+ * @pre vdev->pdev != NULL
+ *
+ * @return None
+ */
+void init_vdev_pt(struct pci_vdev *vdev, bool is_pf_vdev)
+{
+	uint16_t pci_command;
+	uint32_t offset;
+
+	for (offset = 0U; offset < PCI_CFG_HEADER_LENGTH; offset += 4U) {
+		pci_vdev_write_vcfg(vdev, offset, 4U, pci_pdev_read_cfg(vdev->pdev->bdf, offset, 4U));
+	}
+
+	/* Initialize the vdev BARs except SRIOV VF, VF BARs are initialized directly from create_vf function */
+	if (vdev->phyfun == NULL) {
+		init_bars(vdev, is_pf_vdev);
+		init_vmsix_on_msi(vdev);
+		if (is_prelaunched_vm(vpci2vm(vdev->vpci)) && (!is_pf_vdev)) {
+			pci_command = (uint16_t)pci_pdev_read_cfg(vdev->pdev->bdf, PCIR_COMMAND, 2U);
+
+			/* Disable INTX */
+			pci_command |= 0x400U;
+			pci_pdev_write_cfg(vdev->pdev->bdf, PCIR_COMMAND, 2U, pci_command);
+		}
+	} else {
+		if (vdev->phyfun->vpci != vdev->vpci) {
+			/* VF is assigned to a UOS */
+			uint32_t vid, did;
+
+			vdev->nr_bars = PCI_BAR_COUNT;
+			/* SRIOV VF Vendor ID and Device ID initialization */
+			vid = pci_pdev_read_cfg(vdev->phyfun->bdf, PCIR_VENDOR, 2U);
+			did = pci_pdev_read_cfg(vdev->phyfun->bdf,
+				(vdev->phyfun->sriov.capoff + PCIR_SRIOV_VF_DEV_ID), 2U);
+			pci_vdev_write_vcfg(vdev, PCIR_VENDOR, 2U, vid);
+			pci_vdev_write_vcfg(vdev, PCIR_DEVICE, 2U, did);
+		} else {
+			/* VF is unassinged  */
+			uint32_t bar_idx;
+
+			for (bar_idx = 0U; bar_idx < vdev->nr_bars; bar_idx++) {
+				vdev_pt_map_mem_vbar(vdev, bar_idx);
+			}
+		}
+	}
+
+	if (!is_sos_vm(vpci2vm(vdev->vpci)) && (has_sriov_cap(vdev))) {
+		vdev_pt_hide_sriov_cap(vdev);
+	}
+
+}
+
+/*
+ * @brief Destruct a specified passthrough vdev structure.
+ *
+ * The function deinit_vdev_pt is the destructor corresponding to the function init_vdev_pt.
+ *
+ * @param vdev  pointer to vdev data structure
+ *
+ * @pre vdev != NULL
+ *
+ * @return None
+ */
+void deinit_vdev_pt(struct pci_vdev *vdev) {
+
+	/* Check if the vdev is an unassigned SR-IOV VF device */
+	if ((vdev->phyfun != NULL) && (vdev->phyfun->vpci == vdev->vpci)) {
+		uint32_t bar_idx;
+
+		/* Delete VF MMIO from EPT table since the VF physical device has gone */
+		for (bar_idx = 0U; bar_idx < vdev->nr_bars; bar_idx++) {
+			vdev_pt_unmap_mem_vbar(vdev, bar_idx);
+		}
 	}
 }

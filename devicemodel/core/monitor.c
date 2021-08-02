@@ -211,7 +211,7 @@ int acrn_parse_intr_monitor(const char *opt)
 		(!dm_strtoui(cp + 1, &cp, 10, &period) && *cp == ',') &&
 		(!dm_strtoui(cp + 1, &cp, 10, &delay) && *cp == ',') &&
 		(!dm_strtoui(cp + 1, &cp, 10, &duration))) {
-		pr_info("interrupt storm monitor params: %d, %d, %d, %d\n", threshold, period, delay, duration);
+		pr_dbg("interrupt storm monitor params: %d, %d, %d, %d\n", threshold, period, delay, duration);
 	} else {
 		pr_err("%s: not correct, it should be like: --intr_monitor 10000,10,1,100, please check!\n", opt);
 		return -1;
@@ -338,8 +338,6 @@ static void name(struct mngr_msg *msg, int client_fd, void *param)	\
 }
 
 DEFINE_HANDLER(handle_suspend, suspend);
-DEFINE_HANDLER(handle_pause, pause);
-DEFINE_HANDLER(handle_continue, unpause);
 
 static void handle_stop(struct mngr_msg *msg, int client_fd, void *param)
 {
@@ -352,7 +350,8 @@ static void handle_stop(struct mngr_msg *msg, int client_fd, void *param)
 	ack.msgid = msg->msgid;
 	ack.timestamp = msg->timestamp;
 
-	if (msg->data.acrnd_stop.force) {
+	if (msg->data.acrnd_stop.force && !is_rtvm) {
+		pr_info("%s: setting VM state to %s\n", __func__, vm_state_to_str(VM_SUSPEND_POWEROFF));
 		vm_set_suspend_mode(VM_SUSPEND_POWEROFF);
 		ack.data.err = 0;
 	} else {
@@ -444,7 +443,7 @@ static void handle_blkrescan(struct mngr_msg *msg, int client_fd, void *param)
 
 	if (!count) {
 		ack.data.err = -1;
-		fprintf(stderr, "No handler for id:%u\r\n", msg->msgid);
+		pr_err("No handler for id:%u\r\n", msg->msgid);
 	} else
 		ack.data.err = ret;
 
@@ -489,8 +488,6 @@ int monitor_init(struct vmctx *ctx)
 	ret += mngr_add_handler(monitor_fd, DM_STOP, handle_stop, NULL);
 	ret += mngr_add_handler(monitor_fd, DM_SUSPEND, handle_suspend, NULL);
 	ret += mngr_add_handler(monitor_fd, DM_RESUME, handle_resume, NULL);
-	ret += mngr_add_handler(monitor_fd, DM_PAUSE, handle_pause, NULL);
-	ret += mngr_add_handler(monitor_fd, DM_CONTINUE, handle_continue, NULL);
 	ret += mngr_add_handler(monitor_fd, DM_QUERY, handle_query, NULL);
 	ret += mngr_add_handler(monitor_fd, DM_BLKRESCAN, handle_blkrescan, NULL);
 

@@ -32,6 +32,9 @@
 #include <string.h>
 #include <stdbool.h>
 #include <sys/errno.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "dm.h"
 #include "vmmapi.h"
@@ -202,7 +205,7 @@ lpc_init(struct vmctx *ctx)
 		if (uart_legacy_alloc(unit,
 				      &lpc_uart->iobase,
 				      &lpc_uart->irq) != 0) {
-			fprintf(stderr, "Unable to allocate resources for "
+			pr_err("Unable to allocate resources for "
 			    "LPC device %s\n", name);
 			goto init_failed;
 		}
@@ -401,7 +404,7 @@ pci_lpc_init(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
 	 * Do not allow more than one LPC bridge to be configured.
 	 */
 	if (lpc_bridge != NULL) {
-		fprintf(stderr, "Only one LPC bridge is allowed.\n");
+		pr_err("Only one LPC bridge is allowed.\n");
 		return -1;
 	}
 
@@ -411,7 +414,7 @@ pci_lpc_init(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
 	 * all legacy i/o ports behind bus 0.
 	 */
 	if (pi->bus != 0) {
-		fprintf(stderr, "LPC bridge can be present only on bus 0.\n");
+		pr_err("LPC bridge can be present only on bus 0.\n");
 		return -1;
 	}
 
@@ -467,6 +470,42 @@ lpc_pirq_routed(void)
 		pci_set_cfgdata8(lpc_bridge, 0x68 + pin, pirq_read(pin + 5));
 }
 
+static int
+pci_igd_lpc_init(struct vmctx *ctx, struct pci_vdev *pi, char *opts)
+{
+	int fd;
+	uint8_t host_config[PCI_REGMAX+1];
+	int ret;
+
+	fd = open("/sys/bus/pci/devices/0000:00:1f.0/config", O_RDONLY);
+	if (fd == -1) {
+		pr_err("lpcbridge:open host pci config failed\n");
+		return -1;
+	}
+
+	ret = pread(fd, host_config, PCI_REGMAX+1, 0);
+	if (ret <= PCI_REGMAX) {
+		pr_err("failed to read lpcbridge config space\n");
+		return -1;
+	}
+
+	close(fd);
+
+	/*
+	 * The VID, DID, REVID, SUBVID, SUBDID of igd-lpc need aligned with physical one.
+	 * Without these physical values, gvt-d GOP driver couldn't work.
+	 */
+	pci_set_cfgdata16(pi, PCIR_DEVICE, *(uint16_t *)(host_config + PCIR_DEVICE));
+	pci_set_cfgdata16(pi, PCIR_VENDOR, *(uint16_t *)(host_config + PCIR_VENDOR));
+	pci_set_cfgdata8(pi, PCIR_REVID, host_config[PCIR_REVID]);
+	pci_set_cfgdata16(pi, PCIR_SUBVEND_0, *(uint16_t *)(host_config + PCIR_SUBVEND_0));
+	pci_set_cfgdata16(pi, PCIR_SUBDEV_0, *(uint16_t *)(host_config + PCIR_SUBDEV_0));
+
+	pci_set_cfgdata8(pi, PCIR_CLASS, PCIC_BRIDGE);
+	pci_set_cfgdata8(pi, PCIR_SUBCLASS, PCIS_BRIDGE_ISA);
+	return 0;
+}
+
 struct pci_vdev_ops pci_ops_lpc = {
 	.class_name		= "lpc",
 	.vdev_init		= pci_lpc_init,
@@ -477,3 +516,14 @@ struct pci_vdev_ops pci_ops_lpc = {
 	.vdev_barread		= pci_lpc_read
 };
 DEFINE_PCI_DEVTYPE(pci_ops_lpc);
+
+/*
+ * Intel Graphics Device(IGD) passthrough on Windows guest has the restriction
+ * that it need a lpc bridge device located in 00:1f.0 PCI slot.
+ * Here, create an extra lpc class for this restriction.
+ */
+struct pci_vdev_ops pci_ops_igd_lpc = {
+	.class_name	= "igd-lpc",
+	.vdev_init	= pci_igd_lpc_init,
+};
+DEFINE_PCI_DEVTYPE(pci_ops_igd_lpc);

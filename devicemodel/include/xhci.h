@@ -190,6 +190,15 @@ struct xhci_endp_ctx {
 	volatile uint32_t	dwEpCtx7;
 };
 
+#define XHCI_EPTYPE_INVALID	0
+#define XHCI_EPTYPE_ISOC_OUT	1
+#define XHCI_EPTYPE_BULK_OUT	2
+#define XHCI_EPTYPE_INT_OUT	3
+#define XHCI_EPTYPE_CTRL	4
+#define XHCI_EPTYPE_ISOC_IN	5
+#define XHCI_EPTYPE_BULK_IN	6
+#define XHCI_EPTYPE_INT_IN	7
+
 struct xhci_input_ctx {
 #define	XHCI_INCTX_NON_CTRL_MASK	0xFFFFFFFCU
 	volatile uint32_t	dwInCtx0;
@@ -366,15 +375,35 @@ struct xhci_trb {
 #define	XHCI_TRB_ERROR_SPLIT_XACT	0x24
 } __aligned(8);
 
+/*
+ * The Block Event Interrupt (BEI) bit in the TRB descriptor could
+ * delay the triggering of interrupt. For most OSes, the native
+ * driver for xHCI will use this bit to optimize the IO performence,
+ * due to reduction of number of interrupts.
+ *
+ * But in Linux, the native xHCI driver for Intel brand controller
+ * doesn't use this bit. It is fine for the native scenario due to
+ * most work is completed by hardware. But in virtualization scenario,
+ * it is almost impossible to support heavy data IO such as high
+ * resolution video recording (ISOC transfer).
+ *
+ * Hence, this issue is solved by a 'quirk' when the intel hardware is
+ * emulated (when vendor id is set as 0x8086). For other cases, a
+ * virtal hardware called 'ACRN xHCI' is emulated, and both Linux and
+ * Windows will use BEI bit by default.
+ */
+#define XHCI_QUIRK_INTEL_ISOCH_NO_BEI	(1 << 0)
+
 struct xhci_dev_endpoint_trbs {
 	struct xhci_trb		trb[(XHCI_MAX_STREAMS *
 	    XHCI_MAX_TRANSFERS) + XHCI_MAX_STREAMS];
 };
 
-struct xhci_event_ring_seg {
-	volatile uint64_t	qwEvrsTablePtr;
-	volatile uint32_t	dwEvrsTableSize;
-	volatile uint32_t	dwEvrsReserved;
+
+struct xhci_erst {
+	volatile uint64_t	qwRingSegBase;
+	volatile uint32_t	dwRingSegSize;
+	volatile uint32_t	dwRingSegRsv;
 };
 
 #endif /* _XHCI_H_ */

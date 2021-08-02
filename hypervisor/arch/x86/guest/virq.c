@@ -6,19 +6,22 @@
 
 #include <types.h>
 #include <errno.h>
-#include <bits.h>
-#include <irq.h>
-#include <lapic.h>
-#include <mmu.h>
-#include <vmx.h>
-#include <vcpu.h>
-#include <vm.h>
+#include <asm/lib/bits.h>
+#include <asm/guest/virq.h>
+#include <asm/lapic.h>
+#include <asm/mmu.h>
+#include <asm/vmx.h>
+#include <asm/guest/vcpu.h>
+#include <asm/guest/vmcs.h>
+#include <asm/guest/vm.h>
+#include <asm/guest/lock_instr_emul.h>
 #include <trace.h>
 #include <logmsg.h>
+#include <asm/irq.h>
 
 #define EXCEPTION_ERROR_CODE_VALID  8U
 
-#define ACRN_DBG_INTR	6U
+#define DBG_LEVEL_INTR	6U
 
 #define EXCEPTION_CLASS_BENIGN	1
 #define EXCEPTION_CLASS_CONT	2
@@ -29,6 +32,17 @@
 #define EXCEPTION_TRAP		1U
 #define EXCEPTION_ABORT		2U
 #define EXCEPTION_INTERRUPT	3U
+
+/* RFLAGS */
+#define HV_ARCH_VCPU_RFLAGS_TF              (1UL<<8U)
+#define HV_ARCH_VCPU_RFLAGS_IF              (1UL<<9U)
+#define HV_ARCH_VCPU_RFLAGS_RF              (1UL<<16U)
+
+/* Interruptability State info */
+
+#define HV_ARCH_VCPU_BLOCKED_BY_NMI         (1UL<<3U)
+#define HV_ARCH_VCPU_BLOCKED_BY_MOVSS       (1UL<<1U)
+#define HV_ARCH_VCPU_BLOCKED_BY_STI         (1UL<<0U)
 
 static const uint16_t exception_type[32] = {
 	[0] = VMX_INT_TYPE_HW_EXP,
@@ -104,21 +118,19 @@ static bool is_guest_irq_enabled(struct acrn_vcpu *vcpu)
 	return status;
 }
 
+static inline bool is_nmi_injectable(void)
+{
+	uint64_t guest_state;
+
+	guest_state = exec_vmread32(VMX_GUEST_INTERRUPTIBILITY_INFO);
+
+	return ((guest_state & (HV_ARCH_VCPU_BLOCKED_BY_STI |
+		HV_ARCH_VCPU_BLOCKED_BY_MOVSS | HV_ARCH_VCPU_BLOCKED_BY_NMI)) == 0UL);
+}
 void vcpu_make_request(struct acrn_vcpu *vcpu, uint16_t eventid)
 {
 	bitmap_set_lock(eventid, &vcpu->arch.pending_req);
-	/*
-	 * if current hostcpu is not the target vcpu's hostcpu, we need
-	 * to invoke IPI to wake up target vcpu
-	 *
-	 * TODO: Here we just compare with cpuid, since cpuid currently is
-	 *  global under pCPU / vCPU 1:1 mapping. If later we enabled vcpu
-	 *  scheduling, we need change here to determine it target vcpu is
-	 *  VMX non-root or root mode
-	 */
-	if (get_pcpu_id() != vcpu->pcpu_id) {
-		send_single_ipi(vcpu->pcpu_id, VECTOR_NOTIFY_VCPU);
-	}
+	kick_vcpu(vcpu);
 }
 
 /*
@@ -136,12 +148,12 @@ static bool vcpu_do_pending_extint(const struct acrn_vcpu *vcpu)
 
 	/* check if there is valid interrupt from vPIC, if yes just inject it */
 	/* PIC only connect with primary CPU */
-	primary = vcpu_from_vid(vm, BOOT_CPU_ID);
+	primary = vcpu_from_vid(vm, BSP_CPU_ID);
 	if (vcpu == primary) {
 
 		vpic_pending_intr(vm_pic(vcpu->vm), &vector);
 		if (vector <= NR_MAX_VECTOR) {
-			dev_dbg(ACRN_DBG_INTR, "VPIC: to inject PIC vector %d\n",
+			dev_dbg(DBG_LEVEL_INTR, "VPIC: to inject PIC vector %d\n",
 					vector & 0xFFU);
 			exec_vmwrite32(VMX_ENTRY_INT_INFO_FIELD,
 					VMX_INT_INFO_VALID |
@@ -212,16 +224,35 @@ int32_t vcpu_queue_exception(struct acrn_vcpu *vcpu, uint32_t vector_arg, uint32
 			} else {
 				arch->exception_info.error = 0U;
 			}
-			vcpu_make_request(vcpu, ACRN_REQUEST_EXCP);
+
+			if ((vector == IDT_NMI) && is_notification_nmi(vcpu->vm)) {
+				/*
+				 * Currently, ACRN doesn't support vNMI well and there is no well-designed
+				 * way to check if the NMI is for notification or not. Here we take all the
+				 * NMIs as notification NMI for lapic-pt VMs temporarily.
+				 *
+				 * TODO: Add a way in is_notification_nmi to check the NMI is for notification
+				 *       or not in order to support vNMI.
+				 */
+				pr_dbg("This NMI is used as notification signal. So ignore it.");
+			} else {
+				vcpu_make_request(vcpu, ACRN_REQUEST_EXCP);
+			}
 		}
 	}
 
 	return ret;
 }
 
-static void vcpu_inject_exception(struct acrn_vcpu *vcpu, uint32_t vector)
+/*
+ * @pre vcpu->arch.exception_info.exception < 0x20U
+ */
+static bool vcpu_inject_exception(struct acrn_vcpu *vcpu)
 {
+	bool injected = false;
+
 	if (bitmap_test_and_clear_lock(ACRN_REQUEST_EXCP, &vcpu->arch.pending_req)) {
+		uint32_t vector = vcpu->arch.exception_info.exception;
 	
 		if ((exception_type[vector] & EXCEPTION_ERROR_CODE_VALID) != 0U) {
 			exec_vmwrite32(VMX_ENTRY_EXCEPTION_ERROR_CODE,
@@ -233,8 +264,10 @@ static void vcpu_inject_exception(struct acrn_vcpu *vcpu, uint32_t vector)
 
 		vcpu->arch.exception_info.exception = VECTOR_INVALID;
 
-		/* retain rip for exception injection */
-		vcpu_retain_rip(vcpu);
+		/* If this is a fault, we should retain the RIP */
+		if (get_exception_type(vector) == EXCEPTION_FAULT) {
+			vcpu_retain_rip(vcpu);
+		}
 
 		/* SDM 17.3.1.1 For any fault-class exception except a debug exception generated in response to an
 		 * instruction breakpoint, the value pushed for RF is 1.
@@ -243,31 +276,8 @@ static void vcpu_inject_exception(struct acrn_vcpu *vcpu, uint32_t vector)
 		if (get_exception_type(vector) == EXCEPTION_FAULT) {
 			vcpu_set_rflags(vcpu, vcpu_get_rflags(vcpu) | HV_ARCH_VCPU_RFLAGS_RF);
 		}
-	}
-}
 
-static bool vcpu_inject_hi_exception(struct acrn_vcpu *vcpu)
-{
-	bool injected = false;
-	uint32_t vector = vcpu->arch.exception_info.exception;
-
-	if ((vector == IDT_MC) || (vector == IDT_BP) || (vector == IDT_DB)) {
-		vcpu_inject_exception(vcpu, vector);
-		 injected = true;
-	}
-
-	return injected;
-}
-
-static bool vcpu_inject_lo_exception(struct acrn_vcpu *vcpu)
-{
-	uint32_t vector = vcpu->arch.exception_info.exception;
-	bool injected = false;
-
-	/* high priority exception already be injected */
-	if (vector <= NR_MAX_VECTOR) {
-		vcpu_inject_exception(vcpu, vector);
-	        injected = true;
+		injected = true;
 	}
 
 	return injected;
@@ -277,12 +287,14 @@ static bool vcpu_inject_lo_exception(struct acrn_vcpu *vcpu)
 void vcpu_inject_extint(struct acrn_vcpu *vcpu)
 {
 	vcpu_make_request(vcpu, ACRN_REQUEST_EXTINT);
+	signal_event(&vcpu->events[VCPU_EVENT_VIRTUAL_INTERRUPT]);
 }
 
 /* Inject NMI to guest */
 void vcpu_inject_nmi(struct acrn_vcpu *vcpu)
 {
 	vcpu_make_request(vcpu, ACRN_REQUEST_NMI);
+	signal_event(&vcpu->events[VCPU_EVENT_VIRTUAL_INTERRUPT]);
 }
 
 /* Inject general protection exception(#GP) to guest */
@@ -312,17 +324,14 @@ void vcpu_inject_ss(struct acrn_vcpu *vcpu)
 
 int32_t interrupt_window_vmexit_handler(struct acrn_vcpu *vcpu)
 {
-	uint32_t value32;
-
 	TRACE_2L(TRACE_VMEXIT_INTERRUPT_WINDOW, 0UL, 0UL);
 
 	/* Disable interrupt-window exiting first.
 	 * acrn_handle_pending_request will continue handle for this vcpu
 	 */
 	vcpu->arch.irq_window_enabled = false;
-	value32 = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS);
-	value32 &= ~(VMX_PROCBASED_CTLS_IRQ_WIN);
-	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, value32);
+	vcpu->arch.proc_vm_exec_ctrls &= ~(VMX_PROCBASED_CTLS_IRQ_WIN);
+	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, vcpu->arch.proc_vm_exec_ctrls);
 
 	vcpu_retain_rip(vcpu);
 	return 0;
@@ -357,24 +366,38 @@ int32_t external_interrupt_vmexit_handler(struct acrn_vcpu *vcpu)
 	return ret;
 }
 
-static inline bool acrn_inject_pending_intr(struct acrn_vcpu *vcpu,
+static inline void acrn_inject_pending_intr(struct acrn_vcpu *vcpu,
 		uint64_t *pending_req_bits, bool injected);
 
 int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 {
 	bool injected = false;
 	int32_t ret = 0;
-	uint32_t tmp;
 	struct acrn_vcpu_arch *arch = &vcpu->arch;
 	uint64_t *pending_req_bits = &arch->pending_req;
+
+	/* make sure ACRN_REQUEST_INIT_VMCS handler as the first one */
+	if (bitmap_test_and_clear_lock(ACRN_REQUEST_INIT_VMCS, pending_req_bits)) {
+		init_vmcs(vcpu);
+	}
 
 	if (bitmap_test_and_clear_lock(ACRN_REQUEST_TRP_FAULT, pending_req_bits)) {
 		pr_fatal("Triple fault happen -> shutdown!");
 		ret = -EFAULT;
 	} else {
+		if (bitmap_test_and_clear_lock(ACRN_REQUEST_WAIT_WBINVD, pending_req_bits)) {
+			wait_event(&vcpu->events[VCPU_EVENT_SYNC_WBINVD]);
+		}
+
+		if (bitmap_test_and_clear_lock(ACRN_REQUEST_SPLIT_LOCK, pending_req_bits)) {
+			wait_event(&vcpu->events[VCPU_EVENT_SPLIT_LOCK]);
+		}
 
 		if (bitmap_test_and_clear_lock(ACRN_REQUEST_EPT_FLUSH, pending_req_bits)) {
-			invept(vcpu);
+			invept(vcpu->vm->arch_vm.nworld_eptp);
+			if (vcpu->vm->sworld_control.flag.active != 0UL) {
+				invept(vcpu->vm->arch_vm.sworld_eptp);
+			}
 		}
 
 		if (bitmap_test_and_clear_lock(ACRN_REQUEST_VPID_FLUSH,	pending_req_bits)) {
@@ -385,16 +408,23 @@ int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 			vcpu_set_vmcs_eoi_exit(vcpu);
 		}
 
-		/* SDM Vol 3 - table 6-2, inject high priority exception before
-		 * maskable hardware interrupt */
-		injected = vcpu_inject_hi_exception(vcpu);
+		/*
+		 * Inject pending exception prior pending interrupt to complete the previous instruction.
+		 */
+		injected = vcpu_inject_exception(vcpu);
 		if (!injected) {
 			/* inject NMI before maskable hardware interrupt */
+
 			if (bitmap_test_and_clear_lock(ACRN_REQUEST_NMI, pending_req_bits)) {
-				/* Inject NMI vector = 2 */
-				exec_vmwrite32(VMX_ENTRY_INT_INFO_FIELD,
-						VMX_INT_INFO_VALID | (VMX_INT_TYPE_NMI << 8U) | IDT_NMI);
-				injected = true;
+				if (is_nmi_injectable()) {
+					/* Inject NMI vector = 2 */
+					exec_vmwrite32(VMX_ENTRY_INT_INFO_FIELD,
+							VMX_INT_INFO_VALID | (VMX_INT_TYPE_NMI << 8U) | IDT_NMI);
+					injected = true;
+				} else {
+					/* keep the NMI request for next vmexit */
+					bitmap_set_lock(ACRN_REQUEST_NMI, pending_req_bits);
+				}
 			} else {
 				/* handling pending vector injection:
 				 * there are many reason inject failed, we need re-inject again
@@ -411,10 +441,12 @@ int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 			}
 		}
 
-		if (!acrn_inject_pending_intr(vcpu, pending_req_bits, injected)) {
-			/* if there is no eligible vector before this point */
-			/* SDM Vol3 table 6-2, inject lowpri exception */
-			(void)vcpu_inject_lo_exception(vcpu);
+		/*
+		 * Defer injection of interrupt to be after MTF VM exit,
+		 * when emulating the split-lock.
+		 */
+		if (!vcpu->arch.emulating_lock) {
+			acrn_inject_pending_intr(vcpu, pending_req_bits, injected);
 		}
 
 		/*
@@ -431,11 +463,16 @@ int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 		 * deliver is disabled.
 		 */
 		if (!arch->irq_window_enabled) {
+			/*
+			 * TODO: Currently, NMI exiting and virtual NMIs are not enabled,
+			 * so use interrupt window to inject NMI.
+			 * After enable virtual NMIs, we can use NMI-Window
+			 */
 			if (bitmap_test(ACRN_REQUEST_EXTINT, pending_req_bits) ||
+				bitmap_test(ACRN_REQUEST_NMI, pending_req_bits) ||
 				vlapic_has_pending_delivery_intr(vcpu)) {
-				tmp = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS);
-				tmp |= VMX_PROCBASED_CTLS_IRQ_WIN;
-				exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, tmp);
+				vcpu->arch.proc_vm_exec_ctrls |= VMX_PROCBASED_CTLS_IRQ_WIN;
+				exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, vcpu->arch.proc_vm_exec_ctrls);
 				arch->irq_window_enabled = true;
 			}
 		}
@@ -444,11 +481,7 @@ int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 	return ret;
 }
 
-/*
- * @retval true 1 when INT is injected to guest.
- * @retval false when there is no eligible pending vector.
- */
-static inline bool acrn_inject_pending_intr(struct acrn_vcpu *vcpu,
+static inline void acrn_inject_pending_intr(struct acrn_vcpu *vcpu,
 		uint64_t *pending_req_bits, bool injected)
 {
 	bool ret = injected;
@@ -463,10 +496,8 @@ static inline bool acrn_inject_pending_intr(struct acrn_vcpu *vcpu,
 	}
 
 	if (bitmap_test_and_clear_lock(ACRN_REQUEST_EVENT, pending_req_bits)) {
-		ret = vlapic_inject_intr(vcpu_vlapic(vcpu), guest_irq_enabled, ret);
+		vlapic_inject_intr(vcpu_vlapic(vcpu), guest_irq_enabled, ret);
 	}
-
-	return ret;
 }
 
 /*
@@ -478,6 +509,7 @@ int32_t exception_vmexit_handler(struct acrn_vcpu *vcpu)
 	uint32_t exception_vector = VECTOR_INVALID;
 	uint32_t cpl;
 	int32_t status = 0;
+	bool queue_exception;
 
 	pr_dbg(" Handling guest exception");
 
@@ -504,10 +536,11 @@ int32_t exception_vmexit_handler(struct acrn_vcpu *vcpu)
 		}
 	}
 
-	/* Handle all other exceptions */
-	vcpu_retain_rip(vcpu);
-
-	status = vcpu_queue_exception(vcpu, exception_vector, int_err_code);
+	status = emulate_lock_instr(vcpu, exception_vector, &queue_exception);
+	if ((status == 0) && queue_exception) {
+		vcpu_retain_rip(vcpu);
+		status = vcpu_queue_exception(vcpu, exception_vector, int_err_code);
+	}
 
 	if (exception_vector == IDT_MC) {
 		/* just print error message for #MC, it then will be injected
@@ -519,4 +552,18 @@ int32_t exception_vmexit_handler(struct acrn_vcpu *vcpu)
 			exception_vector, int_err_code, 2U, 0U);
 
 	return status;
+}
+
+int32_t nmi_window_vmexit_handler(struct acrn_vcpu *vcpu)
+{
+	/*
+	 * Disable NMI-window exiting here. We will process
+	 * the pending request in acrn_handle_pending_request later
+	 */
+	vcpu->arch.proc_vm_exec_ctrls &= ~VMX_PROCBASED_CTLS_NMI_WINEXIT;
+	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, vcpu->arch.proc_vm_exec_ctrls);
+
+	vcpu_retain_rip(vcpu);
+
+	return 0;
 }

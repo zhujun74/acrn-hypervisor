@@ -27,23 +27,68 @@
  * SUCH DAMAGE.
  *
  * $FreeBSD$
+ *
+ * Only support Type 0 and Type 1 PCI(e) device. Remove PC-Card type support.
+ *
  */
 #include <types.h>
-#include <spinlock.h>
-#include <io.h>
+#include <asm/lib/spinlock.h>
+#include <asm/io.h>
+#include <asm/pgtable.h>
+#include <asm/mmu.h>
 #include <pci.h>
 #include <uart16550.h>
 #include <logmsg.h>
-#include <pci_dev.h>
+#include <asm/pci_dev.h>
+#include <asm/vtd.h>
+#include <asm/lib/bits.h>
+#include <asm/board.h>
+#include <platform_acpi_info.h>
+#include <hash.h>
+#include <util.h>
 
-static spinlock_t pci_device_lock;
+#define PDEV_HLIST_HASHBITS 6U
+#define PDEV_HLIST_HASHSIZE (1U << PDEV_HLIST_HASHBITS)
+
 static uint32_t num_pci_pdev;
-static struct pci_pdev pci_pdev_array[CONFIG_MAX_PCI_DEV_NUM];
+static struct pci_pdev pci_pdevs[CONFIG_MAX_PCI_DEV_NUM];
+static struct hlist_head pdevs_hlist_heads[PDEV_HLIST_HASHSIZE];
 
-static void init_pdev(uint16_t pbdf);
+/* For HV owned pdev */
+static uint32_t num_hv_owned_pci_pdev;
+static struct pci_pdev *hv_owned_pci_pdevs[CONFIG_MAX_PCI_DEV_NUM];
 
+uint32_t get_hv_owned_pdev_num(void)
+{
+	return num_hv_owned_pci_pdev;
+}
 
-static uint32_t pci_pdev_calc_address(union pci_bdf bdf, uint32_t offset)
+const struct pci_pdev **get_hv_owned_pdevs(void)
+{
+	return (const struct pci_pdev **)hv_owned_pci_pdevs;
+}
+
+static struct pci_mmcfg_region phys_pci_mmcfg = {
+	.address = DEFAULT_PCI_MMCFG_BASE,
+	.start_bus = DEFAULT_PCI_MMCFG_START_BUS,
+	.end_bus = DEFAULT_PCI_MMCFG_END_BUS,
+};
+
+#ifdef CONFIG_ACPI_PARSE_ENABLED
+void set_mmcfg_region(struct pci_mmcfg_region *region)
+{
+	phys_pci_mmcfg = *region;
+}
+#endif
+
+struct pci_mmcfg_region *get_mmcfg_region(void)
+{
+	return &phys_pci_mmcfg;
+}
+
+#if defined(HV_DEBUG)
+static inline uint32_t pio_off_to_address(union pci_bdf bdf, uint32_t offset)
+
 {
 	uint32_t addr = (uint32_t)bdf.value;
 
@@ -52,14 +97,12 @@ static uint32_t pci_pdev_calc_address(union pci_bdf bdf, uint32_t offset)
 	return addr;
 }
 
-uint32_t pci_pdev_read_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes)
+static uint32_t pci_pio_read_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes)
 {
 	uint32_t addr;
 	uint32_t val;
 
-	addr = pci_pdev_calc_address(bdf, offset);
-
-	spinlock_obtain(&pci_device_lock);
+	addr = pio_off_to_address(bdf, offset);
 
 	/* Write address to ADDRESS register */
 	pio_write32(addr, (uint16_t)PCI_CONFIG_ADDR);
@@ -76,18 +119,13 @@ uint32_t pci_pdev_read_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes)
 		val = pio_read32((uint16_t)PCI_CONFIG_DATA);
 		break;
 	}
-	spinlock_release(&pci_device_lock);
 
 	return val;
 }
 
-void pci_pdev_write_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes, uint32_t val)
+static void pci_pio_write_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes, uint32_t val)
 {
-	uint32_t addr;
-
-	spinlock_obtain(&pci_device_lock);
-
-	addr = pci_pdev_calc_address(bdf, offset);
+	uint32_t addr = pio_off_to_address(bdf, offset);
 
 	/* Write address to ADDRESS register */
 	pio_write32(addr, (uint16_t)PCI_CONFIG_ADDR);
@@ -104,7 +142,194 @@ void pci_pdev_write_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes, uint
 		pio_write32(val, (uint16_t)PCI_CONFIG_DATA);
 		break;
 	}
-	spinlock_release(&pci_device_lock);
+}
+#else
+static uint32_t pci_pio_read_cfg(__unused union pci_bdf bdf,
+		__unused uint32_t offset, __unused uint32_t bytes)
+{
+	return ~0U;
+}
+
+static void pci_pio_write_cfg(__unused union pci_bdf bdf,
+		__unused uint32_t offset, __unused uint32_t bytes, __unused uint32_t val)
+{
+}
+#endif
+
+static const struct pci_cfg_ops pci_pio_cfg_ops = {
+	.pci_read_cfg = pci_pio_read_cfg,
+	.pci_write_cfg = pci_pio_write_cfg,
+};
+
+/*
+ * @pre offset < 0x1000U
+ * @pre phys_pci_mmcfg.address 4K-byte alignment
+ */
+static inline uint32_t mmcfg_off_to_address(union pci_bdf bdf, uint32_t offset)
+{
+	return (uint32_t)phys_pci_mmcfg.address + (((uint32_t)bdf.value << 12U) | offset);
+}
+
+/*
+ * @pre bytes == 1U || bytes == 2U || bytes == 4U
+ * @pre offset 1-byte  alignment if byte == 1U
+ *             2-byte alignment if byte == 2U
+ *             4-byte alignment if byte == 4U
+ */
+static uint32_t pci_mmcfg_read_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes)
+{
+	uint32_t addr = mmcfg_off_to_address(bdf, offset);
+	void *hva = hpa2hva(addr);
+	uint32_t val;
+
+
+	ASSERT(pci_is_valid_access(offset, bytes), "the offset should be aligned with 2/4 byte\n");
+
+	switch (bytes) {
+	case 1U:
+		val = (uint32_t)mmio_read8(hva);
+		break;
+	case 2U:
+		val = (uint32_t)mmio_read16(hva);
+		break;
+	default:
+		val = mmio_read32(hva);
+		break;
+	}
+
+	return val;
+}
+
+/*
+ * @pre bytes == 1U || bytes == 2U || bytes == 4U
+ * @pre offset 1-byte alignment  if byte == 1U
+ *             2-byte alignment if byte == 2U
+ *             4-byte alignment if byte == 4U
+ */
+static void pci_mmcfg_write_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes, uint32_t val)
+{
+	uint32_t addr = mmcfg_off_to_address(bdf, offset);
+	void *hva = hpa2hva(addr);
+
+	ASSERT(pci_is_valid_access(offset, bytes), "the offset should be aligned with 2/4 byte\n");
+	switch (bytes) {
+	case 1U:
+		mmio_write8((uint8_t)val, hva);
+		break;
+	case 2U:
+		mmio_write16((uint16_t)val, hva);
+		break;
+	default:
+		mmio_write32(val, hva);
+		break;
+	}
+}
+
+static const struct pci_cfg_ops pci_mmcfg_cfg_ops = {
+	.pci_read_cfg = pci_mmcfg_read_cfg,
+	.pci_write_cfg = pci_mmcfg_write_cfg,
+};
+
+static const struct pci_cfg_ops *acrn_pci_cfg_ops = &pci_pio_cfg_ops;
+
+void pci_switch_to_mmio_cfg_ops(void)
+{
+	acrn_pci_cfg_ops = &pci_mmcfg_cfg_ops;
+}
+
+/*
+ * @pre bytes == 1U || bytes == 2U || bytes == 4U
+ * @pre must not be called before pci_switch_to_mmio_cfg_ops in release version.
+ */
+uint32_t pci_pdev_read_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes)
+{
+	uint32_t val = ~0U;
+
+	val = acrn_pci_cfg_ops->pci_read_cfg(bdf, offset, bytes);
+
+	return val;
+}
+
+/*
+ * @pre bytes == 1U || bytes == 2U || bytes == 4U
+ * @pre must not be called before pci_switch_to_mmio_cfg_ops in release version.
+ */
+void pci_pdev_write_cfg(union pci_bdf bdf, uint32_t offset, uint32_t bytes, uint32_t val)
+{
+	acrn_pci_cfg_ops->pci_write_cfg(bdf, offset, bytes, val);
+}
+
+bool pdev_need_bar_restore(const struct pci_pdev *pdev)
+{
+	bool need_restore = false;
+	uint32_t idx, bar;
+
+	for (idx = 0U; idx < pdev->nr_bars; idx++) {
+		bar = pci_pdev_read_cfg(pdev->bdf, pci_bar_offset(idx), 4U);
+		if (bar != pdev->bars[idx].phy_bar) {
+			need_restore = true;
+			break;
+		}
+	}
+
+	return need_restore;
+}
+
+static void get_pci_bar_resource(union pci_bdf bdf, uint32_t offset, struct pci_bar_resource *res)
+{
+       res->phy_bar = pci_pdev_read_cfg(bdf, offset, 4U);
+
+       pci_pdev_write_cfg(bdf, offset, 4U, ~0U);
+       res->size_mask = pci_pdev_read_cfg(bdf, offset, 4U);
+       pci_pdev_write_cfg(bdf, offset, 4U, res->phy_bar);
+}
+
+static inline void pdev_save_bar(struct pci_pdev *pdev)
+{
+	uint32_t idx;
+
+	for (idx = 0U; idx < pdev->nr_bars; idx++) {
+		get_pci_bar_resource(pdev->bdf, pci_bar_offset(idx), &pdev->bars[idx]);
+	}
+}
+
+void pdev_restore_bar(const struct pci_pdev *pdev)
+{
+	uint32_t idx;
+
+	for (idx = 0U; idx < pdev->nr_bars; idx++) {
+		pci_pdev_write_cfg(pdev->bdf, pci_bar_offset(idx), 4U, pdev->bars[idx].phy_bar);
+	}
+}
+
+static const struct pci_pdev *pci_find_pdev(uint16_t pbdf)
+{
+	struct hlist_node *n;
+	const struct pci_pdev *found = NULL, *tmp;
+
+	hlist_for_each (n, &pdevs_hlist_heads[hash64(pbdf, PDEV_HLIST_HASHBITS)]) {
+		tmp = hlist_entry(n, struct pci_pdev, link);
+		if (pbdf == tmp->bdf.value) {
+			found = tmp;
+			break;
+		}
+	}
+	return found;
+}
+
+/* @brief: Find the DRHD index corresponding to a PCI device
+ * Runs through the pci_pdevs and returns the value in drhd_idx
+ * member from pdev structure that matches matches B:D.F
+ *
+ * @pbdf[in]	B:D.F of a PCI device
+ *
+ * @return if there is a matching pbdf in pci_pdevs, pdev->drhd_idx, else INVALID_DRHD_INDEX
+ */
+
+uint32_t pci_lookup_drhd_for_pbdf(uint16_t pbdf)
+{
+	const struct pci_pdev *pdev = pci_find_pdev(pbdf);
+	return (pdev != NULL) ? pdev->drhd_index : INVALID_DRHD_INDEX;
 }
 
 /* enable: 1: enable INTx; 0: Disable INTx */
@@ -125,84 +350,333 @@ void enable_disable_pci_intx(union pci_bdf bdf, bool enable)
 	}
 }
 
-#define BUS_SCAN_SKIP		0U
-#define BUS_SCAN_PENDING	1U
-#define BUS_SCAN_COMPLETE	2U
-void init_pci_pdev_list(void)
+bool is_plat_hidden_pdev(union pci_bdf bdf)
 {
+	static uint32_t hidden_pdevs_num = MAX_HIDDEN_PDEVS_NUM;
+	uint32_t hidden_idx;
+	bool hidden = false;
+
+	for (hidden_idx = 0U; hidden_idx < hidden_pdevs_num; hidden_idx++) {
+		if (bdf_is_equal(plat_hidden_pdevs[hidden_idx], bdf)) {
+			hidden = true;
+			break;
+		}
+	}
+
+	return hidden;
+}
+
+bool is_hv_owned_pdev(union pci_bdf pbdf)
+{
+	bool ret = false;
+	uint32_t i;
+
+	for (i = 0U; i < num_hv_owned_pci_pdev; i++) {
+		if (bdf_is_equal(pbdf, hv_owned_pci_pdevs[i]->bdf)) {
+			pr_info("hv owned dev: (%x:%x:%x)", pbdf.bits.b, pbdf.bits.d, pbdf.bits.f);
+			ret = true;
+			break;
+		}
+	}
+	return ret;
+}
+
+/*
+ * quantity of uint64_t to encode a bitmap of all bus values
+ * TODO: PCI_BUSMAX is a good candidate to move to
+ * generated platform files.
+ */
+#define BUSES_BITMAP_LEN        ((PCI_BUSMAX + 1U) >> 6U)
+
+/*
+ * must be >= total Endpoints in all DRDH devscope
+ * TODO: BDF_MAPPING_NUM is a good candidate to move to
+ * generated platform files.
+ */
+#define BDF_MAPPING_NUM			32U
+
+struct pci_bdf_to_drhd_index_mapping {
+	union pci_bdf dev_scope_bdf;
+	uint32_t dev_scope_drhd_index;
+};
+
+struct pci_bdf_mapping_group {
+	uint32_t pci_bdf_map_count;
+	struct pci_bdf_to_drhd_index_mapping bdf_map[BDF_MAPPING_NUM];
+};
+
+struct pci_bus_num_to_drhd_index_mapping {
+	uint8_t bus_under_scan;
+	uint32_t bus_drhd_index;
+};
+
+static uint32_t pci_check_override_drhd_index(union pci_bdf pbdf,
+		const struct pci_bdf_mapping_group *const bdfs_from_drhds,
+		uint32_t current_drhd_index)
+{
+	uint16_t bdfi;
+	uint32_t bdf_drhd_index = current_drhd_index;
+
+	for (bdfi = 0U; bdfi < bdfs_from_drhds->pci_bdf_map_count; bdfi++) {
+		if (bdfs_from_drhds->bdf_map[bdfi].dev_scope_bdf.value == pbdf.value) {
+			/*
+			 * Override current_drhd_index
+			 */
+			bdf_drhd_index =
+				bdfs_from_drhds->bdf_map[bdfi].dev_scope_drhd_index;
+		}
+	}
+
+	return bdf_drhd_index;
+}
+
+/* @brief: scan PCI physical devices from specific bus.
+ * walks through the bus to scan PCI physical devices and using the discovered physical devices
+ * to initialize pdevs, each pdev can only provdie a physical device information (like bdf, bar,
+ * capabilities) before using this pdev, it needs to use the pdev to initialize a per VM device
+ * configuration(acrn_vm_pci_dev_config), call init_one_dev_config or init_all_dev_config to do this.
+ */
+static void scan_pci_hierarchy(uint8_t bus, uint64_t buses_visited[BUSES_BITMAP_LEN],
+		const struct pci_bdf_mapping_group *const bdfs_from_drhds, uint32_t drhd_index)
+{
+	uint32_t vendor;
+	uint8_t hdr_type, dev, func, func_max;
 	union pci_bdf pbdf;
-	uint8_t hdr_type, secondary_bus, dev, func;
-	uint32_t bus, val;
-	uint8_t bus_to_scan[PCI_BUSMAX + 1] = { BUS_SCAN_SKIP };
+	uint8_t current_bus_index;
+	uint32_t current_drhd_index, bdf_drhd_index;
+	struct pci_pdev *pdev;
 
-	/* start from bus 0 */
-	bus_to_scan[0U] = BUS_SCAN_PENDING;
+	struct pci_bus_num_to_drhd_index_mapping bus_map[PCI_BUSMAX + 1U]; /* FIFO queue of buses to walk */
+	uint32_t s = 0U, e = 0U; /* start and end index into queue */
 
-	for (bus = 0U; bus <= PCI_BUSMAX; bus++) {
-		if (bus_to_scan[bus] != BUS_SCAN_PENDING) {
+	bus_map[e].bus_under_scan = bus;
+	bus_map[e].bus_drhd_index = drhd_index;
+	e = e + 1U;
+	while (s < e) {
+		current_bus_index = bus_map[s].bus_under_scan;
+		current_drhd_index = bus_map[s].bus_drhd_index;
+		s = s + 1U;
+
+		bitmap_set_nolock(current_bus_index,
+					&buses_visited[current_bus_index >> 6U]);
+
+		pbdf.bits.b = current_bus_index;
+		if (pbdf.bits.b < phys_pci_mmcfg.start_bus || pbdf.bits.b > phys_pci_mmcfg.end_bus) {
 			continue;
 		}
 
-		bus_to_scan[bus] = BUS_SCAN_COMPLETE;
-		pbdf.bits.b = (uint8_t)bus;
-
 		for (dev = 0U; dev <= PCI_SLOTMAX; dev++) {
 			pbdf.bits.d = dev;
+			pbdf.bits.f = 0U;
+			hdr_type = (uint8_t)pci_pdev_read_cfg(pbdf, PCIR_HDRTYPE, 1U);
 
-			for (func = 0U; func <= PCI_FUNCMAX; func++) {
+			/* Do not probe beyond function 0 if not a multi-function device
+			 * unless device supports ARI or SR-IOV (PCIe spec r5.0 §7.5.1.1.9)
+			 */
+			func_max = is_pci_cfg_multifunction(hdr_type) ? PCI_FUNCMAX : 0U;
+			for (func = 0U; func <= func_max; func++) {
+
 				pbdf.bits.f = func;
-				val = pci_pdev_read_cfg(pbdf, PCIR_VENDOR, 4U);
 
-				if ((val == 0xFFFFFFFFU) || (val == 0U) || (val == 0xFFFF0000U) || (val == 0xFFFFU)) {
-					/* If function 0 is not implemented, skip to next device */
-					if (func == 0U) {
-						break;
-					}
+				vendor = pci_pdev_read_cfg(pbdf, PCIR_VENDOR, 2U);
 
-					/* continue scan next function */
+				if (!is_pci_vendor_valid(vendor)) {
 					continue;
 				}
 
-				/* if it is debug uart, hide it from SOS */
-				if (is_pci_dbg_uart(pbdf)) {
-					pr_info("hide pci uart dev: (%x:%x:%x)", pbdf.bits.b, pbdf.bits.d, pbdf.bits.f);
-					continue;
-				}
-
-				init_pdev(pbdf.value);
-
-				hdr_type = (uint8_t)pci_pdev_read_cfg(pbdf, PCIR_HDRTYPE, 1U);
-				if ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_BRIDGE) {
-
-					/* Secondary bus to be scanned */
-					secondary_bus = (uint8_t)pci_pdev_read_cfg(pbdf, PCIR_SECBUS_1, 1U);
-					if (bus_to_scan[secondary_bus] != BUS_SCAN_SKIP) {
-						pr_err("%s, bus %d may be downstream of different PCI bridges",
-							__func__, secondary_bus);
-					} else {
-						bus_to_scan[secondary_bus] = BUS_SCAN_PENDING;
-					}
+				bdf_drhd_index = pci_check_override_drhd_index(pbdf, bdfs_from_drhds,
+									current_drhd_index);
+				pdev = pci_init_pdev(pbdf, bdf_drhd_index);
+				/* NOTE: This touch logic change: if a bridge own by HV as its children */
+				if ((pdev != NULL) && is_bridge(pdev)) {
+					bus_map[e].bus_under_scan =
+						(uint8_t)pci_pdev_read_cfg(pbdf, PCIR_SECBUS_1, 1U);
+					bus_map[e].bus_drhd_index = bdf_drhd_index;
+					e = e + 1U;
 				}
 			}
 		}
 	}
 }
 
-static uint32_t pci_pdev_get_nr_bars(uint8_t hdr_type)
+/*
+ * @brief: Setup bdfs_from_drhds data structure as the DMAR tables are walked searching
+ * for PCI device scopes. bdfs_from_drhds is used later in scan_pci_hierarchy
+ * to map the right DRHD unit to the PCI device
+ */
+static void pci_add_bdf_from_drhd(union pci_bdf bdf, struct pci_bdf_mapping_group *const bdfs_from_drhds,
+					uint32_t drhd_index)
+{
+	if (bdfs_from_drhds->pci_bdf_map_count < BDF_MAPPING_NUM) {
+		bdfs_from_drhds->bdf_map[bdfs_from_drhds->pci_bdf_map_count].dev_scope_bdf = bdf;
+		bdfs_from_drhds->bdf_map[bdfs_from_drhds->pci_bdf_map_count].dev_scope_drhd_index = drhd_index;
+		bdfs_from_drhds->pci_bdf_map_count++;
+	} else {
+		ASSERT(bdfs_from_drhds->pci_bdf_map_count < BDF_MAPPING_NUM,
+				"Compare value in BDF_MAPPING_NUM against those in ACPI DMAR tables");
+	}
+}
+
+
+/*
+ * @brief: Setup bdfs_from_drhds data structure as the DMAR tables are walked searching
+ * for PCI device scopes. bdfs_from_drhds is used later in scan_pci_hierarchy
+ * to map the right DRHD unit to the PCI device.
+ * TODO: bdfs_from_drhds is a good candidate to be part of generated platform
+ * info.
+ */
+static void pci_parse_iommu_devscopes(struct pci_bdf_mapping_group *const bdfs_from_drhds,
+						uint32_t *drhd_idx_pci_all)
+{
+	union pci_bdf bdf;
+	uint32_t drhd_index, devscope_index;
+
+	for (drhd_index = 0U; drhd_index < plat_dmar_info.drhd_count; drhd_index++) {
+		for (devscope_index = 0U; devscope_index < plat_dmar_info.drhd_units[drhd_index].dev_cnt;
+						devscope_index++) {
+			bdf.fields.bus = plat_dmar_info.drhd_units[drhd_index].devices[devscope_index].bus;
+			bdf.fields.devfun = plat_dmar_info.drhd_units[drhd_index].devices[devscope_index].devfun;
+
+			if ((plat_dmar_info.drhd_units[drhd_index].devices[devscope_index].type ==
+						ACPI_DMAR_SCOPE_TYPE_ENDPOINT) ||
+				(plat_dmar_info.drhd_units[drhd_index].devices[devscope_index].type ==
+						ACPI_DMAR_SCOPE_TYPE_BRIDGE)) {
+				pci_add_bdf_from_drhd(bdf, bdfs_from_drhds, drhd_index);
+			} else {
+				/*
+				 * Do nothing for IOAPIC, ACPI namespace and
+				 * MSI Capable HPET device scope
+				 */
+			}
+		}
+
+		if ((plat_dmar_info.drhd_units[drhd_index].flags & DRHD_FLAG_INCLUDE_PCI_ALL_MASK)
+				== DRHD_FLAG_INCLUDE_PCI_ALL_MASK) {
+			*drhd_idx_pci_all = drhd_index;
+		}
+	}
+}
+
+/*
+ * There are some rules to config PCI bridge: try to avoid interference between SOS and RTVM or
+ * pre-launched VM; and to support some features like SRIOV by default, so as following:
+ *	1. disable interrupt, including INTx and MSI.
+ *	2. enable ARI if it's a PCIe bridge and all its sub devices support ARI (need check further).
+ *  3. enable ACS. (now assume BIOS does it), could check and do it in HV in the future.
+ *
+ */
+static void	config_pci_bridge(const struct pci_pdev *pdev)
+{
+	uint32_t offset, val, msgctrl;
+
+	/* for command regsiters, disable INTx */
+	val = pci_pdev_read_cfg(pdev->bdf, PCIR_COMMAND, 2U);
+	pci_pdev_write_cfg(pdev->bdf, PCIR_COMMAND, 2U, (uint16_t)val | PCIM_CMD_INTxDIS);
+
+	/* disale MSI */
+	if (pdev->msi_capoff != 0x00UL) {
+		offset = pdev->msi_capoff + PCIR_MSI_CTRL;
+
+		msgctrl = pci_pdev_read_cfg(pdev->bdf, offset, 2U);
+		msgctrl &= ~PCIM_MSICTRL_MSI_ENABLE;
+		pci_pdev_write_cfg(pdev->bdf, offset, 2U, msgctrl);
+	}
+
+	/* Enable ARI if PCIe bridge could support it for SRIOV needs it */
+	if (pdev->pcie_capoff != 0x00UL) {
+		offset = pdev->pcie_capoff + PCIR_PCIE_DEVCAP2;
+		val = pci_pdev_read_cfg(pdev->bdf, offset, 2U);
+
+		if ((val & PCIM_PCIE_DEVCAP2_ARI) != 0U) {
+			offset = pdev->pcie_capoff + PCIR_PCIE_DEVCTL2;
+
+			val = pci_pdev_read_cfg(pdev->bdf, offset, 2U);
+			val |= PCIM_PCIE_DEVCTL2_ARI;
+			pci_pdev_write_cfg(pdev->bdf, offset, 2U, val);
+		}
+	}
+}
+
+/*
+ * @brief: walks through all pdevs that have been initialized and determine
+ * which pdevs need to be added to pci dev_config. The pdevs added to pci
+ * dev_config will be exposed to SOS finally.
+ */
+static void init_all_dev_config(void)
+{
+	uint32_t idx, cnt = 0U;
+	uint32_t total = num_pci_pdev;
+	struct pci_pdev *pdev = NULL;
+
+	for (idx = 0U; idx < num_pci_pdev; idx++) {
+		pdev = &pci_pdevs[idx];
+
+		if (is_bridge(pdev)) {
+			config_pci_bridge(pdev);
+		}
+
+		/*
+		 * FIXME: Mask the SR-IOV capability instead drop the device
+		 * when supporting PCIe extended capabilities whitelist.
+		 */
+		if (pdev->sriov.capoff != 0U) {
+			cnt = pci_pdev_read_cfg(pdev->bdf,
+				pdev->sriov.capoff + PCIR_SRIOV_TOTAL_VFS, 2U);
+			/*
+			 * For SRIOV-Capable device, drop the device
+			 * if no room for its all of virtual functions.
+			 */
+			if ((total + cnt) > CONFIG_MAX_PCI_DEV_NUM) {
+				pr_err("%s, %x:%x.%x is dropped since no room for %u VFs",
+						__func__, pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f, cnt);
+				continue;
+			} else {
+				total += cnt;
+			}
+		}
+		(void)init_one_dev_config(pdev);
+	}
+}
+
+/*
+ * @brief Walks the PCI heirarchy and initializes array of pci_pdev structs
+ * Uses DRHD info from ACPI DMAR tables to cover the endpoints and
+ * bridges along with their hierarchy captured in the device scope entries
+ * Walks through rest of the devices starting at bus 0 and thru PCI_BUSMAX
+ */
+void init_pci_pdev_list(void)
+{
+	uint64_t buses_visited[BUSES_BITMAP_LEN] = {0UL};
+	struct pci_bdf_mapping_group bdfs_from_drhds = {.pci_bdf_map_count = 0U};
+	uint32_t drhd_idx_pci_all = INVALID_DRHD_INDEX;
+	uint16_t bus;
+	bool was_visited = false;
+
+	set_paging_supervisor(phys_pci_mmcfg.address, get_pci_mmcfg_size(&phys_pci_mmcfg));
+
+	pci_parse_iommu_devscopes(&bdfs_from_drhds, &drhd_idx_pci_all);
+
+	/* TODO: iterate over list of PCI Host Bridges found in ACPI namespace */
+	for (bus = 0U; bus <= PCI_BUSMAX; bus++) {
+		was_visited = bitmap_test((bus & 0x3FU), &buses_visited[bus >> 6U]);
+		if (!was_visited) {
+			scan_pci_hierarchy((uint8_t)bus, buses_visited, &bdfs_from_drhds, drhd_idx_pci_all);
+		}
+	}
+	init_all_dev_config();
+}
+
+static inline uint32_t pci_pdev_get_nr_bars(uint8_t hdr_type)
 {
 	uint32_t nr_bars = 0U;
 
 	switch (hdr_type & PCIM_HDRTYPE) {
 	case PCIM_HDRTYPE_NORMAL:
-		nr_bars = 6U;
+		nr_bars = PCI_STD_NUM_BARS;
 		break;
 
 	case PCIM_HDRTYPE_BRIDGE:
 		nr_bars = 2U;
-		break;
-
-	case PCIM_HDRTYPE_CARDBUS:
-		nr_bars = 1U;
 		break;
 
 	default:
@@ -213,218 +687,209 @@ static uint32_t pci_pdev_get_nr_bars(uint8_t hdr_type)
 	return nr_bars;
 }
 
-/* Get the base address of the raw bar value (val) */
-static inline uint32_t pci_pdev_get_bar_base(uint32_t bar_val)
+/**
+ * @pre pdev != NULL
+ */
+static void pci_enable_ptm_root(struct pci_pdev *pdev, uint32_t pos)
 {
-	uint32_t base;
-	union pci_bar_reg reg;
+	uint32_t ctrl = 0, cap;
 
-	/* set raw bar value */
-	reg.value = bar_val;
+	cap = pci_pdev_read_cfg(pdev->bdf, pos + PCIR_PTM_CAP, PCI_PTM_CAP_LEN);
 
-	/* Extract base address portion from the raw bar value */
-	if (reg.bits.io.is_io != 0U) {
-		/* IO bar, BITS 31-2 = base address, 4-byte aligned */
-		base = (uint32_t)(reg.bits.io.base);
-		base <<= 2U;
+	if (cap & PCIM_PTM_CAP_ROOT_CAPABLE) {
+		ctrl = PCIM_PTM_CTRL_ENABLED | PCIM_PTM_CTRL_ROOT_SELECTED;
+
+		pci_pdev_write_cfg(pdev->bdf, pos + PCIR_PTM_CTRL, 4, ctrl);
+
+		ctrl = pci_pdev_read_cfg(pdev->bdf, pos + PCIR_PTM_CTRL, 4);
+
+		pr_acrnlog("ptm info [%x:%x.%x]: pos=%x, enabled=%d, root_select=%d, granularity=%d.\n",
+				pdev->bdf.bits.b, pdev->bdf.bits.d,
+				pdev->bdf.bits.f, pos, (ctrl & PCIM_PTM_CTRL_ENABLED) != 0,
+				(ctrl & PCIM_PTM_CTRL_ROOT_SELECTED) != 0,
+				(ctrl & PCIM_PTM_GRANULARITY_MASK) >> 8);
 	} else {
-		/* MMIO bar, BITS 31-4 = base address, 16-byte aligned */
-		base = (uint32_t)(reg.bits.mem.base);
-		base <<= 4U;
+		/* acrn doesn't support this hw config currently */
+		pr_err("%s: root port %x:%x.%x is not PTM root.\n", __func__,
+			 	pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f);
+
 	}
 
-	return base;
+	return;
 }
 
-/*
- * @pre bar != NULL
- */
-static uint32_t pci_pdev_read_bar(union pci_bdf bdf, uint32_t idx, struct pci_bar *bar)
-{
-	uint64_t base, size;
-	enum pci_bar_type type;
-	uint32_t bar_lo, bar_hi, size_lo;
-
-	bar->reg.value = pci_pdev_read_cfg(bdf, pci_bar_offset(idx), 4U);
-
-	base = 0UL;
-	size = 0UL;
-	type = pci_get_bar_type(bar->reg.value);
-	bar_hi = 0U;
-
-	if (type != PCIBAR_NONE) {
-		bar_lo = pci_pdev_read_cfg(bdf, pci_bar_offset(idx), 4U);
-
-		base = (uint64_t)pci_pdev_get_bar_base(bar_lo);
-
-		if (type == PCIBAR_MEM64) {
-			bar_hi = pci_pdev_read_cfg(bdf, pci_bar_offset(idx + 1U), 4U);
-			base |= ((uint64_t)bar_hi << 32U);
-		}
-
-		if (base != 0UL) {
-			/* Sizing the BAR */
-			if ((type == PCIBAR_MEM64) && (idx < (PCI_BAR_COUNT - 1U))) {
-				pci_pdev_write_cfg(bdf, pci_bar_offset(idx + 1U), 4U, ~0U);
-				size = (uint64_t)pci_pdev_read_cfg(bdf, pci_bar_offset(idx + 1U), 4U);
-				size <<= 32U;
-			}
-
-			pci_pdev_write_cfg(bdf, pci_bar_offset(idx), 4U, ~0U);
-			size_lo = pci_pdev_read_cfg(bdf, pci_bar_offset(idx), 4U);
-			size |= (uint64_t)pci_pdev_get_bar_base(size_lo);
-
-			if (size != 0UL) {
-				size = size & ~(size - 1U);
-			}
-
-			/* Restore the BAR */
-			pci_pdev_write_cfg(bdf, pci_bar_offset(idx), 4U, bar_lo);
-
-			if (type == PCIBAR_MEM64) {
-				pci_pdev_write_cfg(bdf, pci_bar_offset(idx + 1U), 4U, bar_hi);
-			}
-		}
-	}
-
-	bar->size = size;
-
-	return (type == PCIBAR_MEM64)?2U:1U;
-}
-
-/*
- * @pre nr_bars <= PCI_BAR_COUNT
- */
-static void pci_pdev_read_bars(union pci_bdf bdf, uint32_t nr_bars, struct pci_bar *bar)
-{
-	uint32_t idx = 0U;
-	uint32_t bar_step;
-
-	while (idx < nr_bars) {
-		bar_step = pci_pdev_read_bar(bdf, idx, &bar[idx]);
-		if ((bar_step == 2U) && ((idx + 1U) < nr_bars)) {
-			/* Upper 32-bit of a 64-bit bar: */
-			bar[idx + 1U].is_64bit_high = true;
-			bar[idx + 1U].reg.value = pci_pdev_read_cfg(bdf, pci_bar_offset(idx + 1U), 4U);
-		}
-
-		idx += bar_step;
-	}
-}
-
-/*
- * @pre ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_NORMAL) || ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_BRIDGE) || ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_CARDBUS)
- */
-static uint32_t get_offset_of_caplist(uint8_t hdr_type)
-{
-	uint32_t cap_offset = 0U;
-
-	switch (hdr_type & PCIM_HDRTYPE) {
-	case PCIM_HDRTYPE_NORMAL:
-	case PCIM_HDRTYPE_BRIDGE:
-		cap_offset = PCIR_CAP_PTR;
-		break;
-
-	case PCIM_HDRTYPE_CARDBUS:
-		cap_offset = PCIR_CAP_PTR_CARDBUS;
-		break;
-
-	default:
-		/* do nothing */
-		break;
-	}
-
-	return cap_offset;
-}
-
-/*
+/**
  * @pre pdev != NULL
- * @pre ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_NORMAL) || ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_BRIDGE) || ((hdr_type & PCIM_HDRTYPE) == PCIM_HDRTYPE_CARDBUS)
  */
-static void pci_read_cap(struct pci_pdev *pdev, uint8_t hdr_type)
+static void pci_enumerate_ext_cap(struct pci_pdev *pdev)
 {
-	uint8_t ptr, cap;
-	uint32_t msgctrl;
-	uint32_t len, offset, idx;
-	uint32_t table_info;
-	uint32_t cap_offset;
+	uint32_t hdr, pos, pre_pos = 0U;
+	uint8_t pcie_dev_type;
 
-	cap_offset = get_offset_of_caplist(hdr_type);
+	pos = PCI_ECAP_BASE_PTR;
 
-	ptr = (uint8_t)pci_pdev_read_cfg(pdev->bdf, cap_offset, 1U);
+	/* PCI Express Extended Capability must have 4 bytes header */
+	hdr = pci_pdev_read_cfg(pdev->bdf, pos, 4U);
+	while (hdr != 0U) {
+		if (PCI_ECAP_ID(hdr) == PCIZ_SRIOV) {
+			pdev->sriov.capoff = pos;
+			pdev->sriov.caplen = PCI_SRIOV_CAP_LEN;
+			pdev->sriov.pre_pos = pre_pos;
+		} else if (PCI_ECAP_ID(hdr) == PCIZ_PTM) {
+			pcie_dev_type = (((uint8_t)pci_pdev_read_cfg(pdev->bdf,
+				pdev->pcie_capoff + PCIER_FLAGS, 1)) & PCIEM_FLAGS_TYPE) >> 4;
 
-	while ((ptr != 0U) && (ptr != 0xFFU)) {
-		cap = (uint8_t)pci_pdev_read_cfg(pdev->bdf, ptr + PCICAP_ID, 1U);
-
-		/* Ignore all other Capability IDs for now */
-		if ((cap == PCIY_MSI) || (cap == PCIY_MSIX)) {
-			offset = ptr;
-			if (cap == PCIY_MSI) {
-				pdev->msi.capoff = offset;
-				msgctrl = pci_pdev_read_cfg(pdev->bdf, offset + PCIR_MSI_CTRL, 2U);
-				len = ((msgctrl & PCIM_MSICTRL_64BIT) != 0U) ? 14U : 10U;
-				pdev->msi.caplen = len;
-
-				/* Copy MSI capability struct into buffer */
-				for (idx = 0U; idx < len; idx++) {
-					pdev->msi.cap[idx] = (uint8_t)pci_pdev_read_cfg(pdev->bdf, offset + idx, 1U);
-				}
+			if (pcie_dev_type == PCIEM_TYPE_ENDPOINT ||
+					pcie_dev_type == PCIEM_TYPE_ROOT_INT_EP) {
+				/* No need to enable ptm on ep device.  If a PTM-capable ep pass
+				 * through to guest, guest OS will enable it
+				 */
+				pr_acrnlog("%s: [%x:%x.%x] is PTM capable.\n", __func__,
+					pdev->bdf.bits.b,
+					pdev->bdf.bits.d, pdev->bdf.bits.f);
+			} else if (pcie_dev_type == PCIEM_TYPE_ROOTPORT) {
+				/* if root port is PTM root capable, we need to make sure that
+				 * ptm is enabled in h/w
+				 */
+				pci_enable_ptm_root(pdev, pos);
 			} else {
-				pdev->msix.capoff = offset;
-				pdev->msix.caplen = MSIX_CAPLEN;
-				len = pdev->msix.caplen;
-
-				msgctrl = pci_pdev_read_cfg(pdev->bdf, pdev->msix.capoff + PCIR_MSIX_CTRL, 2U);
-
-				/* Read Table Offset and Table BIR */
-				table_info = pci_pdev_read_cfg(pdev->bdf, pdev->msix.capoff + PCIR_MSIX_TABLE, 4U);
-
-				pdev->msix.table_bar = (uint8_t)(table_info & PCIM_MSIX_BIR_MASK);
-
-				pdev->msix.table_offset = table_info & ~PCIM_MSIX_BIR_MASK;
-				pdev->msix.table_count = (msgctrl & PCIM_MSIXCTRL_TABLE_SIZE) + 1U;
-
-				ASSERT(pdev->msix.table_count <= CONFIG_MAX_MSIX_TABLE_NUM);
-
-				/* Copy MSIX capability struct into buffer */
-				for (idx = 0U; idx < len; idx++) {
-					pdev->msix.cap[idx] = (uint8_t)pci_pdev_read_cfg(pdev->bdf, offset + idx, 1U);
-				}
+				/* Acrn supports a simple PTM hierarchy:  ptm capable ep is
+				 * directly connected to a ptm-root capable root port or ep itself
+				 * is rcie.  Report error for all other cases.
+				 * */
+				pr_err("%s: Do NOT enable PTM on [%x:%x.%x].\n", __func__,
+					pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f);
 			}
 		}
 
-		ptr = (uint8_t)pci_pdev_read_cfg(pdev->bdf, ptr + PCICAP_NEXTPTR, 1U);
-	}
+		pre_pos = pos;
+		pos = PCI_ECAP_NEXT(hdr);
+		if (pos == 0U) {
+			break;
+		}
+		hdr = pci_pdev_read_cfg(pdev->bdf, pos, 4U);
+	};
 }
 
 /*
  * @pre pdev != NULL
  */
-static void fill_pdev(uint16_t pbdf, struct pci_pdev *pdev)
+static void pci_enumerate_cap(struct pci_pdev *pdev)
 {
-	uint8_t hdr_type;
+	uint8_t pos, cap;
+	uint32_t msgctrl;
+	uint32_t len, idx;
+	uint32_t table_info;
+	uint32_t pcie_devcap, val;
+	bool is_pcie = false;
 
-	pdev->bdf.value = pbdf;
+	pos = (uint8_t)pci_pdev_read_cfg(pdev->bdf, PCIR_CAP_PTR, 1U);
 
-	hdr_type = (uint8_t)pci_pdev_read_cfg(pdev->bdf, PCIR_HDRTYPE, 1U);
+	while ((pos != 0U) && (pos != 0xFFU)) {
+		cap = (uint8_t)pci_pdev_read_cfg(pdev->bdf, pos + PCICAP_ID, 1U);
 
-	pdev->nr_bars = pci_pdev_get_nr_bars(hdr_type);
+		if (cap == PCIY_MSI) {
+			pdev->msi_capoff = pos;
+		} else if (cap == PCIY_MSIX) {
+			pdev->msix.capoff = pos;
+			pdev->msix.caplen = MSIX_CAPLEN;
+			len = pdev->msix.caplen;
 
-	pci_pdev_read_bars(pdev->bdf, pdev->nr_bars, &pdev->bar[0]);
+			msgctrl = pci_pdev_read_cfg(pdev->bdf, pdev->msix.capoff + PCIR_MSIX_CTRL, 2U);
 
-	if ((pci_pdev_read_cfg(pdev->bdf, PCIR_STATUS, 2U) & PCIM_STATUS_CAPPRESENT) != 0U) {
-		pci_read_cap(pdev, hdr_type);
+			/* Read Table Offset and Table BIR */
+			table_info = pci_pdev_read_cfg(pdev->bdf, pdev->msix.capoff + PCIR_MSIX_TABLE, 4U);
+
+			pdev->msix.table_bar = (uint8_t)(table_info & PCIM_MSIX_BIR_MASK);
+
+			pdev->msix.table_offset = table_info & ~PCIM_MSIX_BIR_MASK;
+			pdev->msix.table_count = (msgctrl & PCIM_MSIXCTRL_TABLE_SIZE) + 1U;
+
+			ASSERT(pdev->msix.table_count <= CONFIG_MAX_MSIX_TABLE_NUM);
+
+			/* Copy MSIX capability struct into buffer */
+			for (idx = 0U; idx < len; idx++) {
+				pdev->msix.cap[idx] = (uint8_t)pci_pdev_read_cfg(pdev->bdf, (uint32_t)pos + idx, 1U);
+			}
+		} else if (cap == PCIY_PMC) {
+			val = pci_pdev_read_cfg(pdev->bdf, pos + PCIR_PMCSR, 4U);
+			pdev->has_pm_reset = ((val & PCIM_PMCSR_NO_SOFT_RST) == 0U);
+		} else if (cap == PCIY_PCIE) {
+			is_pcie = true;
+			pcie_devcap = pci_pdev_read_cfg(pdev->bdf, pos + PCIR_PCIE_DEVCAP, 4U);
+			pdev->pcie_capoff = pos;
+			pdev->has_flr = ((pcie_devcap & PCIM_PCIE_FLRCAP) != 0U);
+		} else if (cap == PCIY_AF) {
+			val = pci_pdev_read_cfg(pdev->bdf, pos, 4U);
+			pdev->has_af_flr = ((val & PCIM_AF_FLR_CAP) != 0U);
+		} else {
+			/* Ignore all other Capability IDs for now */
+		}
+
+		pos = (uint8_t)pci_pdev_read_cfg(pdev->bdf, pos + PCICAP_NEXTPTR, 1U);
 	}
 
-	fill_pci_dev_config(pdev);
+	if (is_pcie) {
+		pci_enumerate_ext_cap(pdev);
+	}
 }
 
-static void init_pdev(uint16_t pbdf)
+/*
+ * @brief Initialize a pdev data structure.
+ *
+ * Initialize a pdev data structure with a physical device BDF(pbdf) and DRHD index(drhd_index).
+ * The caller of the function init_pdev should guarantee execution atomically.
+ *
+ * @param pbdf        Physical device BDF
+ * @param drhd_index  DRHD index
+ *
+ * @return If there's a successfully initialized pdev return it, otherwise return NULL;
+ */
+struct pci_pdev *pci_init_pdev(union pci_bdf bdf, uint32_t drhd_index)
 {
+	uint8_t hdr_type, hdr_layout;
+	struct pci_pdev *pdev = NULL;
+	bool is_hv_owned = false;
+
 	if (num_pci_pdev < CONFIG_MAX_PCI_DEV_NUM) {
-		fill_pdev(pbdf, &pci_pdev_array[num_pci_pdev]);
-		num_pci_pdev++;
+		hdr_type = (uint8_t)pci_pdev_read_cfg(bdf, PCIR_HDRTYPE, 1U);
+		hdr_layout = (hdr_type & PCIM_HDRTYPE);
+
+		if ((hdr_layout == PCIM_HDRTYPE_NORMAL) || (hdr_layout == PCIM_HDRTYPE_BRIDGE)) {
+			pdev = &pci_pdevs[num_pci_pdev];
+			pdev->bdf = bdf;
+			pdev->hdr_type = hdr_type;
+			pdev->base_class = (uint8_t)pci_pdev_read_cfg(bdf, PCIR_CLASS, 1U);
+			pdev->sub_class = (uint8_t)pci_pdev_read_cfg(bdf, PCIR_SUBCLASS, 1U);
+			pdev->nr_bars = pci_pdev_get_nr_bars(hdr_type);
+			pdev_save_bar(pdev);
+
+			if ((pci_pdev_read_cfg(bdf, PCIR_STATUS, 2U) & PCIM_STATUS_CAPPRESENT) != 0U) {
+				pci_enumerate_cap(pdev);
+			}
+
+#if (PRE_VM_NUM != 0U)
+			/* HV owned pdev: 1.typ1 pdev if pre-launched VM exist; 2.pci debug uart */
+			is_hv_owned = (hdr_layout == PCIM_HDRTYPE_BRIDGE) || is_pci_dbg_uart(bdf);
+#else
+			/* HV owned pdev: 1.pci debug uart */
+			is_hv_owned = is_pci_dbg_uart(bdf);
+#endif
+			if (is_hv_owned) {
+				hv_owned_pci_pdevs[num_hv_owned_pci_pdev] = pdev;
+				num_hv_owned_pci_pdev++;
+			}
+			hlist_add_head(&pdev->link, &pdevs_hlist_heads[hash64(bdf.value, PDEV_HLIST_HASHBITS)]);
+			pdev->drhd_index = drhd_index;
+			num_pci_pdev++;
+			reserve_vmsix_on_msi_irtes(pdev);
+		} else {
+			pr_err("%s, %x:%x.%x unsupported headed type: 0x%x\n",
+				__func__, bdf.bits.b, bdf.bits.d, bdf.bits.f, hdr_type);
+		}
 	} else {
 		pr_err("%s, failed to alloc pci_pdev!\n", __func__);
 	}
+
+	return pdev;
 }

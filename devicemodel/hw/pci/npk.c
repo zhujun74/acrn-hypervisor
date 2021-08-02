@@ -97,8 +97,8 @@
 #include "npk.h"
 
 static int pci_npk_debug;
-#define DPRINTF(params) do { if (pci_npk_debug) printf params; } while (0)
-#define WPRINTF(params) (printf params)
+#define DPRINTF(params) do { if (pci_npk_debug) pr_dbg params; } while (0)
+#define WPRINTF(params) (pr_err params)
 
 #define npk_gth_reg(x)     (npk_csr[NPK_CSR_GTH].data.u8[(x)])
 #define npk_sth_reg(x)     (npk_csr[NPK_CSR_STH].data.u8[(x)])
@@ -212,7 +212,7 @@ static int pci_npk_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	 * +--sw_bar for host   +--sw_bar for UOS#x
 	 */
 
-	/* get the master offset and the number for this guest */
+	/* get the host offset and the number for this guest */
 	if ((opts == NULL) || dm_strtoui(opts, &cp, 10, &m_off) || *cp != '/' ||
 			dm_strtoui(cp + 1, &cp, 10, &m_num) || !valid_param(m_off, m_num)) {
 		m_off = 256;
@@ -234,7 +234,6 @@ static int pci_npk_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		else
 			break;
 	}
-	closedir(dir);
 
 	if (!dent) {
 		WPRINTF(("Cannot find NPK device\n"));
@@ -244,11 +243,12 @@ static int pci_npk_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	/* read the host NPK configuration space */
 	rc = snprintf(name, PATH_MAX, "%s/%s/config", NPK_DRV_SYSFS_PATH,
 			dent->d_name);
-	if (rc > PATH_MAX)
-		WPRINTF(("NPK device name too long\n"));
+	if (rc >= PATH_MAX || rc < 0)
+		WPRINTF(("NPK device name is invalid!\n"));
+	closedir(dir);
 	fd = open(name, O_RDONLY);
 	if (fd == -1) {
-		WPRINTF(("Cannot open host NPK config\n"));
+		WPRINTF(("Cannot open host NPK config:%s\n", name));
 		return error;
 	}
 

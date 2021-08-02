@@ -5,12 +5,12 @@
  */
 
 #include <types.h>
-#include <mmu.h>
-#include <per_cpu.h>
-#include <trampoline.h>
+#include <asm/mmu.h>
+#include <asm/per_cpu.h>
+#include <asm/trampoline.h>
 #include <reloc.h>
-#include <vboot.h>
-#include <ld_sym.h>
+#include <asm/boot/ld_sym.h>
+#include <asm/e820.h>
 
 static uint64_t trampoline_start16_paddr;
 
@@ -107,21 +107,20 @@ static void update_trampoline_code_refs(uint64_t dest_pa)
 
 uint64_t prepare_trampoline(void)
 {
-	uint64_t size, dest_pa, i;
+	uint64_t size, dest_pa;
 
 	size = (uint64_t)(&ld_trampoline_end - &ld_trampoline_start);
-	dest_pa = get_ap_trampoline_buf();
+	dest_pa = e820_alloc_memory(CONFIG_LOW_RAM_SIZE, MEM_1M);
 
-	pr_dbg("trampoline code: %llx size %x", dest_pa, size);
+	pr_dbg("trampoline code: %lx size %x", dest_pa, size);
 
 	/* Copy segment for AP initialization code below 1MB */
 	(void)memcpy_s(hpa2hva(dest_pa), (size_t)size, &ld_trampoline_load,
 			(size_t)size);
 	update_trampoline_code_refs(dest_pa);
 
-	for (i = 0UL; i < size; i = i + CACHE_LINE_SIZE) {
-		clflush(hpa2hva(dest_pa + i));
-	}
+	cpu_memory_barrier();
+	flush_cache_range(hpa2hva(dest_pa), size);
 
 	trampoline_start16_paddr = dest_pa;
 

@@ -63,8 +63,8 @@
 
 static const char PHYSICAL_RPMB_STR[] = "physical_rpmb";
 static int virtio_rpmb_debug = 1;
-#define DPRINTF(params) do { if (virtio_rpmb_debug) printf params; } while (0)
-#define WPRINTF(params) (printf params)
+#define DPRINTF(params) do { if (virtio_rpmb_debug) pr_dbg params; } while (0)
+#define WPRINTF(params) (pr_err params)
 
 static __u16 rpmb_block_count = 0;
 /*
@@ -794,6 +794,7 @@ virtio_rpmb_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
 	if (dev->arg) {
 		DPRINTF(("virtio_rpmb_be_deinit: free struct virtio_rpmb!\n"));
+		virtio_rpmb_reset(dev->arg);
 		free((struct virtio_rpmb *)dev->arg);
 	}
 }

@@ -7,40 +7,40 @@
  */
 
 #include <types.h>
-#include <errno.h>
-#include <vmcs.h>
-#include <vcpu.h>
-#include <vm.h>
-#include <vmx.h>
-#include <gdt.h>
-#include <pgtable.h>
-#include <per_cpu.h>
-#include <cpu_caps.h>
-#include <cpufeatures.h>
-#include <vmexit.h>
+#include <asm/guest/vmcs.h>
+#include <asm/guest/vcpu.h>
+#include <asm/guest/vm.h>
+#include <asm/vmx.h>
+#include <asm/gdt.h>
+#include <asm/pgtable.h>
+#include <asm/per_cpu.h>
+#include <asm/cpu_caps.h>
+#include <asm/cpufeatures.h>
+#include <asm/guest/vmexit.h>
 #include <logmsg.h>
 
 /* rip, rsp, ia32_efer and rflags are written to VMCS in start_vcpu */
 static void init_guest_vmx(struct acrn_vcpu *vcpu, uint64_t cr0, uint64_t cr3,
 	uint64_t cr4)
 {
-	struct cpu_context *ctx =
-		&vcpu->arch.contexts[vcpu->arch.cur_context];
+	struct guest_cpu_context *ctx = &vcpu->arch.contexts[vcpu->arch.cur_context];
 	struct ext_context *ectx = &ctx->ext_ctx;
+
+	pr_dbg("%s,cr0:0x%lx, cr4:0x%lx.", __func__, cr0, cr4);
 
 	vcpu_set_cr4(vcpu, cr4);
 	vcpu_set_cr0(vcpu, cr0);
 	exec_vmwrite(VMX_GUEST_CR3, cr3);
 
 	exec_vmwrite(VMX_GUEST_GDTR_BASE, ectx->gdtr.base);
-	pr_dbg("VMX_GUEST_GDTR_BASE: 0x%016llx", ectx->gdtr.base);
+	pr_dbg("VMX_GUEST_GDTR_BASE: 0x%016lx", ectx->gdtr.base);
 	exec_vmwrite32(VMX_GUEST_GDTR_LIMIT, ectx->gdtr.limit);
-	pr_dbg("VMX_GUEST_GDTR_LIMIT: 0x%016llx", ectx->gdtr.limit);
+	pr_dbg("VMX_GUEST_GDTR_LIMIT: 0x%016lx", ectx->gdtr.limit);
 
 	exec_vmwrite(VMX_GUEST_IDTR_BASE, ectx->idtr.base);
-	pr_dbg("VMX_GUEST_IDTR_BASE: 0x%016llx", ectx->idtr.base);
+	pr_dbg("VMX_GUEST_IDTR_BASE: 0x%016lx", ectx->idtr.base);
 	exec_vmwrite32(VMX_GUEST_IDTR_LIMIT, ectx->idtr.limit);
-	pr_dbg("VMX_GUEST_IDTR_LIMIT: 0x%016llx", ectx->idtr.limit);
+	pr_dbg("VMX_GUEST_IDTR_LIMIT: 0x%016lx", ectx->idtr.limit);
 
 	/* init segment selectors: es, cs, ss, ds, fs, gs, ldtr, tr */
 	load_segment(ectx->cs, VMX_GUEST_CS);
@@ -71,14 +71,16 @@ static void init_guest_vmx(struct acrn_vcpu *vcpu, uint64_t cr0, uint64_t cr3,
 
 static void init_guest_state(struct acrn_vcpu *vcpu)
 {
-	struct cpu_context *ctx =
-		&vcpu->arch.contexts[vcpu->arch.cur_context];
+	struct guest_cpu_context *ctx = &vcpu->arch.contexts[vcpu->arch.cur_context];
+
+	pr_dbg("%s, cr0:0x%lx, cr4:0x%lx.\n", __func__,
+	ctx->run_ctx.cr0, ctx->run_ctx.cr4);
 
 	init_guest_vmx(vcpu, ctx->run_ctx.cr0, ctx->ext_ctx.cr3,
 			ctx->run_ctx.cr4 & ~(CR4_VMXE | CR4_SMXE | CR4_MCE));
 }
 
-static void init_host_state(void)
+void init_host_state(void)
 {
 	uint16_t value16;
 	uint64_t value64;
@@ -87,9 +89,7 @@ static void init_host_state(void)
 	uint64_t gdt_base;
 	uint64_t idt_base;
 
-	pr_dbg("*********************");
 	pr_dbg("Initialize host state");
-	pr_dbg("*********************");
 
 	/***************************************************
 	 * 16 - Bit fields
@@ -146,7 +146,7 @@ static void init_host_state(void)
 	tss_addr = hva2hpa((void *)&get_cpu_var(tss));
 	/* Set up host TR base fields */
 	exec_vmwrite(VMX_HOST_TR_BASE, tss_addr);
-	pr_dbg("VMX_HOST_TR_BASE: 0x%016llx ", tss_addr);
+	pr_dbg("VMX_HOST_TR_BASE: 0x%016lx ", tss_addr);
 
 	/* Obtain the current interrupt descriptor table base */
 	idt_base = sidt();
@@ -164,11 +164,11 @@ static void init_host_state(void)
 
 	value64 = msr_read(MSR_IA32_PAT);
 	exec_vmwrite64(VMX_HOST_IA32_PAT_FULL, value64);
-	pr_dbg("VMX_HOST_IA32_PAT: 0x%016llx ", value64);
+	pr_dbg("VMX_HOST_IA32_PAT: 0x%016lx ", value64);
 
 	value64 = msr_read(MSR_IA32_EFER);
 	exec_vmwrite64(VMX_HOST_IA32_EFER_FULL, value64);
-	pr_dbg("VMX_HOST_IA32_EFER: 0x%016llx ",
+	pr_dbg("VMX_HOST_IA32_EFER: 0x%016lx ",
 			value64);
 
 	/**************************************************/
@@ -177,31 +177,31 @@ static void init_host_state(void)
 	/* Set up host CR0 field */
 	CPU_CR_READ(cr0, &value);
 	exec_vmwrite(VMX_HOST_CR0, value);
-	pr_dbg("VMX_HOST_CR0: 0x%016llx ", value);
+	pr_dbg("VMX_HOST_CR0: 0x%016lx ", value);
 
 	/* Set up host CR3 field */
 	CPU_CR_READ(cr3, &value);
 	exec_vmwrite(VMX_HOST_CR3, value);
-	pr_dbg("VMX_HOST_CR3: 0x%016llx ", value);
+	pr_dbg("VMX_HOST_CR3: 0x%016lx ", value);
 
 	/* Set up host CR4 field */
 	CPU_CR_READ(cr4, &value);
 	exec_vmwrite(VMX_HOST_CR4, value);
-	pr_dbg("VMX_HOST_CR4: 0x%016llx ", value);
+	pr_dbg("VMX_HOST_CR4: 0x%016lx ", value);
 
 	/* Set up host and guest FS base address */
 	value = msr_read(MSR_IA32_FS_BASE);
 	exec_vmwrite(VMX_HOST_FS_BASE, value);
-	pr_dbg("VMX_HOST_FS_BASE: 0x%016llx ", value);
+	pr_dbg("VMX_HOST_FS_BASE: 0x%016lx ", value);
 	value = msr_read(MSR_IA32_GS_BASE);
 	exec_vmwrite(VMX_HOST_GS_BASE, value);
-	pr_dbg("VMX_HOST_GS_BASE: 0x%016llx ", value);
+	pr_dbg("VMX_HOST_GS_BASE: 0x%016lx ", value);
 
 	/* Set up host instruction pointer on VM Exit */
 	value64 = (uint64_t)&vm_exit;
-	pr_dbg("HOST RIP on VMExit %016llx ", value64);
+	pr_dbg("HOST RIP on VMExit %016lx ", value64);
 	exec_vmwrite(VMX_HOST_RIP, value64);
-	pr_dbg("vm exit return address = %016llx ", value64);
+	pr_dbg("vm exit return address = %016lx ", value64);
 
 	/* As a type I hypervisor, just init sysenter fields to 0 */
 	exec_vmwrite32(VMX_HOST_IA32_SYSENTER_CS, 0U);
@@ -237,6 +237,25 @@ static uint32_t check_vmx_ctrl(uint32_t msr, uint32_t ctrl_req)
 
 }
 
+static uint32_t check_vmx_ctrl_64(uint32_t msr, uint64_t ctrl_req)
+{
+	uint64_t vmx_msr;
+	uint32_t ctrl = ctrl_req;
+
+	vmx_msr = msr_read(msr);
+
+	/* 64 bits are allowed 1-setting */
+	ctrl &= vmx_msr;
+
+	if ((ctrl_req & ~ctrl) != 0U) {
+		pr_err("VMX ctrl 0x%x not fully enabled: "
+			"request 0x%llx but get 0x%llx\n",
+			msr, ctrl_req, ctrl);
+	}
+
+	return ctrl;
+}
+
 static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 {
 	uint32_t value32;
@@ -244,9 +263,7 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	struct acrn_vm *vm = vcpu->vm;
 
 	/* Log messages to show initializing VMX execution controls */
-	pr_dbg("*****************************");
 	pr_dbg("Initialize execution control ");
-	pr_dbg("*****************************");
 
 	/* Set up VM Execution control to enable Set VM-exits on external
 	 * interrupts preemption timer - pg 2899 24.6.1
@@ -268,6 +285,7 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	 * guest access to IO bit-mapped ports causes VM exit
 	 * guest access to MSR causes VM exit
 	 * Activate secondary controls
+	 * Activate tertiary controls
 	 */
 	/* These are bits 1,4-6,8,13-16, and 26, the corresponding bits of
 	 * the IA32_VMX_PROCBASED_CTRLS MSR are always read as 1 --- A.3.2
@@ -275,7 +293,7 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	value32 = check_vmx_ctrl(MSR_IA32_VMX_PROCBASED_CTLS,
 			 VMX_PROCBASED_CTLS_TSC_OFF | VMX_PROCBASED_CTLS_TPR_SHADOW |
 			 VMX_PROCBASED_CTLS_IO_BITMAP | VMX_PROCBASED_CTLS_MSR_BITMAP |
-			 VMX_PROCBASED_CTLS_SECONDARY);
+			 VMX_PROCBASED_CTLS_HLT | VMX_PROCBASED_CTLS_SECONDARY | VMX_PROCBASED_CTLS_TERTIARY);
 
 	/*Disable VM_EXIT for CR3 access*/
 	value32 &= ~(VMX_PROCBASED_CTLS_CR3_LOAD | VMX_PROCBASED_CTLS_CR3_STORE);
@@ -286,21 +304,33 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	 */
 	value32 &= ~VMX_PROCBASED_CTLS_INVLPG;
 
+	/*
+	 * Enable VM_EXIT for rdpmc execution except core partition VM, like RTVM
+	 */
+	if (!is_lapic_pt_configured(vcpu->vm)) {
+		value32 |= VMX_PROCBASED_CTLS_RDPMC;
+	}
+
+	vcpu->arch.proc_vm_exec_ctrls = value32;
 	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, value32);
 	pr_dbg("VMX_PROC_VM_EXEC_CONTROLS: 0x%x ", value32);
 
 	/* Set up secondary processor based VM execution controls - pg 2901
-	 * 24.6.2. Set up for: * Enable EPT * Enable RDTSCP * Unrestricted
-	 * guest (optional)
+	 * 24.6.2. Set up for: * Enable EPT * Eable VPID * Enable RDTSCP *
+	 * Enable Unrestricted guest (optional)
 	 */
 	value32 = check_vmx_ctrl(MSR_IA32_VMX_PROCBASED_CTLS2,
-			VMX_PROCBASED_CTLS2_VAPIC | VMX_PROCBASED_CTLS2_EPT |
-			VMX_PROCBASED_CTLS2_RDTSCP | VMX_PROCBASED_CTLS2_UNRESTRICT);
+			VMX_PROCBASED_CTLS2_VAPIC | VMX_PROCBASED_CTLS2_EPT |VMX_PROCBASED_CTLS2_VPID |
+			VMX_PROCBASED_CTLS2_RDTSCP | VMX_PROCBASED_CTLS2_UNRESTRICT |
+			VMX_PROCBASED_CTLS2_PAUSE_LOOP | VMX_PROCBASED_CTLS2_UWAIT_PAUSE);
 
-	if (vcpu->arch.vpid != 0U) {
-		value32 |= VMX_PROCBASED_CTLS2_VPID;
+	/* SDM Vol3, 25.3,  setting "enable INVPCID" VM-execution to 1 with "INVLPG exiting" disabled,
+	 * passes-through INVPCID instruction to guest if the instruction is supported.
+	 */
+	if (pcpu_has_cap(X86_FEATURE_INVPCID)) {
+		value32 |= VMX_PROCBASED_CTLS2_INVPCID;
 	} else {
-		value32 &= ~VMX_PROCBASED_CTLS2_VPID;
+		value32 &= ~VMX_PROCBASED_CTLS2_INVPCID;
 	}
 
 	if (is_apicv_advanced_feature_supported()) {
@@ -328,6 +358,15 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS2, value32);
 	pr_dbg("VMX_PROC_VM_EXEC_CONTROLS2: 0x%x ", value32);
 
+	/* Set up tertiary processor based VM execution controls */
+	if ((exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS) & VMX_PROCBASED_CTLS_TERTIARY) != 0U) {
+		/* Enable KeyLocker if support */
+		value64 = check_vmx_ctrl_64(MSR_IA32_VMX_PROCBASED_CTLS3, VMX_PROCBASED_CTLS3_LOADIWKEY);
+
+		exec_vmwrite64(VMX_PROC_VM_EXEC_CONTROLS3_FULL, value64);
+		pr_dbg("VMX_PROC_VM_EXEC_CONTROLS3: 0x%llx ", value64);
+	}
+
 	/*APIC-v, config APIC-access address*/
 	value64 = vlapic_apicv_get_apic_access_addr();
 	exec_vmwrite64(VMX_APIC_ACCESS_ADDR_FULL, value64);
@@ -346,8 +385,8 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 		exec_vmwrite64(VMX_EOI_EXIT3_FULL, 0UL);
 
 		exec_vmwrite16(VMX_GUEST_INTR_STATUS, 0U);
-		exec_vmwrite16(VMX_POSTED_INTR_VECTOR, VECTOR_POSTED_INTR);
-		exec_vmwrite64(VMX_PIR_DESC_ADDR_FULL, apicv_get_pir_desc_paddr(vcpu));
+		exec_vmwrite16(VMX_POSTED_INTR_VECTOR, (uint16_t)vcpu->arch.pid.control.bits.nv);
+		exec_vmwrite64(VMX_PIR_DESC_ADDR_FULL, hva2hpa(get_pi_desc(vcpu)));
 	}
 
 	/* Load EPTP execution control
@@ -356,13 +395,17 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	 */
 	value64 = hva2hpa(vm->arch_vm.nworld_eptp) | (3UL << 3U) | 6UL;
 	exec_vmwrite64(VMX_EPT_POINTER_FULL, value64);
-	pr_dbg("VMX_EPT_POINTER: 0x%016llx ", value64);
+	pr_dbg("VMX_EPT_POINTER: 0x%016lx ", value64);
 
 	/* Set up guest exception mask bitmap setting a bit * causes a VM exit
 	 * on corresponding guest * exception - pg 2902 24.6.3
-	 * enable VM exit on MC only
+	 * enable VM exit on MC always
+	 * enable AC for split-lock emulation when split-lock detection is enabled on physical platform.
 	 */
 	value32 = (1U << IDT_MC);
+	if (is_ac_enabled()) {
+		value32 = (value32 | (1U << IDT_AC));
+	}
 	exec_vmwrite32(VMX_EXCEPTION_BITMAP, value32);
 
 	/* Set up page fault error code mask - second paragraph * pg 2902
@@ -387,10 +430,10 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	/* Set up IO bitmap register A and B - pg 2902 24.6.4 */
 	value64 = hva2hpa(vm->arch_vm.io_bitmap);
 	exec_vmwrite64(VMX_IO_BITMAP_A_FULL, value64);
-	pr_dbg("VMX_IO_BITMAP_A: 0x%016llx ", value64);
+	pr_dbg("VMX_IO_BITMAP_A: 0x%016lx ", value64);
 	value64 = hva2hpa((void *)&(vm->arch_vm.io_bitmap[PAGE_SIZE]));
 	exec_vmwrite64(VMX_IO_BITMAP_B_FULL, value64);
-	pr_dbg("VMX_IO_BITMAP_B: 0x%016llx ", value64);
+	pr_dbg("VMX_IO_BITMAP_B: 0x%016lx ", value64);
 
 	init_msr_emulation(vcpu);
 
@@ -409,7 +452,7 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	/* Natural-width */
 	pr_dbg("Natural-width*********");
 
-	init_cr0_cr4_host_mask();
+	init_cr0_cr4_host_guest_mask();
 
 	/* The CR3 target registers work in concert with VMX_CR3_TARGET_COUNT
 	 * field. Using these registers guest CR3 access can be managed. i.e.,
@@ -420,6 +463,10 @@ static void init_exec_ctrl(struct acrn_vcpu *vcpu)
 	exec_vmwrite(VMX_CR3_TARGET_1, 0UL);
 	exec_vmwrite(VMX_CR3_TARGET_2, 0UL);
 	exec_vmwrite(VMX_CR3_TARGET_3, 0UL);
+
+	/* Setup PAUSE-loop exiting - 24.6.13 */
+	exec_vmwrite(VMX_PLE_GAP, 128U);
+	exec_vmwrite(VMX_PLE_WINDOW, 4096U);
 }
 
 static void init_entry_ctrl(const struct acrn_vcpu *vcpu)
@@ -427,9 +474,7 @@ static void init_entry_ctrl(const struct acrn_vcpu *vcpu)
 	uint32_t value32;
 
 	/* Log messages to show initializing VMX entry controls */
-	pr_dbg("*************************");
 	pr_dbg("Initialize Entry control ");
-	pr_dbg("*************************");
 
 	/* Set up VMX entry controls - pg 2908 24.8.1 * Set IA32e guest mode -
 	 * on VM entry processor is in IA32e 64 bitmode * Start guest with host
@@ -451,7 +496,7 @@ static void init_entry_ctrl(const struct acrn_vcpu *vcpu)
 	 * MSRs on load from memory on VM entry from mem address provided by
 	 * VM-entry MSR load address field
 	 */
-	exec_vmwrite32(VMX_ENTRY_MSR_LOAD_COUNT, MSR_AREA_COUNT);
+	exec_vmwrite32(VMX_ENTRY_MSR_LOAD_COUNT, vcpu->arch.msr_area.count);
 	exec_vmwrite64(VMX_ENTRY_MSR_LOAD_ADDR_FULL, hva2hpa((void *)vcpu->arch.msr_area.guest));
 
 	/* Set up VM entry interrupt information field pg 2909 24.8.3 */
@@ -469,9 +514,7 @@ static void init_exit_ctrl(const struct acrn_vcpu *vcpu)
 	uint32_t value32;
 
 	/* Log messages to show initializing VMX entry controls */
-	pr_dbg("************************");
 	pr_dbg("Initialize Exit control ");
-	pr_dbg("************************");
 
 	/* Set up VM exit controls - pg 2907 24.7.1 for: Host address space
 	 * size is 64 bit Set up to acknowledge interrupt on exit, if 1 the HW
@@ -493,8 +536,8 @@ static void init_exit_ctrl(const struct acrn_vcpu *vcpu)
 	 * The 64 bit VM-exit MSR store and load address fields provide the
 	 * corresponding addresses
 	 */
-	exec_vmwrite32(VMX_EXIT_MSR_STORE_COUNT, MSR_AREA_COUNT);
-	exec_vmwrite32(VMX_EXIT_MSR_LOAD_COUNT, MSR_AREA_COUNT);
+	exec_vmwrite32(VMX_EXIT_MSR_STORE_COUNT, vcpu->arch.msr_area.count);
+	exec_vmwrite32(VMX_EXIT_MSR_LOAD_COUNT, vcpu->arch.msr_area.count);
 	exec_vmwrite64(VMX_EXIT_MSR_STORE_ADDR_FULL, hva2hpa((void *)vcpu->arch.msr_area.guest));
 	exec_vmwrite64(VMX_EXIT_MSR_LOAD_ADDR_FULL, hva2hpa((void *)vcpu->arch.msr_area.host));
 }
@@ -505,7 +548,6 @@ static void init_exit_ctrl(const struct acrn_vcpu *vcpu)
 void init_vmcs(struct acrn_vcpu *vcpu)
 {
 	uint64_t vmx_rev_id;
-	uint64_t vmcs_pa;
 	void **vmcs_ptr = &get_cpu_var(vmcs_run);
 
 	/* Log message */
@@ -515,15 +557,11 @@ void init_vmcs(struct acrn_vcpu *vcpu)
 	vmx_rev_id = msr_read(MSR_IA32_VMX_BASIC);
 	(void)memcpy_s(vcpu->arch.vmcs, 4U, (void *)&vmx_rev_id, 4U);
 
-	/* Execute VMCLEAR on previous un-clear VMCS */
-	if (*vmcs_ptr != NULL) {
-		vmcs_pa = hva2hpa(*vmcs_ptr);
-		exec_vmclear((void *)&vmcs_pa);
-	}
+	/* Execute VMCLEAR VMCS of this vcpu */
+	clear_va_vmcs(vcpu->arch.vmcs);
 
 	/* Load VMCS pointer */
-	vmcs_pa = hva2hpa(vcpu->arch.vmcs);
-	exec_vmptrld((void *)&vmcs_pa);
+	load_va_vmcs(vcpu->arch.vmcs);
 	*vmcs_ptr = (void *)vcpu->arch.vmcs;
 
 	/* Initialize the Virtual Machine Control Structure (VMCS) */
@@ -535,16 +573,30 @@ void init_vmcs(struct acrn_vcpu *vcpu)
 	init_exit_ctrl(vcpu);
 }
 
+/**
+ * @pre vcpu != NULL
+ */
+void load_vmcs(const struct acrn_vcpu *vcpu)
+{
+	void **vmcs_ptr = &get_cpu_var(vmcs_run);
+
+	if (vcpu->launched && (*vmcs_ptr != (void *)vcpu->arch.vmcs)) {
+		load_va_vmcs(vcpu->arch.vmcs);
+		*vmcs_ptr = (void *)vcpu->arch.vmcs;
+	}
+}
+
 void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 {
 	uint32_t value32;
 	if (is_lapic_pt_configured(vcpu->vm)) {
-		dev_dbg(ACRN_DBG_LAPICPT, "%s: switching to x2apic and passthru", __func__);
+		dev_dbg(DBG_LEVEL_LAPICPT, "%s: switching to x2apic and passthru", __func__);
 		/*
 		 * Disable external interrupt exiting and irq ack
 		 * Disable posted interrupt processing
 		 * update x2apic msr bitmap for pass-thru
 		 * enable inteception only for ICR
+		 * enable NMI exit as we will use NMI to kick vCPU thread
 		 * disable pre-emption for TSC DEADLINE MSR
 		 * Disable Register Virtualization and virtual interrupt delivery
 		 * Disable "use TPR shadow"
@@ -555,19 +607,30 @@ void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 		if (is_apicv_advanced_feature_supported()) {
 			value32 &= ~VMX_PINBASED_CTLS_POST_IRQ;
 		}
+
+		/*
+		 * ACRN hypervisor needs to kick vCPU off VMX non-root mode to do some
+		 * operations in hypervisor, such as interrupt/exception injection, EPT
+		 * flush etc. For non lapic-pt vCPUs, we can use IPI to do so. But, it
+		 * doesn't work for lapic-pt vCPUs as the IPI will be injected to VMs
+		 * directly without vmexit. So, here we enable NMI-exiting and use NMI
+		 * as notification signal after passthroughing the lapic to vCPU.
+		 */
+		value32 |= VMX_PINBASED_CTLS_NMI_EXIT | VMX_PINBASED_CTLS_VIRT_NMI;
 		exec_vmwrite32(VMX_PIN_VM_EXEC_CONTROLS, value32);
 
 		value32 = exec_vmread32(VMX_EXIT_CONTROLS);
 		value32 &= ~VMX_EXIT_CTLS_ACK_IRQ;
 		exec_vmwrite32(VMX_EXIT_CONTROLS, value32);
 
-		value32 = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS);
-		value32 &= ~VMX_PROCBASED_CTLS_TPR_SHADOW;
-		exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, value32);
+		vcpu->arch.proc_vm_exec_ctrls &= ~VMX_PROCBASED_CTLS_TPR_SHADOW;
+		vcpu->arch.proc_vm_exec_ctrls &= ~VMX_PROCBASED_CTLS_HLT;
+		exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS, vcpu->arch.proc_vm_exec_ctrls);
 
 		exec_vmwrite32(VMX_TPR_THRESHOLD, 0U);
 
 		value32 = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS2);
+		value32 &= ~VMX_PROCBASED_CTLS2_PAUSE_LOOP;
 		value32 &= ~VMX_PROCBASED_CTLS2_VAPIC;
 		if (is_apicv_advanced_feature_supported()) {
 			value32 &= ~VMX_PROCBASED_CTLS2_VIRQ;
@@ -576,6 +639,13 @@ void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 		exec_vmwrite32(VMX_PROC_VM_EXEC_CONTROLS2, value32);
 
 		update_msr_bitmap_x2apic_passthru(vcpu);
+
+		/*
+		 * After passthroughing lapic to guest, we should use NMI signal to
+		 * notify vcpu thread instead of IPI. Because the IPI will be delivered
+		 * the guest directly without vmexit.
+		 */
+		vcpu->thread_obj.notify_mode = SCHED_NOTIFY_NMI;
 	} else {
 		value32 = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS2);
 		value32 &= ~VMX_PROCBASED_CTLS2_VAPIC;

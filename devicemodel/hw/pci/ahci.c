@@ -93,14 +93,11 @@ enum sata_fis_type {
  * Debug printf
  */
 #ifdef AHCI_DEBUG
-static FILE *dbg;
-#define DPRINTF(format, arg...)	do { fprintf(dbg, format, ##arg); \
-	fflush(dbg); } \
-	while (0)
+#define DPRINTF(format, arg...) do { pr_dbg(format, ##arg); } while (0)
 #else
 #define DPRINTF(format, arg...)
 #endif
-#define WPRINTF(format, arg...) printf(format, ##arg)
+#define WPRINTF(format, arg...) pr_err(format, ##arg)
 
 struct ahci_ioreq {
 	struct blockif_req io_req;
@@ -789,6 +786,10 @@ read_prdt(struct ahci_port *p, int slot, uint8_t *cfis,
 
 		dbcsz = (prdt->dbc & DBCMASK) + 1;
 		ptr = paddr_guest2host(ahci_ctx(p->ahci_dev), prdt->dba, dbcsz);
+		if (!ptr) {
+			WPRINTF("%s:%d invalid gpa 0x%x!\n", __func__, __LINE__, prdt->dba);
+			continue;
+		}
 		sublen = MIN(len, dbcsz);
 		memcpy(to, ptr, sublen);
 		len -= sublen;
@@ -908,6 +909,10 @@ write_prdt(struct ahci_port *p, int slot, uint8_t *cfis,
 
 		dbcsz = (prdt->dbc & DBCMASK) + 1;
 		ptr = paddr_guest2host(ahci_ctx(p->ahci_dev), prdt->dba, dbcsz);
+		if (!ptr) {
+			WPRINTF("%s:%d invalid gpa 0x%x!\n", __func__, __LINE__, prdt->dba);
+			continue;
+		}
 		sublen = MIN(len, dbcsz);
 		memcpy(ptr, from, sublen);
 		len -= sublen;
@@ -1815,6 +1820,10 @@ ahci_handle_slot(struct ahci_port *p, int slot)
 #endif
 	cfis = paddr_guest2host(ahci_ctx(ahci_dev), hdr->ctba,
 			0x80 + hdr->prdtl * sizeof(struct ahci_prdt_entry));
+	if (!cfis) {
+		WPRINTF("%s:%d invalid gpa 0x%x!\n", __func__, __LINE__, hdr->ctba);
+		return;
+	}
 #ifdef AHCI_DEBUG
 	prdt = (struct ahci_prdt_entry *)(cfis + 0x80);
 
@@ -2352,9 +2361,6 @@ pci_ahci_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts, int atapi)
 	ret = 0;
 
 #define MAX_OPTS_LEN 256
-#ifdef AHCI_DEBUG
-	dbg = fopen("/tmp/log", "w+");
-#endif
 
 	ahci_dev = calloc(1, sizeof(struct pci_ahci_vdev));
 	if (!ahci_dev) {
@@ -2419,8 +2425,8 @@ pci_ahci_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts, int atapi)
 			sizeof(ahci_dev->port[p].ident),
 			"ACRN--%02X%02X-%02X%02X-%02X%02X", digest[0],
 			digest[1], digest[2], digest[3], digest[4], digest[5]);
-		if (rc > sizeof(ahci_dev->port[p].ident))
-			WPRINTF("%s: digest is longer than ident\n", __func__);
+		if (rc >= sizeof(ahci_dev->port[p].ident) || rc < 0)
+			WPRINTF("%s: digest number is invalid!\n", __func__);
 
 		/*
 		 * Allocate blockif request structures and add them

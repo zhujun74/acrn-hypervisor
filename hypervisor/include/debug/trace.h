@@ -11,7 +11,7 @@
 
 #ifndef TRACE_H
 #define TRACE_H
-#include <per_cpu.h>
+#include <asm/per_cpu.h>
  /* TIMER EVENT */
 #define TRACE_TIMER_ACTION_ADDED	0x1U
 #define TRACE_TIMER_ACTION_PCKUP	0x2U

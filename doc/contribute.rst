@@ -1,7 +1,7 @@
 .. _contribute_acrn:
 
-Contribute to ACRN
-##################
+Developer Reference
+###################
 
 Here's where you'll find details about ACRN's high-level design and
 design principles, along with guidelines followed by the
@@ -12,8 +12,10 @@ Design Guides
 *************
 
 Read about ACRN's high-level design and architecture principles that led
-to the develoment of the ACRN hypervisor and its components.  You'll
+to the development of the ACRN hypervisor and its components.  You'll
 also find details about specific architecture topics.
+
+.. rst-class:: rst-columns2
 
 .. toctree::
    :maxdepth: 1
@@ -21,20 +23,21 @@ also find details about specific architecture topics.
    developer-guides/modularity
    developer-guides/hld/index
    developer-guides/sw_design_guidelines
-   developer-guides/GVT-g-porting
    developer-guides/trusty
    developer-guides/l1tf
    developer-guides/VBSK-analysis
 
 
-Contributing Guides
-*******************
+Contribute Guides
+*****************
 
 As an open-source project, we welcome and encourage the community to
 submit patches for code, documentation, tests, and more, directly to the
 project. Here's where you'll find how the development team works and the
 guidelines they (and you) use to contribute code (and documentation) to
 the project.
+
+.. rst-class:: rst-columns2
 
 .. toctree::
    :maxdepth: 1
@@ -45,15 +48,12 @@ the project.
    developer-guides/graphviz
    tutorials/docbuild
 
-.. _tools:
-
-Tools
-*****
+API Documentation
+*****************
 
 .. toctree::
-   :glob:
    :maxdepth: 1
 
-   misc/tools/acrn-crashlog/README
-   misc/tools/**
-   misc/acrn-manager/**
+   api/index
+
+

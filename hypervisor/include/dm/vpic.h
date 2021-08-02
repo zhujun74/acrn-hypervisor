@@ -51,13 +51,13 @@
 /* No definitions, it is the base vector of the IDT for 8086 mode */
 
 /* Initialization control word 3. Written to the odd address. */
-/* For a master PIC, bitfield indicating a slave 8259 on given input */
-/* For slave, lower 3 bits are the slave's ID binary id on master */
+/* For a primary PIC, bitfield indicating a secondary PIC on given input */
+/* For a secondary PIC, lower 3 bits are the PIC's ID binary id on primary PIC */
 
 /* Initialization control word 4. Written to the odd address. */
 #define	ICW4_8086	0x01U		/* 1 = 8086, 0 = 8080 */
 #define	ICW4_AEOI	0x02U		/* 1 = Auto EOI */
-#define	ICW4_MS		0x04U		/* 1 = buffered master, 0 = slave */
+#define	ICW4_MS		0x04U		/* 1 = buffered primary PIC, 0 = secondary PIC*/
 #define	ICW4_BUF	0x08U		/* 1 = enable buffer mode */
 #define	ICW4_SFNM	0x10U		/* 1 = special fully nested mode */
 
@@ -131,12 +131,11 @@ struct i8259_reg_state {
 };
 
 struct acrn_vpic {
-	struct acrn_vm		*vm;
 	spinlock_t	lock;
 	struct i8259_reg_state	i8259[2];
-	struct ptirq_remapping_info *vpin_to_pt_entry[NR_VPIC_PINS_TOTAL];
 };
 
+struct acrn_vm;
 void vpic_init(struct acrn_vm *vm);
 
 /**
@@ -150,13 +149,13 @@ void vpic_init(struct acrn_vm *vm);
  * @brief Set vPIC IRQ line status.
  *
  * @param[in] vpic      Pointer to target VM's vpic table
- * @param[in] irqline   Target IRQ number
+ * @param[in] vgsi      GSI for the virtual interrupt
  * @param[in] operation action options:GSI_SET_HIGH/GSI_SET_LOW/
  *			GSI_RAISING_PULSE/GSI_FALLING_PULSE
  *
  * @return None
  */
-void vpic_set_irqline(struct acrn_vpic *vpic, uint32_t irqline, uint32_t operation);
+void vpic_set_irqline(struct acrn_vpic *vpic, uint32_t vgsi, uint32_t operation);
 
 /**
  * @brief Get pending virtual interrupts for vPIC.
@@ -180,7 +179,7 @@ void vpic_pending_intr(struct acrn_vpic *vpic, uint32_t *vecptr);
  * @pre vm != NULL
  */
 void vpic_intr_accepted(struct acrn_vpic *vpic, uint32_t vector);
-void vpic_get_irqline_trigger_mode(const struct acrn_vpic *vpic, uint32_t irqline, enum vpic_trigger *trigger);
+void vpic_get_irqline_trigger_mode(const struct acrn_vpic *vpic, uint32_t vgsi, enum vpic_trigger *trigger);
 uint32_t vpic_pincount(void);
 struct acrn_vpic *vm_pic(const struct acrn_vm *vm);
 

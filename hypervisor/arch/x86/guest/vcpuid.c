@@ -6,13 +6,14 @@
 
 #include <types.h>
 #include <errno.h>
-#include <bits.h>
-#include <vcpu.h>
-#include <vm.h>
-#include <cpuid.h>
-#include <cpufeatures.h>
-#include <vmx.h>
-#include <sgx.h>
+#include <asm/lib/bits.h>
+#include <asm/guest/vcpu.h>
+#include <asm/guest/vm.h>
+#include <asm/cpuid.h>
+#include <asm/cpufeatures.h>
+#include <asm/vmx.h>
+#include <asm/sgx.h>
+#include <asm/tsc.h>
 #include <logmsg.h>
 
 static inline const struct vcpuid_entry *local_find_vcpuid_entry(const struct acrn_vcpu *vcpu,
@@ -61,8 +62,7 @@ static inline const struct vcpuid_entry *find_vcpuid_entry(const struct acrn_vcp
 
 		if ((leaf & 0x80000000U) != 0U) {
 			limit = vm->vcpuid_xlevel;
-		}
-		else {
+		} else {
 			limit = vm->vcpuid_level;
 		}
 
@@ -90,7 +90,7 @@ static inline int32_t set_vcpuid_entry(struct acrn_vm *vm,
 
 	if (vm->vcpuid_entry_nr == MAX_VM_VCPUID_ENTRIES) {
 		pr_err("%s, vcpuid entry over MAX_VM_VCPUID_ENTRIES(%u)\n", __func__, MAX_VM_VCPUID_ENTRIES);
-	        ret = -ENOMEM;
+		ret = -ENOMEM;
 	} else {
 		tmp = &vm->vcpuid_entries[vm->vcpuid_entry_nr];
 		vm->vcpuid_entry_nr++;
@@ -115,9 +115,11 @@ static void init_vcpuid_entry(uint32_t leaf, uint32_t subleaf,
 	switch (leaf) {
 	case 0x07U:
 		if (subleaf == 0U) {
+			uint64_t cr4_reserved_mask = get_cr4_reserved_bits();
+
 			cpuid_subleaf(leaf, subleaf, &entry->eax, &entry->ebx, &entry->ecx, &entry->edx);
-			/* mask invpcid */
-			entry->ebx &= ~(CPUID_EBX_INVPCID | CPUID_EBX_PQM | CPUID_EBX_PQE);
+
+			entry->ebx &= ~(CPUID_EBX_PQM | CPUID_EBX_PQE);
 
 			/* mask SGX and SGX_LC */
 			entry->ebx &= ~CPUID_EBX_SGX;
@@ -128,6 +130,38 @@ static void init_vcpuid_entry(uint32_t leaf, uint32_t subleaf,
 
 			/* mask Intel Processor Trace, since 14h is disabled */
 			entry->ebx &= ~CPUID_EBX_PROC_TRC;
+
+			/* mask CET shadow stack and indirect branch tracking */
+			entry->ecx &= ~CPUID_ECX_CET_SS;
+			entry->edx &= ~CPUID_EDX_CET_IBT;
+
+			if ((cr4_reserved_mask & CR4_FSGSBASE) != 0UL) {
+				entry->ebx &= ~CPUID_EBX_FSGSBASE;
+			}
+
+			if ((cr4_reserved_mask & CR4_SMEP) != 0UL) {
+				entry->ebx &= ~CPUID_EBX_SMEP;
+			}
+
+			if ((cr4_reserved_mask & CR4_SMAP) != 0UL) {
+				entry->ebx &= ~CPUID_EBX_SMAP;
+			}
+
+			if ((cr4_reserved_mask & CR4_UMIP) != 0UL) {
+				entry->ecx &= ~CPUID_ECX_UMIP;
+			}
+
+			if ((cr4_reserved_mask & CR4_PKE) != 0UL) {
+				entry->ecx &= ~CPUID_ECX_PKE;
+			}
+
+			if ((cr4_reserved_mask & CR4_LA57) != 0UL) {
+				entry->ecx &= ~CPUID_ECX_LA57;
+			}
+
+			if ((cr4_reserved_mask & CR4_PKS) != 0UL) {
+				entry->ecx &= ~CPUID_ECX_PKS;
+			}
 		} else {
 			entry->eax = 0U;
 			entry->ebx = 0U;
@@ -214,7 +248,7 @@ static int32_t set_vcpuid_sgx(struct acrn_vm *vm)
 
 	if (is_vsgx_supported(vm->vm_id)) {
 		struct vcpuid_entry entry;
-		struct epc_map* maps;
+		struct epc_map *maps;
 		uint32_t mid;
 		uint64_t size = 0;
 		/* init cpuid.12h.0h */
@@ -263,8 +297,25 @@ static int32_t set_vcpuid_extended_function(struct acrn_vm *vm)
 		if (is_sos_vm(vm)) {
 			entry.eax |= GUEST_CAPS_PRIVILEGE_VM;
 		}
+#ifdef CONFIG_HYPERV_ENABLED
+		else {
+			hyperv_init_vcpuid_entry(0x40000001U, 0U, 0U, &entry);
+		}
+#endif
 		result = set_vcpuid_entry(vm, &entry);
 	}
+
+#ifdef CONFIG_HYPERV_ENABLED
+	if (result == 0) {
+		for (i = 0x40000002U; i <= 0x40000006U; i++) {
+			hyperv_init_vcpuid_entry(i, 0U, 0U, &entry);
+			result = set_vcpuid_entry(vm, &entry);
+			if (result != 0) {
+				break;
+			}
+		}
+	}
+#endif
 
 	if (result == 0) {
 		init_vcpuid_entry(0x40000010U, 0U, 0U, &entry);
@@ -311,7 +362,7 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 
 		for (i = 1U; i <= limit; i++) {
 			/* cpuid 1/0xb is percpu related */
-			if ((i == 1U) || (i == 0xbU) || (i == 0xdU)) {
+			if ((i == 1U) || (i == 0xbU) || (i == 0xdU) || (i == 0x19U)) {
 				continue;
 			}
 
@@ -344,13 +395,23 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 				result = set_vcpuid_sgx(vm);
 				break;
 			/* These features are disabled */
-			/* PMU is not supported */
+			/* PMU is not supported except for core partition VM, like RTVM */
 			case 0x0aU:
+				if (is_lapic_pt_configured(vm)) {
+					init_vcpuid_entry(i, 0U, 0U, &entry);
+					result = set_vcpuid_entry(vm, &entry);
+				}
+				break;
+
 			/* Intel RDT */
 			case 0x0fU:
 			case 0x10U:
 			/* Intel Processor Trace */
 			case 0x14U:
+			/* PCONFIG */
+			case 0x1bU:
+			/* V2 Extended Topology Enumeration Leaf */
+			case 0x1fU:
 				break;
 			default:
 				init_vcpuid_entry(i, 0U, 0U, &entry);
@@ -375,15 +436,16 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 
 static inline bool is_percpu_related(uint32_t leaf)
 {
-	return ((leaf == 0x1U) || (leaf == 0xbU) || (leaf == 0xdU) || (leaf == 0x80000001U));
+	return ((leaf == 0x1U) || (leaf == 0xbU) || (leaf == 0xdU) || (leaf == 0x19U) || (leaf == 0x80000001U));
 }
 
 static void guest_cpuid_01h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
 	uint32_t apicid = vlapic_get_apicid(vcpu_vlapic(vcpu));
 	uint64_t guest_ia32_misc_enable = vcpu_get_guest_msr(vcpu, MSR_IA32_MISC_ENABLE);
+	uint64_t cr4_reserved_mask = get_cr4_reserved_bits();
 
-	cpuid(0x1U, eax, ebx, ecx, edx);
+	cpuid_subleaf(0x1U, 0x0U, eax, ebx, ecx, edx);
 	/* Patching initial APIC ID */
 	*ebx &= ~APIC_ID_MASK;
 	*ebx |= (apicid <<  APIC_ID_SHIFT);
@@ -405,33 +467,60 @@ static void guest_cpuid_01h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx
 	/* mask SDBG for silicon debug */
 	*ecx &= ~CPUID_ECX_SDBG;
 
-	/* mask pcid */
-	*ecx &= ~CPUID_ECX_PCID;
-
-	/*mask vmx to guest os */
-	*ecx &= ~CPUID_ECX_VMX;
+	/* mask VMX to guest OS */
+	if (!is_nvmx_configured(vcpu->vm)) {
+		*ecx &= ~CPUID_ECX_VMX;
+	}
 
 	/* set Hypervisor Present Bit */
 	*ecx |= CPUID_ECX_HV;
 
-	/* if guest disabed monitor/mwait, clear cpuid.01h[3] */
-	if ((guest_ia32_misc_enable & MSR_IA32_MISC_ENABLE_MONITOR_ENA) == 0UL) {
-		*ecx &= ~CPUID_ECX_MONITOR;
+	if ((cr4_reserved_mask & CR4_PCIDE) != 0UL) {
+		*ecx &= ~CPUID_ECX_PCID;
 	}
 
-	/*no xsave support for guest if it is not enabled on host*/
-	if ((*ecx & CPUID_ECX_OSXSAVE) == 0U) {
-		*ecx &= ~CPUID_ECX_XSAVE;
+	/* guest monitor/mwait is supported only if it is allowed('vm_mwait_cap' is true)
+	 * and MSR_IA32_MISC_ENABLE_MONITOR_ENA bit of guest MSR_IA32_MISC_ENABLE is set,
+	 * else clear cpuid.01h[3].
+	 */
+	*ecx &= ~CPUID_ECX_MONITOR;
+	if (vcpu->vm->arch_vm.vm_mwait_cap &&
+		((guest_ia32_misc_enable & MSR_IA32_MISC_ENABLE_MONITOR_ENA) != 0UL)) {
+		*ecx |= CPUID_ECX_MONITOR;
 	}
 
 	*ecx &= ~CPUID_ECX_OSXSAVE;
 	if ((*ecx & CPUID_ECX_XSAVE) != 0U) {
 		uint64_t cr4;
 		/*read guest CR4*/
-		cr4 = exec_vmread(VMX_GUEST_CR4);
+		cr4 = vcpu_get_cr4(vcpu);
 		if ((cr4 & CR4_OSXSAVE) != 0UL) {
 			*ecx |= CPUID_ECX_OSXSAVE;
 		}
+	}
+
+	if ((cr4_reserved_mask & CR4_VME) != 0UL) {
+		*edx &= ~CPUID_EDX_VME;
+	}
+
+	if ((cr4_reserved_mask & CR4_DE) != 0UL) {
+		*edx &= ~CPUID_EDX_DE;
+	}
+
+	if ((cr4_reserved_mask & CR4_PSE) != 0UL) {
+		*edx &= ~CPUID_EDX_PSE;
+	}
+
+	if ((cr4_reserved_mask & CR4_PAE) != 0UL) {
+		*edx &= ~CPUID_EDX_PAE;
+	}
+
+	if ((cr4_reserved_mask & CR4_PGE) != 0UL) {
+		*edx &= ~CPUID_EDX_PGE;
+	}
+
+	if ((cr4_reserved_mask & CR4_OSFXSR) != 0UL) {
+		*edx &= ~CPUID_EDX_FXSR;
 	}
 
 	/* mask Debug Store feature */
@@ -440,37 +529,10 @@ static void guest_cpuid_01h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx
 
 static void guest_cpuid_0bh(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
-	uint32_t leaf = 0x0bU;
-	uint32_t subleaf = *ecx;
+	/* Forward host cpu topology to the guest, guest will know the native platform information such as host cpu topology here */
+	cpuid_subleaf(0x0BU, *ecx, eax, ebx, ecx, edx);
 
 	/* Patching X2APIC */
-	if (is_sos_vm(vcpu->vm)) {
-		cpuid_subleaf(leaf, subleaf, eax, ebx, ecx, edx);
-	} else {
-		*ecx = subleaf & 0xFFU;
-		/* No HT emulation for UOS */
-		switch (subleaf) {
-		case 0U:
-			*eax = 0U;
-			*ebx = 1U;
-			*ecx |= (1U << 8U);
-		break;
-		case 1U:
-			if (vcpu->vm->hw.created_vcpus == 1U) {
-				*eax = 0U;
-			} else {
-				*eax = (uint32_t)fls32(vcpu->vm->hw.created_vcpus - 1U) + 1U;
-			}
-			*ebx = vcpu->vm->hw.created_vcpus;
-			*ecx |= (2U << 8U);
-		break;
-		default:
-			*eax = 0U;
-			*ebx = 0U;
-			*ecx |= (0U << 8U);
-		break;
-		}
-	}
 	*edx = vlapic_get_apicid(vcpu_vlapic(vcpu));
 }
 
@@ -485,13 +547,44 @@ static void guest_cpuid_0dh(__unused struct acrn_vcpu *vcpu, uint32_t *eax, uint
 				*edx = 0U;
 	} else {
 		cpuid_subleaf(0x0dU, subleaf, eax, ebx, ecx, edx);
-		if (subleaf == 0U) {
+		switch (subleaf) {
+		case 0U:
 			/* SDM Vol.1 17-2, On processors that do not support Intel MPX,
 			 * CPUID.(EAX=0DH,ECX=0):EAX[3] and
 			 * CPUID.(EAX=0DH,ECX=0):EAX[4] will both be 0 */
-			*eax &= ~ CPUID_EAX_XCR0_BNDREGS;
-			*eax &= ~ CPUID_EAX_XCR0_BNDCSR;
+			*eax &= ~(CPUID_EAX_XCR0_BNDREGS | CPUID_EAX_XCR0_BNDCSR);
+			break;
+		case 1U:
+			*ecx &= ~(CPUID_ECX_CET_U_STATE | CPUID_ECX_CET_S_STATE);
+			break;
+		case 11U:
+		case 12U:
+			*eax = 0U;
+			*ebx = 0U;
+			*ecx = 0U;
+			*edx = 0U;
+			break;
+		default:
+			/* No emulation for other leaves */
+			break;
 		}
+	}
+}
+
+static void guest_cpuid_19h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+	if (pcpu_has_cap(X86_FEATURE_KEYLOCKER)) {
+		/* Host CR4.KL should be enabled at boot time */
+		cpuid_subleaf(0x19U, 0U, eax, ebx, ecx, edx);
+		/* Guest CR4.KL determines KL_AES_ENABLED */
+		*ebx &= ~(vcpu->arch.cr4_kl_enabled ? 0U : CPUID_EBX_KL_AES_EN);
+		/* Don't support nobackup and randomization parameter of LOADIWKEY */
+		*ecx &= ~(CPUID_ECX_KL_NOBACKUP | CPUID_ECX_KL_RANDOM_KS);
+	} else {
+		*eax = 0U;
+		*ebx = 0U;
+		*ecx = 0U;
+		*edx = 0U;
 	}
 }
 
@@ -503,7 +596,7 @@ static void guest_cpuid_80000001h(const struct acrn_vcpu *vcpu,
 	uint32_t leaf = 0x80000001U;
 
 	if ((entry_check != NULL) && (entry_check->eax >= leaf)) {
-		cpuid(leaf, eax, ebx, ecx, edx);
+		cpuid_subleaf(leaf, 0x0U, eax, ebx, ecx, edx);
 		/* SDM Vol4 2.1, XD Bit Disable of MSR_IA32_MISC_ENABLE
 		 * When set to 1, the Execute Disable Bit feature (XD Bit) is disabled and the XD Bit
 		 * extended feature flag will be clear (CPUID.80000001H: EDX[20]=0)
@@ -572,6 +665,10 @@ void guest_cpuid(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t 
 
 		case 0x0dU:
 			guest_cpuid_0dh(vcpu, eax, ebx, ecx, edx);
+			break;
+
+		case 0x19U:
+			guest_cpuid_19h(vcpu, eax, ebx, ecx, edx);
 			break;
 
 		case 0x80000001U:

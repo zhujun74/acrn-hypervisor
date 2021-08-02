@@ -30,12 +30,13 @@
 
 #include <types.h>
 #include <errno.h>
-#include <instr_emul.h>
-#include <vmx.h>
-#include <vmcs.h>
-#include <mmu.h>
-#include <per_cpu.h>
+#include <asm/guest/instr_emul.h>
+#include <asm/vmx.h>
+#include <asm/guest/vmcs.h>
+#include <asm/mmu.h>
+#include <asm/per_cpu.h>
 #include <logmsg.h>
+#include <asm/guest/virq.h>
 
 #define CPU_REG_FIRST			CPU_REG_RAX
 #define CPU_REG_LAST			CPU_REG_GDTR
@@ -82,6 +83,7 @@
 #define VIE_OP_TYPE_STOS	13U
 #define VIE_OP_TYPE_BITTEST	14U
 #define VIE_OP_TYPE_TEST	15U
+#define VIE_OP_TYPE_XCHG	16U
 
 /* struct vie_op.op_flags */
 #define VIE_OP_F_IMM		(1U << 0U)  /* 16/32-bit immediate operand */
@@ -201,6 +203,12 @@ static const struct instr_emul_vie_op one_byte_opcodes[256] = {
 	},
 	[0x85] = {
 		.op_type = VIE_OP_TYPE_TEST,
+	},
+	[0x86] = {
+		.op_type = VIE_OP_TYPE_XCHG,
+	},
+	[0x87] = {
+		.op_type = VIE_OP_TYPE_XCHG,
 	},
 	[0x08] = {
 		.op_type = VIE_OP_TYPE_OR,
@@ -560,14 +568,13 @@ static bool is_desc_valid(const struct seg_desc *desc, uint32_t prot)
  *@pre prot must be PROT_READ or PROT_WRITE
  */
 static void vie_calculate_gla(enum vm_cpu_mode cpu_mode, enum cpu_reg_name seg,
-	const struct seg_desc *desc, uint64_t offset_arg, uint8_t addrsize, uint64_t *gla)
+	const struct seg_desc *desc, uint64_t offset, uint8_t addrsize, uint64_t *gla)
 {
 	uint64_t firstoff, segbase;
-	uint64_t offset = offset_arg;
 	uint8_t glasize;
 
 	firstoff = offset;
-	glasize = (cpu_mode == CPU_MODE_64BIT) ? 8U: 4U;
+	glasize = (cpu_mode == CPU_MODE_64BIT) ? 8U : 4U;
 
 	/*
 	 * In 64-bit mode all segments except %fs and %gs have a segment
@@ -593,7 +600,7 @@ static void vie_calculate_gla(enum vm_cpu_mode cpu_mode, enum cpu_reg_name seg,
  */
 static inline void vie_mmio_read(const struct acrn_vcpu *vcpu, uint64_t *rval)
 {
-	*rval = vcpu->req.reqs.mmio.value;
+	*rval = vcpu->req.reqs.mmio_request.value;
 }
 
 /*
@@ -601,7 +608,7 @@ static inline void vie_mmio_read(const struct acrn_vcpu *vcpu, uint64_t *rval)
  */
 static inline void vie_mmio_write(struct acrn_vcpu *vcpu, uint64_t wval)
 {
-	vcpu->req.reqs.mmio.value = wval;
+	vcpu->req.reqs.mmio_request.value = wval;
 }
 
 static void vie_calc_bytereg(const struct instr_emul_vie *vie,
@@ -1080,7 +1087,7 @@ static int32_t emulate_movs(struct acrn_vcpu *vcpu, const struct instr_emul_vie 
 
 	/* update the Memory Operand byte size if necessary */
 	opsize = ((vie->op.op_flags & VIE_OP_F_BYTE_OP) != 0U) ? 1U : vie->opsize;
-	is_mmio_write = (vcpu->req.reqs.mmio.direction == REQUEST_WRITE);
+	is_mmio_write = (vcpu->req.reqs.mmio_request.direction == ACRN_IOREQ_DIR_WRITE);
 
 	/*
 	 * XXX although the MOVS instruction is only supposed to be used with
@@ -1641,62 +1648,43 @@ static int32_t emulate_bittest(struct acrn_vcpu *vcpu, const struct instr_emul_v
 	return ret;
 }
 
-static int32_t vmm_emulate_instruction(struct acrn_vcpu *vcpu)
+static __attribute__((noinline)) int32_t emulate_xchg_for_splitlock(struct acrn_vcpu *vcpu, const struct instr_emul_vie *vie)
 {
-	struct instr_emul_vie *vie = &vcpu->inst_ctxt.vie;
-	int32_t error;
+	enum cpu_reg_name reg;
+	uint64_t reg_val, data = 0UL;
+	uint8_t opsize = vie->opsize;
+	int32_t ret = 0;
+	uint32_t err_code = 0U;
+	uint64_t fault_addr;
 
-	if (vie->decoded != 0U) {
-		switch (vie->op.op_type) {
-		case VIE_OP_TYPE_GROUP1:
-			error = emulate_group1(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_CMP:
-			error = emulate_cmp(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_MOV:
-			error = emulate_mov(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_MOVSX:
-		case VIE_OP_TYPE_MOVZX:
-			error = emulate_movx(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_MOVS:
-			error = emulate_movs(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_STOS:
-			error = emulate_stos(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_AND:
-			error = emulate_and(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_TEST:
-			error = emulate_test(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_OR:
-			error = emulate_or(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_SUB:
-			error = emulate_sub(vcpu, vie);
-			break;
-		case VIE_OP_TYPE_BITTEST:
-			error = emulate_bittest(vcpu, vie);
-			break;
-		default:
-			error = -EINVAL;
-			break;
+	reg = (enum cpu_reg_name)(vie->reg);
+	reg_val = vm_get_register(vcpu, reg);
+
+	ret = copy_from_gva(vcpu, &data, vie->gva, opsize, &err_code, &fault_addr);
+	if (ret == 0) {
+		err_code = PAGE_FAULT_WR_FLAG;
+		ret = copy_to_gva(vcpu, &reg_val, vie->gva, opsize, &err_code, &fault_addr);
+		if (ret == 0) {
+			vie_update_register(vcpu, reg, data, opsize);
 		}
-	} else {
-		error = -EINVAL;
 	}
 
-	return error;
+	if (ret < 0) {
+		pr_err("Error copy xchg data!");
+		if (ret == -EFAULT) {
+			vcpu_inject_pf(vcpu, fault_addr, err_code);
+		}
+	}
+
+	return ret;
 }
 
 static int32_t vie_init(struct instr_emul_vie *vie, struct acrn_vcpu *vcpu)
 {
-	uint64_t guest_rip_gva = vcpu_get_rip(vcpu);
 	uint32_t inst_len = vcpu->arch.inst_len;
+	enum vm_cpu_mode cpu_mode;
+	struct seg_desc desc;
+	uint64_t guest_rip_gva;
 	uint32_t err_code;
 	uint64_t fault_addr;
 	int32_t ret;
@@ -1711,6 +1699,13 @@ static int32_t vie_init(struct instr_emul_vie *vie, struct acrn_vcpu *vcpu)
 		vie->base_register = CPU_REG_LAST;
 		vie->index_register = CPU_REG_LAST;
 		vie->segment_register = CPU_REG_LAST;
+
+		cpu_mode = get_vcpu_mode(vcpu);
+		vm_get_seg_desc(CPU_REG_CS, &desc);
+
+		/* VMX_GUEST_RIP is a natural-width field */
+		vie_calculate_gla(cpu_mode, CPU_REG_CS, &desc, vcpu_get_rip(vcpu),
+				8U, &guest_rip_gva);
 
 		err_code = PAGE_FAULT_ID_FLAG;
 		ret = copy_from_gva(vcpu, vie->inst, guest_rip_gva, inst_len, &err_code, &fault_addr);
@@ -2320,6 +2315,7 @@ static int32_t instr_check_gva(struct acrn_vcpu *vcpu, enum vm_cpu_mode cpu_mode
 	}
 
 	gva = segbase + base + (uint64_t)vie->scale * idx + (uint64_t)vie->displacement;
+	vie->gva = gva;
 
 	if (vie_canonical_check(cpu_mode, gva) != 0) {
 		if (seg == CPU_REG_SS) {
@@ -2329,7 +2325,7 @@ static int32_t instr_check_gva(struct acrn_vcpu *vcpu, enum vm_cpu_mode cpu_mode
 		}
 		ret = -EFAULT;
 	} else {
-		err_code = (vcpu->req.reqs.mmio.direction == REQUEST_WRITE) ? PAGE_FAULT_WR_FLAG : 0U;
+		err_code = (vcpu->req.reqs.mmio_request.direction == ACRN_IOREQ_DIR_WRITE) ? PAGE_FAULT_WR_FLAG : 0U;
 
 		ret = gva2gpa(vcpu, gva, &gpa, &err_code);
 		if (ret < 0) {
@@ -2344,7 +2340,14 @@ static int32_t instr_check_gva(struct acrn_vcpu *vcpu, enum vm_cpu_mode cpu_mode
 	return ret;
 }
 
-int32_t decode_instruction(struct acrn_vcpu *vcpu)
+ /* @retval >=0 on success
+  * @retval -EINVAL on any failure if (full_decode == true).
+  * @retval -EINVAL on any failure except unknown instruction if (full_decode == false).
+  * @retval -1 for unknown instruction if (full_decode == false).
+  *
+  * For unknown instruction, when full_decode is false, will keep retval = -1, and do not inject #UD
+  */
+int32_t decode_instruction(struct acrn_vcpu *vcpu, bool full_decode)
 {
 	struct instr_emul_ctxt *emul_ctxt;
 	uint32_t csar;
@@ -2353,21 +2356,23 @@ int32_t decode_instruction(struct acrn_vcpu *vcpu)
 
 	emul_ctxt = &vcpu->inst_ctxt;
 	retval = vie_init(&emul_ctxt->vie, vcpu);
+
 	if (retval < 0) {
 		if (retval != -EFAULT) {
-			pr_err("init vie failed @ 0x%016llx:", vcpu_get_rip(vcpu));
+			pr_err("init vie failed @ 0x%016lx:", vcpu_get_rip(vcpu));
 		}
 	} else {
-
 		csar = exec_vmread32(VMX_GUEST_CS_ATTR);
 		cpu_mode = get_vcpu_mode(vcpu);
 
 		retval = local_decode_instruction(cpu_mode, seg_desc_def32(csar), &emul_ctxt->vie);
 
 		if (retval != 0) {
-			pr_err("decode instruction failed @ 0x%016llx:", vcpu_get_rip(vcpu));
-			vcpu_inject_ud(vcpu);
-			retval = -EFAULT;
+			if (full_decode) {
+				pr_err("decode instruction failed @ 0x%016lx:", vcpu_get_rip(vcpu));
+				vcpu_inject_ud(vcpu);
+				retval = -EFAULT;
+			}
 		} else {
 			/*
 			 * We do operand check in instruction decode phase and
@@ -2404,5 +2409,65 @@ int32_t decode_instruction(struct acrn_vcpu *vcpu)
 
 int32_t emulate_instruction(struct acrn_vcpu *vcpu)
 {
-	return vmm_emulate_instruction(vcpu);
+	struct instr_emul_vie *vie = &vcpu->inst_ctxt.vie;
+	int32_t error;
+
+	if (vie->decoded != 0U) {
+		switch (vie->op.op_type) {
+		case VIE_OP_TYPE_GROUP1:
+			error = emulate_group1(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_CMP:
+			error = emulate_cmp(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_MOV:
+			error = emulate_mov(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_MOVSX:
+		case VIE_OP_TYPE_MOVZX:
+			error = emulate_movx(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_MOVS:
+			error = emulate_movs(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_STOS:
+			error = emulate_stos(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_AND:
+			error = emulate_and(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_TEST:
+			error = emulate_test(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_OR:
+			error = emulate_or(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_SUB:
+			error = emulate_sub(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_BITTEST:
+			error = emulate_bittest(vcpu, vie);
+			break;
+		case VIE_OP_TYPE_XCHG:
+			if (vcpu->arch.emulating_lock) {
+				error = emulate_xchg_for_splitlock(vcpu, vie);
+			} else {
+				error = -EINVAL;
+			}
+			break;
+		default:
+			error = -EINVAL;
+			break;
+		}
+	} else {
+		error = -EINVAL;
+	}
+
+	return error;
 }
+
+bool is_current_opcode_xchg(struct acrn_vcpu *vcpu)
+{
+	return (vcpu->inst_ctxt.vie.op.op_type == VIE_OP_TYPE_XCHG);
+}
+

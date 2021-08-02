@@ -5,17 +5,17 @@
  */
 
 #include <types.h>
-#include <msr.h>
-#include <page.h>
-#include <cpufeatures.h>
-#include <cpuid.h>
-#include <cpu.h>
-#include <per_cpu.h>
-#include <vmx.h>
-#include <cpu_caps.h>
+#include <asm/msr.h>
+#include <asm/page.h>
+#include <asm/cpufeatures.h>
+#include <asm/cpuid.h>
+#include <asm/cpu.h>
+#include <asm/per_cpu.h>
+#include <asm/vmx.h>
+#include <asm/cpu_caps.h>
 #include <errno.h>
 #include <logmsg.h>
-#include <vmcs.h>
+#include <asm/guest/vmcs.h>
 
 /* TODO: add more capability per requirement */
 /* APICv features */
@@ -35,8 +35,8 @@ static struct cpu_capability {
 	uint8_t apicv_features;
 	uint8_t ept_features;
 
-	uint32_t vmx_ept;
-	uint32_t vmx_vpid;
+	uint64_t vmx_ept_vpid;
+	uint32_t core_caps;	/* value of MSR_IA32_CORE_CAPABLITIES */
 } cpu_caps;
 
 static struct cpuinfo_x86 boot_cpu_data;
@@ -56,17 +56,6 @@ bool pcpu_has_cap(uint32_t bit)
 	return ret;
 }
 
-bool monitor_cap_buggy(void)
-{
-	bool buggy = false;
-
-	if ((boot_cpu_data.family == 0x6U) && (boot_cpu_data.model == 0x5cU)) {
-		buggy = true;
-	}
-
-	return buggy;
-}
-
 bool has_monitor_cap(void)
 {
 	bool ret = false;
@@ -76,11 +65,42 @@ bool has_monitor_cap(void)
 		 * in hypervisor, but still expose it to the guests and
 		 * let them handle it correctly
 		 */
-		if (!monitor_cap_buggy()) {
+		if (!is_apl_platform()) {
 			ret = true;
 		}
 	}
 
+	return ret;
+}
+
+bool disable_host_monitor_wait(void)
+{
+	bool ret = true;
+	uint32_t eax = 0U, ebx = 0U, ecx = 0U, edx = 0U;
+
+	cpuid_subleaf(0x1U, 0x0U, &eax, &ebx, &ecx, &edx);
+	if ((ecx & CPUID_ECX_MONITOR) != 0U) {
+		/* According to SDM Vol4 2.1 Table 2-2,
+		 * update on 'MSR_IA32_MISC_ENABLE_MONITOR_ENA' bit
+		 * is not allowed if the SSE3 feature flag is set to 0.
+		 */
+		if ((ecx & CPUID_ECX_SSE3) != 0U) {
+			msr_write(MSR_IA32_MISC_ENABLE, (msr_read(MSR_IA32_MISC_ENABLE) &
+				~MSR_IA32_MISC_ENABLE_MONITOR_ENA));
+
+			/* Update cpuid_leaves of boot_cpu_data to
+			 * refresh 'has_monitor_cap' state.
+			 */
+			if (has_monitor_cap()) {
+				cpuid_subleaf(CPUID_FEATURES, 0x0U, &eax, &ebx,
+					&boot_cpu_data.cpuid_leaves[FEAT_1_ECX],
+					&boot_cpu_data.cpuid_leaves[FEAT_1_EDX]);
+			}
+
+		} else {
+			ret = false;
+		}
+	}
 	return ret;
 }
 
@@ -112,6 +132,45 @@ static bool is_ctrl_setting_allowed(uint64_t msr_val, uint32_t ctrl)
 	 */
 	return ((((uint32_t)(msr_val >> 32UL)) & ctrl) == ctrl);
 }
+
+bool is_apl_platform(void)
+{
+	bool ret = false;
+
+	if ((boot_cpu_data.displayfamily == 0x6U) && (boot_cpu_data.displaymodel == 0x5cU)) {
+		ret = true;
+	}
+
+	return ret;
+}
+
+bool has_core_cap(uint32_t bit_mask)
+{
+	return ((cpu_caps.core_caps & bit_mask) != 0U);
+}
+
+bool is_ac_enabled(void)
+{
+	bool ac_enabled = false;
+
+	if (has_core_cap(CORE_CAP_SPLIT_LOCK) && (msr_read(MSR_TEST_CTL) & MSR_TEST_CTL_AC_SPLITLOCK)) {
+		ac_enabled = true;
+	}
+
+	return ac_enabled;
+}
+
+bool is_gp_enabled(void)
+{
+	bool gp_enabled = false;
+
+	if (has_core_cap(CORE_CAP_UC_LOCK) && (msr_read(MSR_TEST_CTL) & MSR_TEST_CTL_GP_UCLOCK)) {
+		gp_enabled = true;
+	}
+
+	return gp_enabled;
+}
+
 
 static void detect_ept_cap(void)
 {
@@ -181,12 +240,36 @@ static void detect_apicv_cap(void)
 
 static void detect_vmx_mmu_cap(void)
 {
-	uint64_t val;
-
 	/* Read the MSR register of EPT and VPID Capability -  SDM A.10 */
-	val = msr_read(MSR_IA32_VMX_EPT_VPID_CAP);
-	cpu_caps.vmx_ept = (uint32_t) val;
-	cpu_caps.vmx_vpid = (uint32_t) (val >> 32U);
+	cpu_caps.vmx_ept_vpid = msr_read(MSR_IA32_VMX_EPT_VPID_CAP);
+}
+
+static bool pcpu_vmx_set_32bit_addr_width(void)
+{
+	return ((msr_read(MSR_IA32_VMX_BASIC) & MSR_IA32_VMX_BASIC_ADDR_WIDTH) != 0UL);
+}
+
+static void detect_xsave_cap(void)
+{
+	uint32_t unused;
+
+	cpuid_subleaf(CPUID_XSAVE_FEATURES, 0x0U,
+		&boot_cpu_data.cpuid_leaves[FEAT_D_0_EAX],
+		&unused,
+		&unused,
+		&boot_cpu_data.cpuid_leaves[FEAT_D_0_EDX]);
+	cpuid_subleaf(CPUID_XSAVE_FEATURES, 1U,
+		&boot_cpu_data.cpuid_leaves[FEAT_D_1_EAX],
+		&unused,
+		&boot_cpu_data.cpuid_leaves[FEAT_D_1_ECX],
+		&boot_cpu_data.cpuid_leaves[FEAT_D_1_EDX]);
+}
+
+static void detect_core_caps(void)
+{
+	if (pcpu_has_cap(X86_FEATURE_CORE_CAP)) {
+		cpu_caps.core_caps = (uint32_t)msr_read(MSR_IA32_CORE_CAPABILITIES);
+	}
 }
 
 static void detect_pcpu_cap(void)
@@ -194,6 +277,8 @@ static void detect_pcpu_cap(void)
 	detect_apicv_cap();
 	detect_ept_cap();
 	detect_vmx_mmu_cap();
+	detect_xsave_cap();
+	detect_core_caps();
 }
 
 static uint64_t get_address_mask(uint8_t limit)
@@ -204,45 +289,54 @@ static uint64_t get_address_mask(uint8_t limit)
 void init_pcpu_capabilities(void)
 {
 	uint32_t eax, unused;
-	uint32_t family, model;
+	uint32_t family_id, model_id, displayfamily, displaymodel;
 
-	cpuid(CPUID_VENDORSTRING,
+	cpuid_subleaf(CPUID_VENDORSTRING, 0x0U,
 		&boot_cpu_data.cpuid_level,
 		&unused, &unused, &unused);
 
-	cpuid(CPUID_FEATURES, &eax, &unused,
+	cpuid_subleaf(CPUID_FEATURES, 0x0U, &eax, &unused,
 		&boot_cpu_data.cpuid_leaves[FEAT_1_ECX],
 		&boot_cpu_data.cpuid_leaves[FEAT_1_EDX]);
-	family = (eax >> 8U) & 0xfU;
-	if (family == 0xFU) {
-		family += ((eax >> 20U) & 0xffU) << 4U;
+
+	/* SDM Vol.2A 3-211 states the algorithm to calculate DisplayFamily and DisplayModel */
+	family_id = (eax >> 8U) & 0xfU;
+	displayfamily = family_id;
+	if (family_id == 0xFU) {
+		displayfamily += ((eax >> 20U) & 0xffU);
 	}
-	boot_cpu_data.family = (uint8_t)family;
+	boot_cpu_data.displayfamily = (uint8_t)displayfamily;
 
-	model = (eax >> 4U) & 0xfU;
-	if (family >= 0x06U) {
-		model += ((eax >> 16U) & 0xfU) << 4U;
+	model_id = (eax >> 4U) & 0xfU;
+	displaymodel = model_id;
+	if ((family_id == 0x06U) || (family_id == 0xFU)) {
+		displaymodel += ((eax >> 16U) & 0xfU) << 4U;
 	}
-	boot_cpu_data.model = (uint8_t)model;
+	boot_cpu_data.displaymodel = (uint8_t)displaymodel;
 
 
-	cpuid(CPUID_EXTEND_FEATURE, &unused,
+	cpuid_subleaf(CPUID_EXTEND_FEATURE, 0x0U, &unused,
 		&boot_cpu_data.cpuid_leaves[FEAT_7_0_EBX],
 		&boot_cpu_data.cpuid_leaves[FEAT_7_0_ECX],
 		&boot_cpu_data.cpuid_leaves[FEAT_7_0_EDX]);
 
-	cpuid(CPUID_MAX_EXTENDED_FUNCTION,
+	cpuid_subleaf(CPUID_MAX_EXTENDED_FUNCTION, 0x0U,
 		&boot_cpu_data.extended_cpuid_level,
 		&unused, &unused, &unused);
 
 	if (boot_cpu_data.extended_cpuid_level >= CPUID_EXTEND_FUNCTION_1) {
-		cpuid(CPUID_EXTEND_FUNCTION_1, &unused, &unused,
+		cpuid_subleaf(CPUID_EXTEND_FUNCTION_1, 0x0U, &unused, &unused,
 			&boot_cpu_data.cpuid_leaves[FEAT_8000_0001_ECX],
 			&boot_cpu_data.cpuid_leaves[FEAT_8000_0001_EDX]);
 	}
 
+	if (boot_cpu_data.extended_cpuid_level >= CPUID_EXTEND_INVA_TSC) {
+		cpuid_subleaf(CPUID_EXTEND_INVA_TSC, 0x0U, &eax, &unused, &unused,
+			&boot_cpu_data.cpuid_leaves[FEAT_8000_0007_EDX]);
+	}
+
 	if (boot_cpu_data.extended_cpuid_level >= CPUID_EXTEND_ADDRESS_SIZE) {
-		cpuid(CPUID_EXTEND_ADDRESS_SIZE, &eax,
+		cpuid_subleaf(CPUID_EXTEND_ADDRESS_SIZE, 0x0U, &eax,
 			&boot_cpu_data.cpuid_leaves[FEAT_8000_0008_EBX],
 			&unused, &unused);
 
@@ -273,29 +367,24 @@ bool is_apicv_advanced_feature_supported(void)
 	return ((cpu_caps.apicv_features & APICV_ADVANCED_FEATURE) == APICV_ADVANCED_FEATURE);
 }
 
-bool pcpu_has_vmx_ept_cap(uint32_t bit_mask)
+bool pcpu_has_vmx_ept_vpid_cap(uint64_t bit_mask)
 {
-	return ((cpu_caps.vmx_ept & bit_mask) != 0U);
-}
-
-bool pcpu_has_vmx_vpid_cap(uint32_t bit_mask)
-{
-	return ((cpu_caps.vmx_vpid & bit_mask) != 0U);
+	return ((cpu_caps.vmx_ept_vpid & bit_mask) != 0U);
 }
 
 void init_pcpu_model_name(void)
 {
-	cpuid(CPUID_EXTEND_FUNCTION_2,
+	cpuid_subleaf(CPUID_EXTEND_FUNCTION_2, 0x0U,
 		(uint32_t *)(boot_cpu_data.model_name),
 		(uint32_t *)(&boot_cpu_data.model_name[4]),
 		(uint32_t *)(&boot_cpu_data.model_name[8]),
 		(uint32_t *)(&boot_cpu_data.model_name[12]));
-	cpuid(CPUID_EXTEND_FUNCTION_3,
+	cpuid_subleaf(CPUID_EXTEND_FUNCTION_3, 0x0U,
 		(uint32_t *)(&boot_cpu_data.model_name[16]),
 		(uint32_t *)(&boot_cpu_data.model_name[20]),
 		(uint32_t *)(&boot_cpu_data.model_name[24]),
 		(uint32_t *)(&boot_cpu_data.model_name[28]));
-	cpuid(CPUID_EXTEND_FUNCTION_4,
+	cpuid_subleaf(CPUID_EXTEND_FUNCTION_4, 0x0U,
 		(uint32_t *)(&boot_cpu_data.model_name[32]),
 		(uint32_t *)(&boot_cpu_data.model_name[36]),
 		(uint32_t *)(&boot_cpu_data.model_name[40]),
@@ -323,25 +412,29 @@ static inline bool is_vmx_disabled(void)
 
 static inline bool pcpu_has_vmx_unrestricted_guest_cap(void)
 {
-	return ((msr_read(MSR_IA32_VMX_MISC) & VMX_SUPPORT_UNRESTRICTED_GUEST)
-									!= 0UL);
+	return ((msr_read(MSR_IA32_VMX_MISC) & MSR_IA32_MISC_UNRESTRICTED_GUEST) != 0UL);
 }
 
 static int32_t check_vmx_mmu_cap(void)
 {
 	int32_t ret = 0;
 
-	if (!pcpu_has_vmx_ept_cap(VMX_EPT_INVEPT)) {
+	if (!pcpu_has_vmx_ept_vpid_cap(VMX_EPT_INVEPT)) {
 		printf("%s, invept not supported\n", __func__);
 		ret = -ENODEV;
-	} else if (!pcpu_has_vmx_vpid_cap(VMX_VPID_INVVPID) ||
-		!pcpu_has_vmx_vpid_cap(VMX_VPID_INVVPID_SINGLE_CONTEXT) ||
-		!pcpu_has_vmx_vpid_cap(VMX_VPID_INVVPID_GLOBAL_CONTEXT)) {
+	} else if (!pcpu_has_vmx_ept_vpid_cap(VMX_VPID_INVVPID) ||
+		!pcpu_has_vmx_ept_vpid_cap(VMX_VPID_INVVPID_SINGLE_CONTEXT) ||
+		!pcpu_has_vmx_ept_vpid_cap(VMX_VPID_INVVPID_GLOBAL_CONTEXT)) {
 		printf("%s, invvpid not supported\n", __func__);
 		ret = -ENODEV;
-	} else if (!pcpu_has_vmx_ept_cap(VMX_EPT_1GB_PAGE)) {
-		printf("%s, ept not support 1GB large page\n", __func__);
+	} else if (!pcpu_has_vmx_ept_vpid_cap(VMX_EPT_2MB_PAGE)) {
+		printf("%s, ept not support 2MB large page\n", __func__);
 		ret = -ENODEV;
+	} else if (pcpu_has_vmx_ept_vpid_cap(VMX_EPT_1GB_PAGE) !=
+				pcpu_has_cap(X86_FEATURE_PAGE1GB)) {
+		/* This just for simple large_page_support in arch/x86/page.c */
+		ret = -ENODEV;
+		printf("%s ept support 1GB large page while mmu is not or opposite\n", __func__);
 	} else {
 		/* No other state currently, do nothing */
 	}
@@ -367,6 +460,19 @@ int32_t detect_hardware_support(void)
 		(boot_cpu_data.virt_bits == 0U)) {
 		printf("%s, can't detect Linear/Physical Address size\n", __func__);
 		ret = -ENODEV;
+	} else if (boot_cpu_data.phys_bits > MAXIMUM_PA_WIDTH) {
+		printf("%s, physical-address width (%d) over maximum physical-address width (%d)\n",
+			__func__, boot_cpu_data.phys_bits, MAXIMUM_PA_WIDTH);
+		ret = -ENODEV;
+	} else if ((boot_cpu_data.phys_bits > 39U) && (!pcpu_has_cap(X86_FEATURE_PAGE1GB) ||
+			!pcpu_has_vmx_ept_vpid_cap(VMX_EPT_1GB_PAGE))) {
+		printf("%s, physical-address width %d over 39 bits must support 1GB large page\n",
+			__func__, boot_cpu_data.phys_bits);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_INVA_TSC)) {
+		/* check invariant TSC */
+		printf("%s, invariant TSC not supported\n", __func__);
+		ret = -ENODEV;
 	} else if (!pcpu_has_cap(X86_FEATURE_TSC_DEADLINE)) {
 		/* lapic TSC deadline timer */
 		printf("%s, TSC deadline not supported\n", __func__);
@@ -389,9 +495,6 @@ int32_t detect_hardware_support(void)
 	} else if (!pcpu_has_cap(X86_FEATURE_CLFLUSHOPT)) {
 		printf("%s, CLFLUSHOPT not supported\n", __func__);
 		ret = -ENODEV;
-	} else if (!pcpu_has_cap(X86_FEATURE_PAGE1GB)) {
-		printf("%s, not support 1GB page\n", __func__);
-		ret = -ENODEV;
 	} else if (!pcpu_has_cap(X86_FEATURE_VMX)) {
 		printf("%s, vmx not supported\n", __func__);
 		ret = -ENODEV;
@@ -412,11 +515,26 @@ int32_t detect_hardware_support(void)
 	} else if (is_vmx_disabled()) {
 		printf("%s, VMX can not be enabled\n", __func__);
 		ret = -ENODEV;
-	} else if (get_pcpu_nums() > CONFIG_MAX_PCPU_NUM) {
-		printf("%s, pcpu number(%d) is out of range\n", __func__, get_pcpu_nums());
+	} else if (pcpu_vmx_set_32bit_addr_width()) {
+		printf("%s, Only support Intel 64 architecture.\n", __func__);
 		ret = -ENODEV;
 	} else if (!pcpu_has_cap(X86_FEATURE_X2APIC)) {
 		printf("%s, x2APIC not supported\n", __func__);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_POPCNT)) {
+		printf("%s, popcnt instruction not supported\n", __func__);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_XSAVES)) {
+		printf("%s, XSAVES not supported\n", __func__);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_SSE)) {
+		printf("%s, SSE not supported\n", __func__);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_COMPACTION_EXT)) {
+		printf("%s, Compaction extensions in XSAVE is not supported\n", __func__);
+		ret = -ENODEV;
+	} else if (!pcpu_has_cap(X86_FEATURE_RDRAND)) {
+		printf("%s, RDRAND is not supported\n", __func__);
 		ret = -ENODEV;
 	} else {
 		ret = check_vmx_mmu_cap();

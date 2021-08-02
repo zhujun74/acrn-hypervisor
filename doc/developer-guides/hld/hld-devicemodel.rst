@@ -1,10 +1,10 @@
 .. _hld-devicemodel:
 
-Device Model high-level design
+Device Model High-Level Design
 ##############################
 
-Hypervisor Device Model (DM) is a QEMU-like application in SOS
-responsible for creating a UOS VM and then performing devices emulation
+Hypervisor Device Model (DM) is a QEMU-like application in Service VM
+responsible for creating a User VM and then performing devices emulation
 based on command line configurations.
 
 .. figure:: images/dm-image75.png
@@ -14,33 +14,33 @@ based on command line configurations.
    Device Model Framework
 
 :numref:`dm-framework` above gives a big picture overview of DM
-framework. There are 3 major subsystems in SOS:
+framework. There are 3 major subsystems in Service VM:
 
 -  **Device Emulation**: DM provides backend device emulation routines for
-   frontend UOS device drivers. These routines register their I/O
-   handlers to the I/O dispatcher inside the DM. When the VHM
+   frontend User VM device drivers. These routines register their I/O
+   handlers to the I/O dispatcher inside the DM. When the HSM
    assigns any I/O request to the DM, the I/O dispatcher
    dispatches this request to the corresponding device emulation
    routine to do the emulation.
 
--  I/O Path in SOS:
+-  I/O Path in Service VM:
 
-   -  HV initializes an I/O request and notifies VHM driver in SOS
+   -  HV initializes an I/O request and notifies HSM driver in Service VM
       through upcall.
-   -  VHM driver dispatches I/O requests to I/O clients and notifies the
-      clients (in this case the client is the DM which is notified
+   -  HSM driver dispatches I/O requests to I/O clients and notifies the
+      clients (in this case the client is the DM, which is notified
       through char device)
    -  DM I/O dispatcher calls corresponding I/O handlers
-   -  I/O dispatcher notifies VHM driver the I/O request is completed
+   -  I/O dispatcher notifies HSM driver the I/O request is completed
       through char device
-   -  VHM driver notifies HV on the completion through hypercall
-   -  DM injects VIRQ to UOS frontend device through hypercall
+   -  HSM driver notifies HV on the completion through hypercall
+   -  DM injects VIRQ to User VM frontend device through hypercall
 
--  VHM: Virtio and HV service Module is a kernel module in SOS as a
-   middle layer to support DM. Refer to chapter 5.4 for details
+-  HSM: Hypervisor Service Module is a kernel module in Service VM as a
+   middle layer to support DM. Refer to :ref:`virtio-APIs` for details
 
-This chapter introduces how the acrn-dm application is configured and
-walks through the DM overall flow.  We'll then elaborate on device,
+This section introduces how the acrn-dm application is configured and
+walks through the DM overall flow. We'll then elaborate on device,
 ISA, and PCI emulation.
 
 Configuration
@@ -51,17 +51,18 @@ options:
 
 .. code-block:: none
 
-  acrn-dm [-hAWYv] [-B bootargs] [-c vcpus] [-E elf_image_path]
+  acrn-dm [-hAWYv] [-B bootargs] [-E elf_image_path]
                [-G GVT_args] [-i ioc_mediator_parameters] [-k kernel_image_path]
-               [-l lpc] [-m mem] [-p vcpu:hostcpu] [-r ramdisk_image_path]
+               [-l lpc] [-m mem] [-r ramdisk_image_path]
                [-s pci] [-U uuid] [--vsbl vsbl_file_name] [--ovmf ovmf_file_path]
                [--part_info part_info_name] [--enable_trusty] [--intr_monitor param_setting]
+               [--acpidev_pt HID] [--mmiodev_pt MMIO_regions]
                [--vtpm2 sock_path] [--virtio_poll interval] [--mac_seed seed_string]
-               [--ptdev_no_reset] [--debugexit]
-               [--lapic_pt] <vm>
+               [--cpu_affinity pCPUs] [--lapic_pt] [--rtvm] [--windows]
+               [--debugexit] [--logger-setting param_setting] [--pm_notify_channel channel]
+               [--pm_by_vuart vuart_node] [--ssram] <vm>
        -A: create ACPI tables
        -B: bootargs for kernel
-       -c: # cpus (default 1)
        -E: elf image path
        -G: GVT args: low_gm_size, high_gm_size, fence_sz
        -h: help
@@ -69,7 +70,6 @@ options:
        -k: kernel image path
        -l: LPC device configuration
        -m: memory size in MB
-       -p: pin 'vcpu' to 'hostcpu'
        -r: ramdisk image path
        -s: <slot,driver,configinfo> PCI slot config
        -U: uuid
@@ -79,15 +79,24 @@ options:
        --mac_seed: set a platform unique string as a seed for generate mac address
        --vsbl: vsbl file path
        --ovmf: ovmf file path
+       --ssram: Enable Software SRAM
+       --cpu_affinity: list of pCPUs assigned to this VM
        --part_info: guest partition info file path
        --enable_trusty: enable trusty for guest
-       --ptdev_no_reset: disable reset check for ptdev
        --debugexit: enable debug exit function
        --intr_monitor: enable interrupt storm monitor
             its params: threshold/s,probe-period(s),delay_time(ms),delay_duration(ms),
        --virtio_poll: enable virtio poll mode with poll interval with ns
+       --acpidev_pt: ACPI device ID args: HID in ACPI Table
+       --mmiodev_pt: MMIO resources args: physical MMIO regions
        --vtpm2: Virtual TPM2 args: sock_path=$PATH_OF_SWTPM_SOCKET
        --lapic_pt: enable local apic passthrough
+       --rtvm: indicate that the guest is rtvm
+       --logger_setting: params like console,level=4;kmsg,level=3
+       --pm_notify_channel: define the channel used to notify guest about power event
+       --pm_by_vuart:pty,/run/acrn/vuart_vmname or tty,/dev/ttySn
+       --windows: support Oracle virtio-blk, virtio-net, and virtio-input devices
+            for windows guest with secure boot
 
 See :ref:`acrn-dm_parameters` for more detailed descriptions of these
 configuration options.
@@ -100,27 +109,28 @@ Here's an example showing how to run a VM with:
 -  GPU device on PCI 00:02.0
 -  Virtio-block device on PCI 00:03.0
 -  Virtio-net device on PCI 00:04.0
+-  TPM2 MSFT0101
 
 .. code-block:: bash
 
-   acrn-dm -A -m 2048M -c 3 \
+   acrn-dm -A -m 2048M \
      -s 0:0,hostbridge \
      -s 1:0,lpc -l com1,stdio \
      -s 5,virtio-console,@pty:pty_port \
-     -s 3,virtio-blk,b,/data/clearlinux/clearlinux.img \
+     -s 3,virtio-blk,b,/home/acrn/uos.img \
      -s 4,virtio-net,tap_LaaG --vsbl /usr/share/acrn/bios/VSBL.bin \
+     --acpidev_pt MSFT0101 \
      --intr_monitor 10000,10,1,100 \
      -B "root=/dev/vda2 rw rootwait maxcpus=3 nohpet console=hvc0 \
      console=ttyS0 no_timer_check ignore_loglevel log_buf_len=16M \
-     consoleblank=0 tsc=reliable i915.avail_planes_per_pipe=0x070F00 \
-     i915.enable_guc_loading=0 \
+     consoleblank=0 tsc=reliable \
      i915.enable_hangcheck=0 i915.nuclear_pageflip=1 \
-     i915.enable_guc_submission=0 i915.enable_guc=0" vm1
+     i915.enable_guc=0" vm1
 
 DM Initialization
 *****************
 
-:numref:`dm-boot-flow` shows the overall flow for the DM boot up:
+:numref:`dm-boot-flow` shows the overall flow for the DM boot:
 
 .. figure:: images/dm-image80.png
    :align: center
@@ -132,37 +142,37 @@ DM Initialization
 
 -  **Option Parsing**: DM parse options from command line inputs.
 
--  **VM Create**: DM calls ioctl to SOS VHM, then SOS VHM makes
+-  **VM Create**: DM calls ioctl to Service VM HSM, then Service VM HSM makes
    hypercalls to HV to create a VM, it returns a vmid for a
    dedicated VM.
 
 -  **Set I/O Request Buffer**: the I/O request buffer is a page buffer
    allocated by DM for a specific VM in user space. This buffer is
-   shared between DM, VHM and HV. **Set I/O Request buffer** calls
+   shared between DM, HSM and HV. **Set I/O Request buffer** calls
    an ioctl executing a hypercall to share this unique page buffer
-   with VHM and HV. Please refer to chapter 3.4 and 4.4 for more
-   details.
+   with HSM and HV.  Refer to :ref:`hld-io-emulation` and
+   :ref:`IO-emulation-in-sos` for more details.
 
--  **Memory Setup**: UOS memory is allocated from SOS
-   memory. This section of memory will use SOS hugetlbfs to allocate
+-  **Memory Setup**: User VM memory is allocated from Service VM
+   memory. This section of memory will use Service VM hugetlbfs to allocate
    linear continuous host physical address for guest memory. It will
    try to get the page size as big as possible to guarantee maximum
    utilization of TLB. It then invokes a hypercall to HV for its EPT
    mapping, and maps the memory segments into user space.
 
 -  **PIO/MMIO Handler Init**: PIO/MMIO handlers provide callbacks for
-   trapped PIO/MMIO request which are triggered from I/O request
-   server in HV for DM owned device emulation. This is the endpoint
+   trapped PIO/MMIO requests that are triggered from I/O request
+   server in HV for DM-owned device emulation. This is the endpoint
    of I/O path in DM. After this initialization, device emulation
    driver in DM could register its MMIO handler by *register_mem()*
    API and PIO handler by *register_inout()* API or INOUT_PORT()
    macro.
 
--  **PCI Init**: PCI initialization scans PCI bus/slot/function to
+-  **PCI Init**: PCI initialization scans the PCI bus/slot/function to
    identify each configured PCI device on the acrn-dm command line
    and initializes their configuration space by calling their
-   dedicated vdev_init() function. For more detail of DM PCI
-   emulation please refer to section 4.6.
+   dedicated vdev_init() function. For more details on the DM PCI
+   emulation, refer to `PCI Emulation`_.
 
 -  **ACPI Build**: If there is "-A" option in acrn-dm command line, DM
    will build ACPI table into its VM's F-Segment (0xf2400). This
@@ -171,7 +181,7 @@ DM Initialization
    according to acrn-dm command line configuration and derived from
    their default value.
 
--  **SW Load**: DM prepares UOS VM's SW configuration such as kernel,
+-  **SW Load**: DM prepares User VM's SW configuration such as kernel,
    ramdisk, and zeropage, according to these memory locations:
 
    .. code-block:: c
@@ -182,7 +192,7 @@ DM Initialization
       #define ZEROPAGE_LOAD_OFF(ctx) (ctx->lowmem - 4*KB)
       #define KERNEL_LOAD_OFF(ctx)   (16*MB)
 
-   For example, if the UOS memory is set as 800M size, then **SW Load**
+   For example, if the User VM memory is set as 800M size, then **SW Load**
    will prepare its ramdisk (if there is) at 0x31c00000 (796M), bootargs at
    0x31ffe000 (800M - 8K), kernel entry at 0x31ffe800(800M - 6K) and zero
    page at 0x31fff000 (800M - 4K). The hypervisor will finally run VM based
@@ -222,84 +232,96 @@ DM Initialization
 
    .. code-block:: c
 
-      vm_loop(struct vmctx *ctx)
-      {
-          int error;
+    vm_loop(struct vmctx *ctx)
+    {
+        int error;
 
-          ctx->ioreq_client = vm_create_ioreq_client(ctx);
-          assert(ctx->ioreq_client > 0);
+        ctx->ioreq_client = vm_create_ioreq_client(ctx);
+        if (ctx->ioreq_client < 0) {
+            pr_err("%s, failed to create IOREQ.\n", __func__);
+            return;
+        }
 
-          error = vm_run(ctx);
-          assert(error == 0);
+        if (vm_run(ctx) != 0) {
+            pr_err("%s, failed to run VM.\n", __func__);
+            return;
+        }
 
-          while (1) {
-              int vcpu_id;
-              struct vhm_request *vhm_req;
+        while (1) {
+            int vcpu_id;
+            struct acrn_io_request *io_req;
 
-              error = vm_attach_ioreq_client(ctx);
-              if (error)
-                  break;
+            error = vm_attach_ioreq_client(ctx);
+            if (error)
+                break;
 
-              for (vcpu_id = 0; vcpu_id < 4; vcpu_id++) {
-                  vhm_req = &vhm_req_buf[vcpu_id];
-                  if ((atomic_load(&vhm_req->processed) == REQ_STATE_PROCESSING)
-                      && (vhm_req->client == ctx->ioreq_client))
-                      handle_vmexit(ctx, vhm_req, vcpu_id);
-              }
+            for (vcpu_id = 0; vcpu_id < guest_ncpus; vcpu_id++) {
+                io_req = &ioreq_buf[vcpu_id];
+                if ((atomic_load(&io_req->processed) == ACRN_IOREQ_STATE_PROCESSING)
+                    && !io_req->kernel_handled)
+                    handle_vmexit(ctx, io_req, vcpu_id);
+            }
 
-              if (VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) {
-                  vm_system_reset(ctx);
-              }
+            if (VM_SUSPEND_FULL_RESET == vm_get_suspend_mode() ||
+                VM_SUSPEND_POWEROFF == vm_get_suspend_mode()) {
+                break;
+            }
 
-              if (VM_SUSPEND_SUSPEND == vm_get_suspend_mode()) {
-                  vm_suspend_resume(ctx);
-              }
-          }
-          quit_vm_loop = 0;
-          printf("VM loop exit\n");
-      }
+            /* RTVM can't be reset */
+            if ((VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) && (!is_rtvm)) {
+                vm_system_reset(ctx);
+            }
+
+            if (VM_SUSPEND_SUSPEND == vm_get_suspend_mode()) {
+                vm_suspend_resume(ctx);
+            }
+        }
+        pr_err("VM loop exit\n");
+    }
 
 -  **Mevent Dispatch Loop**: It's the final loop of the main acrn-dm
    thread. mevent dispatch will do polling for potential async
    event.
 
-VHM
+HSM
 ***
 
-VHM overview
+HSM Overview
 ============
 
-Device Model manages UOS VM by accessing interfaces exported from VHM
-module. VHM module is an SOS kernel driver. The ``/dev/acrn_vhm`` node is
-created when VHM module is initialized. Device Model follows the standard
-Linux char device API (ioctl) to access the functionality of VHM.
+Device Model manages User VM by accessing interfaces exported from HSM
+module. HSM module is a Service VM kernel driver. The ``/dev/acrn_hsm`` node is
+created when HSM module is initialized. Device Model follows the standard
+Linux char device API (ioctl) to access the functionality of HSM.
 
-In most of ioctl, VHM converts the ioctl command to a corresponding
+In most of ioctl, HSM converts the ioctl command to a corresponding
 hypercall to the hypervisor. There are two exceptions:
 
--  I/O request client management is implemented in VHM.
+-  I/O request client management is implemented in HSM.
 
--  For memory range management of UOS VM, VHM needs to save all memory
-   range info of UOS VM. The subsequent memory mapping update of UOS VM
+-  For memory range management of User VM, HSM needs to save all memory
+   range info of User VM. The subsequent memory mapping update of User VM
    needs this information.
 
 .. figure:: images/dm-image108.png
    :align: center
-   :name: vhm-arch
+   :name: hsm-arch
 
-   Architecture of ACRN VHM
+   Architecture of ACRN HSM
 
-VHM ioctl interfaces
+HSM ioctl Interfaces
 ====================
 
-.. note:: Reference API docs for General interface, VM Management,
+.. note:: Reference API documents for General interface, VM Management,
    IRQ and Interrupts, Device Model management, Guest Memory management,
    PCI assignment, and Power management
 
-I/O Emulation in SOS
-********************
+.. _IO-emulation-in-sos:
 
-I/O requests from the hypervisor are dispatched by VHM in the SOS kernel
+I/O Emulation in Service VM
+***************************
+
+I/O requests from the hypervisor are dispatched by HSM in the Service VM kernel
 to a registered client, responsible for further processing the
 I/O access and notifying the hypervisor on its completion.
 
@@ -307,8 +329,8 @@ Initialization of Shared I/O Request Buffer
 ===========================================
 
 For each VM, there is a shared 4-KByte memory region used for I/O request
-communication between the hypervisor and SOS. Upon initialization
-of a VM, the DM (acrn-dm) in SOS userland first allocates a 4-KByte
+communication between the hypervisor and Service VM. Upon initialization
+of a VM, the DM (acrn-dm) in Service VM userland first allocates a 4-KByte
 page and passes the GPA of the buffer to HV via hypercall. The buffer is
 used as an array of 16 I/O request slots with each I/O request being
 256 bytes. This array is indexed by vCPU ID. Thus, each vCPU of the VM
@@ -320,54 +342,54 @@ cannot issue multiple I/O requests at the same time.
 I/O Clients
 ===========
 
-An I/O client is either a SOS userland application or a SOS kernel space
+An I/O client is either a Service VM userland application or a Service VM kernel space
 module responsible for handling I/O access whose address
 falls in a certain range. Each VM has an array of registered I/O
-clients which are initialized with a fixed I/O address range, plus a PCI
+clients that are initialized with a fixed I/O address range, plus a PCI
 BDF on VM creation. There is a special client in each VM, called the
 fallback client, that handles all I/O requests that do not fit into
-the range of any other client. In the current design the device model
+the range of any other client. In the current design, the device model
 acts as the fallback client for any VM.
 
 Each I/O client can be configured to handle the I/O requests in the
 client thread context or in a separate kernel thread context.
-:numref:`vhm-interaction` shows how an I/O client talks to VHM to register
+:numref:`hsm-interaction` shows how an I/O client talks to HSM to register
 a handler and process the incoming I/O requests in a kernel thread
 specifically created for this purpose.
 
 .. figure:: images/dm-image94.png
    :align: center
-   :name: vhm-interaction
+   :name: hsm-interaction
 
-   Interaction of in-kernel I/O clients and VHM
+   Interaction of in-kernel I/O clients and HSM
 
 -  On registration, the client requests a fresh ID, registers a
    handler, adds the I/O range (or PCI BDF) to be emulated by this
-   client, and finally attaches it to VHM which creates the kicks off
-   for a new kernel thread.
+   client, and finally attaches it to HSM that kicks off
+   a new kernel thread.
 
 -  The kernel thread waits for any I/O request to be handled. When a
-   pending I/O request is assigned to the client by VHM, the kernel
+   pending I/O request is assigned to the client by HSM, the kernel
    thread wakes up and calls the registered callback function
    to process the request.
 
--  Before the client is destroyed, VHM ensures that the kernel
+-  Before the client is destroyed, HSM ensures that the kernel
    thread exits.
 
 
 An I/O client can also handle I/O requests in its own thread context.
-:numref:`dm-vhm-interaction` shows the interactions in such a case, using the
+:numref:`dm-hsm-interaction` shows the interactions in such a case, using the
 device model as an example. No callback is registered on
 registration and the I/O client (device model in the example) attaches
-itself to VHM every time it is ready to process additional I/O requests.
-Note also that the DM runs in userland and talks to VHM via the ioctl
-interface in `VHM ioctl interfaces`_.
+itself to HSM every time it is ready to process additional I/O requests.
+Note also that the DM runs in userland and talks to HSM via the ioctl
+interface in `HSM ioctl interfaces`_.
 
 .. figure:: images/dm-image99.png
    :align: center
-   :name: dm-vhm-interaction
+   :name: dm-hsm-interaction
 
-   Interaction of DM and VHM
+   Interaction of DM and HSM
 
 Refer to `I/O client interfaces`_ for a list of interfaces for developing
 I/O clients.
@@ -379,15 +401,15 @@ Processing I/O Requests
    :align: center
    :name: io-sequence-sos
 
-   I/O request handling sequence in SOS
+   I/O request handling sequence in Service VM
 
 :numref:`io-sequence-sos` above illustrates the interactions among the
-hypervisor, VHM,
+hypervisor, HSM,
 and the device model for handling I/O requests. The main interactions
 are as follows:
 
-1. The hypervisor makes an upcall to SOS as an interrupt
-   handled by the upcall handler in VHM.
+1. The hypervisor makes an upcall to Service VM as an interrupt
+   handled by the upcall handler in HSM.
 
 2. The upcall handler schedules the execution of the I/O request
    dispatcher. If the dispatcher is already running, another round
@@ -399,12 +421,12 @@ are as follows:
    all clients that have I/O requests to be processed. The flow is
    illustrated in more detail in :numref:`io-dispatcher-flow`.
 
-4. The waked client (the DM in :numref:`io-sequence-sos` above) handles the
+4. The woken client (the DM in :numref:`io-sequence-sos` above) handles the
    assigned I/O requests, updates their state to COMPLETE, and notifies
-   the VHM of the completion via ioctl. :numref:`dm-io-flow` show this
+   the HSM of the completion via ioctl. :numref:`dm-io-flow` shows this
    flow.
 
-5. The VHM device notifies the hypervisor of the completion via
+5. The HSM device notifies the hypervisor of the completion via
    hypercall.
 
 .. figure:: images/dm-image97.png
@@ -425,7 +447,7 @@ Emulation of Accesses to PCI Configuration Space
 
 PCI configuration spaces are accessed by writing to an address to I/O
 port 0xcf8 and then reading the I/O port 0xcfc. As the PCI configuration
-space of different devices is emulated by different clients, VHM
+space of different devices is emulated by different clients, HSM
 handles the emulation of accesses to I/O port 0xcf8, caches the BDF of
 the device and the offset of the register, and delivers the request to
 the client with the same BDF when I/O port 0xcfc is accessed.
@@ -484,10 +506,10 @@ from different devices including PIO, MMIO, and PCI CFG
 SPACE access. For example, a CMOS RTC device may access 0x70/0x71 PIO to
 get CMOS time, a GPU PCI device may access its MMIO or PIO bar space to
 complete its framebuffer rendering, or the bootloader may access a PCI
-devices' CFG SPACE for BAR reprogramming.
+device's CFG SPACE for BAR reprogramming.
 
 The DM needs to inject interrupts/MSIs to its frontend devices whenever
-necessary. For example, a RTC device needs get its ALARM interrupt, or a
+necessary. For example, an RTC device needs get its ALARM interrupt, or a
 PCI device with MSI capability needs to get its MSI.
 
 DM also provides a PIRQ routing mechanism for platform devices.
@@ -528,7 +550,7 @@ A PIO emulation handler is defined as:
 
 
 The DM pre-registers the PIO emulation handlers through MACRO
-INOUT_PORT, or registers the PIO emulation handers through
+INOUT_PORT, or registers the PIO emulation handlers through
 register_inout() function after init_inout():
 
 .. code-block:: c
@@ -550,7 +572,7 @@ register_inout() function after init_inout():
 MMIO Handler Register
 ---------------------
 
-A MMIO range structure is defined below. As with PIO, it's the
+An MMIO range structure is defined below. As with PIO, it's the
 parameter needed to register MMIO handler for special MMIO range:
 
 .. code-block:: c
@@ -565,7 +587,7 @@ parameter needed to register MMIO handler for special MMIO range:
            uint64_t        size;
    };
 
-A MMIO emulation handler is defined as:
+An MMIO emulation handler is defined as:
 
 .. code-block:: c
 
@@ -583,7 +605,7 @@ device's MMIO handler:
 CFG SPACE Handler Register
 --------------------------
 
-As VHM intercepts the cf8/cfc PIO access for PCI CFG SPACE, the DM only
+As HSM intercepts the cf8/cfc PIO access for PCI CFG SPACE, the DM only
 needs to provide CFG SPACE read/write handlers directly. Such handlers
 are defined as shown below. Normally, a device emulation developer
 has no need to update this function.
@@ -606,11 +628,11 @@ to destination emulated devices:
 
 .. code-block:: c
 
-   /* Generate one msi interrupt to UOS, the index parameter indicates
+   /* Generate one msi interrupt to User VM, the index parameter indicates
     * the msi number from its PCI msi capability. */
    void    pci_generate_msi(struct pci_vdev *pi, int index);
 
-   /* Generate one msix interrupt to UOS, the index parameter indicates
+   /* Generate one msix interrupt to User VM, the index parameter indicates
     * the msix number from its PCI msix bar. */
    void    pci_generate_msix(struct pci_vdev *pi, int index);
 
@@ -623,11 +645,6 @@ to destination emulated devices:
     * set the "Interrupt pin" field of PCI config space. */
    void    pci_lintr_request(struct pci_vdev *pi);
    void    pci_lintr_release(struct pci_vdev *pi);
-
-   /* These APIs assert/deassert vPIC interrupt lines. */
-   int vm_isa_assert_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
-   int vm_isa_deassert_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
-   int vm_isa_pulse_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
 
 PIRQ Routing
 ============
@@ -684,20 +701,20 @@ DM calls pci_lintr_route() to emulate this PIRQ routing:
 
 The PIRQ routing for IOAPIC and PIC is dealt with differently.
 
-* For IOAPIC, the irq pin is allocated in a round-robin fashion within the
-  pins permitted for PCI devices. The irq information will be built
+* For IOAPIC, the IRQ pin is allocated in a round-robin fashion within the
+  pins permitted for PCI devices. The IRQ information will be built
   into ACPI DSDT table then passed to guest VM.
 
-* For PIC, the pin2irq information is maintained in a pirqs[] array (the array size is 8
+* For PIC, the ``pin2irq`` information is maintained in a ``pirqs[]`` array (the array size is 8
   representing 8 shared PIRQs). When a PCI device tries to allocate a
-  pirq pin, it will do a balancing calculation to figure out a best pin
-  vs. irq pair. The irq# will be programed into PCI INTLINE config space
-  and the pin# will be built into ACPI DSDT table then passed to guest VM.
+  pIRQ pin, it will do a balancing calculation to figure out a best pin
+  vs. IRQ pair. The IRQ number will be programed into PCI INTLINE config space
+  and the pin number will be built into ACPI DSDT table then passed to guest VM.
 
-.. note:: "irq" here is also called as "gsi" in ACPI terminology .
+.. note:: "IRQ" here is also called as "GSI" in ACPI terminology.
 
 Regarding to INT A/B/C/D for PCI devices, DM just allocates them evenly
-prior to PIRQ routing and then programs into PCI INTPIN config space.
+prior to pIRQ routing and then programs into PCI INTPIN config space.
 
 ISA and PCI Emulation
 *********************
@@ -732,9 +749,9 @@ During PCI initialization, ACRN DM will scan each PCI bus, slot and
 function and identify the PCI devices configured by acrn-dm command
 line. The corresponding PCI device's initialization function will
 be called to initialize its config space, allocate its BAR resource, its
-irq, and do its irq routing.
+irq, and do its IRQ routing.
 
-.. note:: reference API doc for pci_vdev, pci_vdef_ops
+.. note:: reference API documentation for pci_vdev, pci_vdef_ops
 
 The pci_vdev_ops of the pci_vdev structure could be installed by
 customized handlers for cfgwrite/cfgread and barwrite/barread.
@@ -746,7 +763,7 @@ called from the PIO/MMIO handler.
 The PCI emulation device will make use of interrupt APIs as well for
 its interrupt injection.
 
-PCI Host Bridge and hierarchy
+PCI Host Bridge and Hierarchy
 =============================
 
 There is PCI host bridge emulation in DM. The bus hierarchy is
@@ -755,18 +772,17 @@ example:
 
 .. code-block:: bash
 
-   acrn-dm -A -m 2048M -c 3 \
+   acrn-dm -A -m 2048M \
      -s 0:0,hostbridge \
      -s 1:0,lpc -l com1,stdio \
      -s 5,virtio-console,@pty:pty_port \
-     -s 3,virtio-blk,b,/data/clearlinux/clearlinux.img \
+     -s 3,virtio-blk,b,/home/acrn/uos.img \
      -s 4,virtio-net,tap_LaaG --vsbl /usr/share/acrn/bios/VSBL.bin \
      -B "root=/dev/vda2 rw rootwait maxcpus=3 nohpet console=hvc0 \
      console=ttyS0 no_timer_check ignore_loglevel log_buf_len=16M \
-     consoleblank=0 tsc=reliable i915.avail_planes_per_pipe=0x070F00 \
-     i915.enable_guc_loading=0 \
+     consoleblank=0 tsc=reliable \
      i915.enable_hangcheck=0 i915.nuclear_pageflip=1 \
-     i915.enable_guc_submission=0 i915.enable_guc=0" vm1
+     i915.enable_guc=0" vm1
 
 the bus hierarchy would be:
 
@@ -779,8 +795,6 @@ the bus hierarchy would be:
    00:04.0 Ethernet controller: Red Hat, Inc. Virtio network device
    00:05.0 Serial controller: Red Hat, Inc. Virtio console
 
-.. note:: For Clear Linux OS, the ``lspci`` command can be installed
-   from the "sysadmin-basic" bundle.
 
 ACPI Virtualization
 *******************
@@ -790,7 +804,7 @@ Introduction
 
 Advanced Configuration and Power Interface (ACPI) provides an open
 standard that operating systems can use to discover and configure
-computer hardware components to perform power management for example, by
+computer hardware components to perform power management, for example, by
 monitoring status and putting unused components to sleep.
 
 Functions implemented by ACPI include:
@@ -885,7 +899,7 @@ shows a typical ACPI table layout in an Intel APL platform:
 
    Typical ACPI table layout on Intel APL platform
 
-ACPI virtualization
+ACPI Virtualization
 ===================
 
 Most modern OSes requires ACPI, so we need ACPI virtualization to
@@ -962,7 +976,7 @@ each of them, as shown here:
    :align: center
 
 
-For each VM, its ACPI tables are a standalone copy, not related to the
+For each VM, its ACPI tables are a stand-alone copy, not related to the
 tables for other VMs. Opregion also must be copied for different VMs.
 
 For each table, we make modifications, based on the physical table, to
@@ -979,11 +993,11 @@ potentially error-prone.
 ACPI Emulation
 --------------
 
-An alternative ACPI resource abstraction option is for the SOS (SOS_VM) to
-own all devices and emulate a set of virtual devices for the UOS (POST_LAUNCHED_VM).
+An alternative ACPI resource abstraction option is for the Service VM to
+own all devices and emulate a set of virtual devices for the User VM (POST_LAUNCHED_VM).
 This is the most popular ACPI resource model for virtualization,
 as shown in the picture below. ACRN currently
-uses device emulation plus some device passthrough for UOS.
+uses device emulation plus some device passthrough for User VM.
 
 .. figure:: images/dm-image52.png
    :align: center
@@ -996,11 +1010,11 @@ different components:
 -  **Hypervisor** - ACPI is transparent to the Hypervisor, and has no knowledge
    of ACPI at all.
 
--  **SOS** - All ACPI resources are physically owned by SOS, and enumerates
+-  **Service VM** - All ACPI resources are physically owned by Service VM, and enumerates
    all ACPI tables and devices.
 
--  **UOS** - Virtual ACPI resources, exposed by device model, are owned by
-   UOS.
+-  **User VM** - Virtual ACPI resources, exposed by device model, are owned by
+   User VM.
 
 ACPI emulation code of device model is found in
 ``hw/platform/acpi/acpi.c``
@@ -1029,16 +1043,18 @@ including following elements:
        { basl_fwrite_mcfg, MCFG_OFFSET, true  },
        { basl_fwrite_facs, FACS_OFFSET, true  },
        { basl_fwrite_nhlt, NHLT_OFFSET, false }, /*valid with audio ptdev*/
+       { basl_fwrite_tpm2, TPM2_OFFSET, false },
+       { basl_fwrite_psds, PSDS_OFFSET, false }, /*valid when psds present in sos */
        { basl_fwrite_dsdt, DSDT_OFFSET, true  }
    };
 
-The main function to create virtual ACPI tables is acpi_build that calls
-basl_compile for each table. basl_compile does the following:
+The main function to create virtual ACPI tables is ``acpi_build`` that calls
+``basl_compile`` for each table. ``basl_compile`` does the following:
 
-1. create two temp files: infile and outfile
-2. with output handler, write table contents stream to infile
-3. use iasl tool to assemble infile into outfile
-4. load outfile contents to the required memory offset
+1. create two temp files: ``infile`` and ``outfile``
+2. with output handler, write table contents stream to ``infile``
+3. use ``iasl`` tool to assemble ``infile`` into ``outfile``
+4. load ``outfile`` contents to the required memory offset
 
 .. code-block:: c
 
@@ -1088,10 +1104,10 @@ basl_compile for each table. basl_compile does the following:
             basl_end(&io[0], &io[1]);
         }
 
-After handling each entry, virtual ACPI tables are present in UOS
+After handling each entry, virtual ACPI tables are present in User VM
 memory.
 
-For passthrough dev in UOS, we may need to add some ACPI description
+For passthrough dev in User VM, we may need to add some ACPI description
 in virtual DSDT table. There is one hook (passthrough_write_dsdt) in
 ``hw/pci/passthrough.c`` for this.  The following source code, shows
 calls different functions to add different contents for each vendor and
@@ -1128,11 +1144,14 @@ device id:
         else if (device == 0x5abc)
             /* URT1 @ 00:18.0 for bluetooth*/
             write_dsdt_urt1(dev);
+        else if (device == 0x5aca)
+            /* SDC @ 00:1b.0 */
+            write_dsdt_sdc(dev);
 
     }
 
 For instance, write_dsdt_urt1 provides ACPI contents for Bluetooth
-UART device when passthroughed to UOS. It provides virtual PCI
+UART device when passthroughed to User VM. It provides virtual PCI
 device/function as _ADR. With other description, it could be used for
 Bluetooth UART enumeration.
 
@@ -1164,17 +1183,24 @@ Bluetooth UART enumeration.
 PM in Device Model
 ******************
 
-PM module in Device Model emulate the UOS low power state transition.
+PM module in Device Model emulates the User VM low power state transition.
 
-Each time UOS writes an ACPI control register to initialize low power
+Each time User VM writes an ACPI control register to initialize low power
 state transition, the writing operation is trapped to DM as an I/O
 emulation request by the I/O emulation framework.
 
-To emulate UOS S5 entry, DM will destroy I/O request client, release
-allocated UOS memory, stop all created threads, destroy UOS VM, and exit
+To emulate User VM S5 entry, DM will destroy I/O request client, release
+allocated User VM memory, stop all created threads, destroy User VM, and exit
 DM.  To emulate S5 exit, a fresh DM start by VM manager is used.
 
-To emulate UOS S3 entry, DM pauses the UOS VM, stops the UOS watchdog,
-and waits for a resume signal. When the UOS should exit from S3, DM will
-get a wakeup signal and reset the UOS VM to emulate the UOS exit from
+To emulate User VM S3 entry, DM pauses the User VM, stops the User VM watchdog,
+and waits for a resume signal. When the User VM should exit from S3, DM will
+get a wakeup signal and reset the User VM to emulate the User VM exit from
 S3.
+
+Passthrough in Device Model
+****************************
+
+You may refer to :ref:`hv-device-passthrough` for passthrough realization
+in device model and :ref:`mmio-device-passthrough` for MMIO passthrough realization
+in device model and ACRN Hypervisor.

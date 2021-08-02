@@ -40,10 +40,21 @@
 #define	PCI_BARMAX	PCIR_MAX_BAR_0	/* BAR registers in a Type 0 header */
 #define	PCI_BDF(b, d, f) (((b & 0xFF) << 8) | ((d & 0x1F) << 3) | ((f & 0x7)))
 
+#define	PCI_EMUL_MEMBASE32	0x80000000UL	/* 2GB */
+#define	PCI_EMUL_MEMLIMIT32	0xE0000000UL	/* 3.5GB */
+
 #define	PCI_EMUL_ECFG_BASE	0xE0000000UL	/* 3.5GB */
 
-#define	PCI_EMUL_MEMBASE64	0x100000000UL	/* 4GB */
-#define	PCI_EMUL_MEMLIMIT64	0x140000000UL	/* 5GB */
+#define	PCI_EMUL_MEMBASE64	0x4000000000UL	/* 256GB */
+#define	PCI_EMUL_MEMLIMIT64	0x8000000000UL	/* 512GB */
+
+#define SOFTWARE_SRAM_MAX_SIZE	0x00800000UL
+#define SOFTWARE_SRAM_BASE_GPA	(PCI_EMUL_MEMBASE32 - SOFTWARE_SRAM_MAX_SIZE)
+
+/* Currently,only gvt need reserved bar regions,
+ * so just hardcode REGION_NUMS=5 here
+ */
+#define REGION_NUMS 5
 
 struct vmctx;
 struct pci_vdev;
@@ -65,11 +76,6 @@ struct pci_vdev_ops {
 
 	/* ops related to physical resources */
 	void	(*vdev_phys_access)(struct vmctx *ctx, struct pci_vdev *dev);
-
-	/* update BAR map callback */
-	void	(*vdev_update_bar_map)(struct vmctx *ctx,
-				struct pci_vdev *dev, int idx,
-				uint64_t orig_addr);
 
 	/* config space read/write callbacks */
 	int	(*vdev_cfgwrite)(struct vmctx *ctx, int vcpu,
@@ -243,6 +249,59 @@ struct pciecap {
 } __attribute__((packed));
 static_assert(sizeof(struct pciecap) == 60, "compile-time assertion failed");
 
+struct mmio_rsvd_rgn {
+	uint64_t start;
+	uint64_t end;
+	int idx;
+	int bar_type;
+	/* if vdev=NULL, it also indicates this mmio_rsvd_rgn is not used */
+	struct pci_vdev *vdev;
+};
+
+extern struct mmio_rsvd_rgn reserved_bar_regions[REGION_NUMS];
+int create_mmio_rsvd_rgn(uint64_t start,
+                uint64_t end, int idx, int bar_type, struct pci_vdev *vdev);
+void destory_mmio_rsvd_rgns(struct pci_vdev *vdev);
+
+/* Reserved region in e820 table for GVT
+ * for GVT-g use:
+ * [0xDF000000, 0xDF800000) 8M, GOP FB, used OvmfPkg/GvtGopDxe for 1080p@30
+ * [0xDFFFD000, 0xDFFFF000) 8K, OpRegion, used by GvtGopDxe and GVT-g
+ * [0xDFFFF000, 0XE0000000) 4K, Reserved, not used
+ * for TGL/EHL GVT-d use: identical mapping, same with host layout
+ * [gpu_opregion_hpa, gpu_opregion_hpa+size) 16K, OpRegion and Extended OpRegion
+ * [gpu_dsm_hpa, gpu_dsm_hpa+size] 64M, Date Stolen Memory
+ * for WHL/KBL GVT-d use:
+ * [0x7BFFC000, 0x7BFFE000) 8K, OpRegion, used by native GOP and gfx driver
+ * [0x7BFFE000, 0X7C000000] 8K, Extended OpRegion, store raw VBT
+ * [0x7C000000, 0x80000000] 64M, DSM, used by native GOP and gfx driver
+ * OpRegion: 8KB(0x2000)
+ * [ OpRegion Header      ] Offset: 0x0
+ * [ Mailbox #1: ACPI     ] Offset: 0x100
+ * [ Mailbox #2: SWSCI    ] Offset: 0x200
+ * [ Mailbox #3: ASLE     ] Offset: 0x300
+ * [ Mailbox #4: VBT      ] Offset: 0x400
+ * [ Mailbox #5: ASLE EXT ] Offset: 0x1C00
+ * Extended OpRegion: 8KB(0x2000)
+ * [ Raw VBT              ] Offset: 0x0
+ * If VBT <= 6KB, stores in Mailbox #4
+ * If VBT > 6KB, stores in Extended OpRegion
+ * ASLE.rvda stores the location of VBT.
+ * For OpRegion 2.1+: ASLE.rvda = offset to OpRegion base address
+ * For OpRegion 2.0:  ASLE.rvda = physical address, not support currently
+ */
+#define GPU_DSM_GPA			0x7C000000
+#define GPU_DSM_SIZE			0x4000000
+#define GPU_OPREGION_SIZE		0x4000
+/*
+ * TODO: Forced DSM/OPREGION size requires native BIOS configuration.
+ * This limitation need remove in future
+ */
+uint32_t get_gpu_rsvmem_base_gpa(void);
+uint32_t get_gpu_rsvmem_size(void);
+uint64_t get_software_sram_base_gpa(void);
+uint64_t get_software_sram_size(void);
+
 typedef void (*pci_lintr_cb)(int b, int s, int pin, int pirq_pin,
 			     int ioapic_irq, void *arg);
 
@@ -258,6 +317,7 @@ int	pci_emul_alloc_bar(struct pci_vdev *pdi, int idx,
 int	pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx,
 			    uint64_t hostbase, enum pcibar_type type,
 			    uint64_t size);
+void	pci_emul_free_bar(struct pci_vdev *pdi, int idx);
 void	pci_emul_free_bars(struct pci_vdev *pdi);
 int	pci_emul_add_capability(struct pci_vdev *dev, u_char *capdata,
 				int caplen);

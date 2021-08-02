@@ -33,14 +33,15 @@
 #include <uart16550.h>
 #include <console.h>
 #include <vuart.h>
-#include <vm.h>
+#include <vmcs9900.h>
+#include <asm/guest/vm.h>
 #include <logmsg.h>
 
-#define vuart_lock_init(vu)	spinlock_init(&((vu)->lock))
-#define vuart_lock(vu, flags)	spinlock_irqsave_obtain(&((vu)->lock), &(flags))
-#define vuart_unlock(vu, flags)	spinlock_irqrestore_release(&((vu)->lock), (flags))
+#define init_vuart_lock(vu)	spinlock_init(&((vu)->lock))
+#define obtain_vuart_lock(vu, flags)	spinlock_irqsave_obtain(&((vu)->lock), &(flags))
+#define release_vuart_lock(vu, flags)	spinlock_irqrestore_release(&((vu)->lock), (flags))
 
-static inline void fifo_reset(struct vuart_fifo *fifo)
+static inline void reset_fifo(struct vuart_fifo *fifo)
 {
 	fifo->rindex = 0U;
 	fifo->windex = 0U;
@@ -76,13 +77,31 @@ static inline uint32_t fifo_numchars(const struct vuart_fifo *fifo)
 	return fifo->num;
 }
 
+static inline bool fifo_isfull(const struct vuart_fifo *fifo)
+{
+	bool ret = false;
+	/* When the FIFO has less than 16 empty bytes, it should be
+	 * mask as full. As when the 16550 driver in OS receive the
+	 * THRE interrupt, it will directly send 16 bytes without
+	 * checking the LSR(THRE) */
+
+	/* Desired value should be 16 bytes, but to improve
+	 * fault-tolerant, enlarge 16 to 64. So that even the THRE
+	 * interrupt is raised by mistake, only if it less than 4
+	 * times, data in FIFO will not be overwritten. */
+	if ((fifo->size - fifo->num) < 64U) {
+		ret = true;
+	}
+	return ret;
+}
+
 void vuart_putchar(struct acrn_vuart *vu, char ch)
 {
 	uint64_t rflags;
 
-	vuart_lock(vu, rflags);
+	obtain_vuart_lock(vu, rflags);
 	fifo_putchar(&vu->rxfifo, ch);
-	vuart_unlock(vu, rflags);
+	release_vuart_lock(vu, rflags);
 }
 
 char vuart_getchar(struct acrn_vuart *vu)
@@ -90,20 +109,20 @@ char vuart_getchar(struct acrn_vuart *vu)
 	uint64_t rflags;
 	char c;
 
-	vuart_lock(vu, rflags);
+	obtain_vuart_lock(vu, rflags);
 	c = fifo_getchar(&vu->txfifo);
-	vuart_unlock(vu, rflags);
+	release_vuart_lock(vu, rflags);
 	return c;
 }
 
-static inline void vuart_fifo_init(struct acrn_vuart *vu)
+static inline void init_fifo(struct acrn_vuart *vu)
 {
 	vu->txfifo.buf = vu->vuart_tx_buf;
 	vu->rxfifo.buf = vu->vuart_rx_buf;
 	vu->txfifo.size = TX_BUF_SIZE;
 	vu->rxfifo.size = RX_BUF_SIZE;
-	fifo_reset(&(vu->txfifo));
-	fifo_reset(&(vu->rxfifo));
+	reset_fifo(&(vu->txfifo));
+	reset_fifo(&(vu->rxfifo));
 }
 
 /*
@@ -147,6 +166,31 @@ static struct acrn_vuart *find_vuart_by_port(struct acrn_vm *vm, uint16_t offset
 	return ret_vu;
 }
 
+static void vuart_trigger_level_intr(const struct acrn_vuart *vu, bool assert)
+{
+	union ioapic_rte rte;
+	uint32_t operation;
+
+	vioapic_get_rte(vu->vm, vu->irq, &rte);
+
+	/* TODO:
+	 * Here should assert vuart irq according to vCOM1_IRQ polarity.
+	 * The best way is to get the polarity info from ACPI table.
+	 * Here we just get the info from vioapic configuration.
+	 * based on this, we can still have irq storm during guest
+	 * modify the vioapic setting, as it's only for debug uart,
+	 * we want to make it as an known issue.
+	 */
+	if (rte.bits.intr_polarity == IOAPIC_RTE_INTPOL_ALO) {
+		operation = assert ? GSI_SET_LOW : GSI_SET_HIGH;
+	} else {
+		operation = assert ? GSI_SET_HIGH : GSI_SET_LOW;
+	}
+
+	vpic_set_irqline(vm_pic(vu->vm), vu->irq, operation);
+	vioapic_set_irqline_lock(vu->vm, vu->irq, operation);
+}
+
 /*
  * Toggle the COM port's intr pin depending on whether or not we have an
  * interrupt condition to report to the processor.
@@ -154,40 +198,34 @@ static struct acrn_vuart *find_vuart_by_port(struct acrn_vm *vm, uint16_t offset
 void vuart_toggle_intr(const struct acrn_vuart *vu)
 {
 	uint8_t intr_reason;
-	union ioapic_rte rte;
-	uint32_t operation;
 
 	intr_reason = vuart_intr_reason(vu);
-	vioapic_get_rte(vu->vm, vu->irq, &rte);
 
-	/* TODO:
-	 * Here should assert vuart irq according to CONFIG_COM_IRQ polarity.
-	 * The best way is to get the polarity info from ACIP table.
-	 * Here we just get the info from vioapic configuration.
-	 * based on this, we can still have irq storm during guest
-	 * modify the vioapic setting, as it's only for debug uart,
-	 * we want to make it as an known issue.
-	 */
-	if (rte.bits.intr_polarity == IOAPIC_RTE_INTPOL_ALO) {
-		operation = (intr_reason != IIR_NOPEND) ? GSI_SET_LOW : GSI_SET_HIGH;
+	if ((vu->vdev != NULL) && (intr_reason != IIR_NOPEND)) {
+		/* FIXME: Toggle is for level trigger interrupt, for edge trigger need refine the logic later. */
+		trigger_vmcs9900_msix(vu->vdev);
+	} else if (intr_reason != IIR_NOPEND) {
+		vuart_trigger_level_intr(vu, true);
 	} else {
-		operation = (intr_reason != IIR_NOPEND) ? GSI_SET_HIGH : GSI_SET_LOW;
+		vuart_trigger_level_intr(vu, false);
 	}
-
-	vpic_set_irqline(vm_pic(vu->vm), vu->irq, operation);
-	vioapic_set_irqline_lock(vu->vm, vu->irq, operation);
 }
 
-static void send_to_target(struct acrn_vuart *vu, uint8_t value_u8)
+static bool send_to_target(struct acrn_vuart *vu, uint8_t value_u8)
 {
 	uint64_t rflags;
+	bool ret = false;
 
-	vuart_lock(vu, rflags);
+	obtain_vuart_lock(vu, rflags);
 	if (vu->active) {
 		fifo_putchar(&vu->rxfifo, (char)value_u8);
+		if (fifo_isfull(&vu->rxfifo)) {
+			ret = true;
+		}
 		vuart_toggle_intr(vu);
 	}
-	vuart_unlock(vu, rflags);
+	release_vuart_lock(vu, rflags);
+	return ret;
 }
 
 static uint8_t get_modem_status(uint8_t mcr)
@@ -256,7 +294,7 @@ static void write_reg(struct acrn_vuart *vu, uint16_t reg, uint8_t value_u8)
 	uint8_t msr;
 	uint64_t rflags;
 
-	vuart_lock(vu, rflags);
+	obtain_vuart_lock(vu, rflags);
 	/*
 	 * Take care of the special case DLAB accesses first
 	 */
@@ -294,7 +332,7 @@ static void write_reg(struct acrn_vuart *vu, uint16_t reg, uint8_t value_u8)
 				vu->fcr = 0U;
 			} else {
 				if ((value_u8 & FCR_RFR) != 0U) {
-					fifo_reset(&vu->rxfifo);
+					reset_fifo(&vu->rxfifo);
 				}
 				vu->fcr = value_u8 & (FCR_FIFOE | FCR_DMA | FCR_RX_MASK);
 			}
@@ -336,7 +374,31 @@ static void write_reg(struct acrn_vuart *vu, uint16_t reg, uint8_t value_u8)
 		}
 	}
 	vuart_toggle_intr(vu);
-	vuart_unlock(vu, rflags);
+	release_vuart_lock(vu, rflags);
+}
+
+/*
+ * @pre: vu != NULL
+ */
+void vuart_write_reg(struct acrn_vuart *vu, uint16_t offset, uint8_t value_u8)
+{
+	struct acrn_vuart *target_vu = NULL;
+	uint64_t rflags;
+
+	target_vu = vu->target_vu;
+
+	if (((vu->mcr & MCR_LOOPBACK) == 0U) && ((vu->lcr & LCR_DLAB) == 0U)
+		&& (offset == UART16550_THR) && (target_vu != NULL)) {
+		if (!send_to_target(target_vu, value_u8)) {
+			/* FIFO is not full, raise THRE interrupt */
+			obtain_vuart_lock(vu, rflags);
+			vu->thre_int_pending = true;
+			vuart_toggle_intr(vu);
+			release_vuart_lock(vu, rflags);
+		}
+	} else {
+		write_reg(vu, offset, value_u8);
+	}
 }
 
 /**
@@ -349,25 +411,122 @@ static bool vuart_write(struct acrn_vcpu *vcpu, uint16_t offset_arg,
 	uint16_t offset = offset_arg;
 	struct acrn_vuart *vu = find_vuart_by_port(vcpu->vm, offset);
 	uint8_t value_u8 = (uint8_t)value;
-	struct acrn_vuart *target_vu = NULL;
-	uint64_t rflags;
 
 	if (vu != NULL) {
 		offset -= vu->port_base;
-		target_vu = vu->target_vu;
-
-		if (((vu->mcr & MCR_LOOPBACK) == 0U) &&
-			(offset == UART16550_THR) && (target_vu != NULL)) {
-			send_to_target(target_vu, value_u8);
-			vuart_lock(vu, rflags);
-			vu->thre_int_pending = true;
-			vuart_toggle_intr(vu);
-			vuart_unlock(vu, rflags);
-		} else {
-			write_reg(vu, offset, value_u8);
-		}
+		vuart_write_reg(vu, offset, value_u8);
 	}
 	return true;
+}
+
+static void notify_target(const struct acrn_vuart *vu)
+{
+	struct acrn_vuart *t_vu;
+	uint64_t rflags;
+
+	if (vu != NULL) {
+		t_vu = vu->target_vu;
+		if ((t_vu != NULL) && !fifo_isfull(&vu->rxfifo)) {
+			obtain_vuart_lock(t_vu, rflags);
+			t_vu->thre_int_pending = true;
+			vuart_toggle_intr(t_vu);
+			release_vuart_lock(t_vu, rflags);
+		}
+	}
+}
+
+/**
+ * @pre vu != NULL
+ */
+uint8_t vuart_read_reg(struct acrn_vuart *vu, uint16_t offset)
+{
+	struct acrn_vuart *t_vu;
+	uint8_t iir, reg = 0U, intr_reason;
+	uint64_t rflags;
+
+	t_vu = vu->target_vu;
+	obtain_vuart_lock(vu, rflags);
+	/*
+	 * Take care of the special case DLAB accesses first
+	 */
+	if ((vu->lcr & LCR_DLAB) != 0U) {
+		if (offset == UART16550_DLL) {
+			reg = vu->dll;
+		} else if (offset == UART16550_DLM) {
+			reg = vu->dlh;
+		} else {
+			reg = 0U;
+		}
+	} else {
+		switch (offset) {
+		case UART16550_RBR:
+			vu->lsr &= ~LSR_OE;
+			reg = (uint8_t)fifo_getchar(&vu->rxfifo);
+			break;
+		case UART16550_IER:
+			reg = vu->ier;
+			break;
+		case UART16550_IIR:
+			iir = ((vu->fcr & FCR_FIFOE) != 0U) ? IIR_FIFO_MASK : 0U;
+			intr_reason = vuart_intr_reason(vu);
+			/*
+			 * Deal with side effects of reading the IIR register
+			 */
+			if (intr_reason == IIR_TXRDY) {
+				vu->thre_int_pending = false;
+			}
+			iir |= intr_reason;
+			reg = iir;
+			break;
+		case UART16550_LCR:
+			reg = vu->lcr;
+			break;
+		case UART16550_MCR:
+			reg = vu->mcr;
+			break;
+		case UART16550_LSR:
+			if (t_vu != NULL) {
+				if (!fifo_isfull(&t_vu->rxfifo)) {
+					vu->lsr |= LSR_TEMT | LSR_THRE;
+				}
+			} else {
+				vu->lsr |= LSR_TEMT | LSR_THRE;
+			}
+			/* Check for new receive data */
+			if (fifo_numchars(&vu->rxfifo) > 0U) {
+				vu->lsr |= LSR_DR;
+			} else {
+				vu->lsr &= ~LSR_DR;
+			}
+			reg = vu->lsr;
+			/* The LSR_OE bit is cleared on LSR read */
+			vu->lsr &= ~LSR_OE;
+			break;
+		case UART16550_MSR:
+			/*
+			 * MSR delta bits are cleared on read
+			 */
+			reg = vu->msr;
+			vu->msr &= ~MSR_DELTA_MASK;
+			break;
+		case UART16550_SCR:
+			reg = vu->scr;
+			break;
+		default:
+			reg = 0xFFU;
+			break;
+		}
+	}
+	vuart_toggle_intr(vu);
+	release_vuart_lock(vu, rflags);
+
+	/* For commnunication vuart, when the data in FIFO is read out, should
+	 * notify the target vuart to send more data. */
+	if (offset == UART16550_RBR) {
+		notify_target(vu);
+	}
+
+	return reg;
 }
 
 /**
@@ -377,83 +536,12 @@ static bool vuart_write(struct acrn_vcpu *vcpu, uint16_t offset_arg,
 static bool vuart_read(struct acrn_vcpu *vcpu, uint16_t offset_arg, __unused size_t width)
 {
 	uint16_t offset = offset_arg;
-	uint8_t iir, reg, intr_reason;
 	struct acrn_vuart *vu = find_vuart_by_port(vcpu->vm, offset);
-	struct pio_request *pio_req = &vcpu->req.reqs.pio;
-	uint64_t rflags;
+	struct acrn_pio_request *pio_req = &vcpu->req.reqs.pio_request;
 
 	if (vu != NULL) {
 		offset -= vu->port_base;
-		vuart_lock(vu, rflags);
-		/*
-		 * Take care of the special case DLAB accesses first
-		 */
-		if ((vu->lcr & LCR_DLAB) != 0U) {
-			if (offset == UART16550_DLL) {
-				reg = vu->dll;
-			} else if (offset == UART16550_DLM) {
-				reg = vu->dlh;
-			} else {
-				reg = 0U;
-			}
-		} else {
-			switch (offset) {
-			case UART16550_RBR:
-				vu->lsr &= ~LSR_OE;
-				reg = (uint8_t)fifo_getchar(&vu->rxfifo);
-				break;
-			case UART16550_IER:
-				reg = vu->ier;
-				break;
-			case UART16550_IIR:
-				iir = ((vu->fcr & FCR_FIFOE) != 0U) ? IIR_FIFO_MASK : 0U;
-				intr_reason = vuart_intr_reason(vu);
-				/*
-				 * Deal with side effects of reading the IIR register
-				 */
-				if (intr_reason == IIR_TXRDY) {
-					vu->thre_int_pending = false;
-				}
-				iir |= intr_reason;
-				reg = iir;
-				break;
-			case UART16550_LCR:
-				reg = vu->lcr;
-				break;
-			case UART16550_MCR:
-				reg = vu->mcr;
-				break;
-			case UART16550_LSR:
-				/* Transmitter is always ready for more data */
-				vu->lsr |= LSR_TEMT | LSR_THRE;
-				/* Check for new receive data */
-				if (fifo_numchars(&vu->rxfifo) > 0U) {
-					vu->lsr |= LSR_DR;
-				} else {
-					vu->lsr &= ~LSR_DR;
-				}
-				reg = vu->lsr;
-				/* The LSR_OE bit is cleared on LSR read */
-				vu->lsr &= ~LSR_OE;
-				break;
-			case UART16550_MSR:
-				/*
-				 * MSR delta bits are cleared on read
-				 */
-				reg = vu->msr;
-				vu->msr &= ~MSR_DELTA_MASK;
-				break;
-			case UART16550_SCR:
-				reg = vu->scr;
-				break;
-			default:
-				reg = 0xFFU;
-				break;
-			}
-		}
-		vuart_toggle_intr(vu);
-		pio_req->value = (uint32_t)reg;
-		vuart_unlock(vu, rflags);
+		pio_req->value = (uint32_t)vuart_read_reg(vu, offset);
 	}
 
 	return true;
@@ -479,7 +567,7 @@ static bool vuart_register_io_handler(struct acrn_vm *vm, uint16_t port_base, ui
 		pio_idx = UART_PIO_IDX1;
 		break;
 	default:
-		printf("Not support vuart index %d, will not register \n");
+		printf("Not support vuart index %d, will not register \n", vuart_idx);
 		ret = false;
 	}
 	if (ret != 0U) {
@@ -488,8 +576,7 @@ static bool vuart_register_io_handler(struct acrn_vm *vm, uint16_t port_base, ui
 	return ret;
 }
 
-static void vuart_setup(struct acrn_vm *vm,
-		const struct vuart_config *vu_config, uint16_t vuart_idx)
+static void setup_vuart(struct acrn_vm *vm, uint16_t vuart_idx)
 {
 	uint32_t divisor;
 	struct acrn_vuart *vu = &vm->vuart[vuart_idx];
@@ -499,22 +586,12 @@ static void vuart_setup(struct acrn_vm *vm,
 	vu->dll = (uint8_t)divisor;
 	vu->dlh = (uint8_t)(divisor >> 8U);
 	vu->vm = vm;
-	vuart_fifo_init(vu);
-	vuart_lock_init(vu);
+	init_fifo(vu);
+	init_vuart_lock(vu);
 	vu->thre_int_pending = true;
 	vu->ier = 0U;
 	vuart_toggle_intr(vu);
 	vu->target_vu = NULL;
-	if (vu_config->type == VUART_LEGACY_PIO) {
-		vu->port_base = vu_config->addr.port_base;
-		vu->irq = vu_config->irq;
-		if (vuart_register_io_handler(vm, vu->port_base, vuart_idx) != 0U) {
-			vu->active = true;
-		}
-	} else {
-		/*TODO: add pci vuart support here*/
-		printf("PCI vuart is not support\n");
-	}
 }
 
 static struct acrn_vuart *find_active_target_vuart(const struct vuart_config *vu_config)
@@ -525,17 +602,16 @@ static struct acrn_vuart *find_active_target_vuart(const struct vuart_config *vu
 
 	target_vmid = vu_config->t_vuart.vm_id;
 	target_vuid = vu_config->t_vuart.vuart_id;
-	if (target_vmid < CONFIG_MAX_VM_NUM) {
+
+	if ((target_vmid < CONFIG_MAX_VM_NUM) && (target_vuid < MAX_VUART_NUM_PER_VM)) {
 		target_vm = get_vm_from_vmid(target_vmid);
-	}
-
-	if (target_vuid < MAX_VUART_NUM_PER_VM) {
 		target_vu = &target_vm->vuart[target_vuid];
+
+		if ((target_vu != NULL) && (target_vu->active)) {
+			ret_vu = target_vu;
+		}
 	}
 
-	if ((target_vu != NULL) && (target_vu->active)) {
-		ret_vu = target_vu;
-	}
 	return ret_vu;
 }
 
@@ -554,7 +630,7 @@ static void vuart_setup_connection(struct acrn_vm *vm,
 	}
 }
 
-static void vuart_deinit_connect(struct acrn_vuart *vu)
+static void vuart_deinit_connection(struct acrn_vuart *vu)
 {
 	struct acrn_vuart *t_vu = vu->target_vu;
 
@@ -562,49 +638,86 @@ static void vuart_deinit_connect(struct acrn_vuart *vu)
 	vu->target_vu = NULL;
 }
 
-bool is_vuart_intx(const struct acrn_vm *vm, uint32_t intx_pin)
+bool is_vuart_intx(const struct acrn_vm *vm, uint32_t intx_gsi)
 {
 	uint8_t i;
 	bool ret = false;
 
 	for (i = 0U; i < MAX_VUART_NUM_PER_VM; i++) {
-		if ((vm->vuart[i].active) && (vm->vuart[i].irq == intx_pin)) {
+		if ((vm->vuart[i].active) && (vm->vuart[i].irq == intx_gsi)) {
 			ret = true;
 		}
 	}
 	return ret;
 }
 
-void vuart_init(struct acrn_vm *vm, const struct vuart_config *vu_config)
+void init_legacy_vuarts(struct acrn_vm *vm, const struct vuart_config *vu_config)
 {
 	uint8_t i;
+	struct acrn_vuart *vu;
 
 	for (i = 0U; i < MAX_VUART_NUM_PER_VM; i++) {
-		vm->vuart[i].active = false;
-		/* This vuart is not exist */
 		if ((vu_config[i].type == VUART_LEGACY_PIO) &&
-				(vu_config[i].addr.port_base == INVALID_COM_BASE)) {
-			continue;
-		}
-		vuart_setup(vm, &vu_config[i], i);
-		/*
-		 * The first vuart is used for VM console.
-		 * The rest of vuarts are used for connection.
-		 */
-		if (i != 0U) {
-			vuart_setup_connection(vm, &vu_config[i], i);
+				(vu_config[i].addr.port_base != INVALID_COM_BASE)) {
+			vu = &vm->vuart[i];
+			setup_vuart(vm, i);
+			vu->port_base = vu_config[i].addr.port_base;
+			vu->irq = vu_config[i].irq;
+			if (vuart_register_io_handler(vm, vu->port_base, i) != 0U) {
+				vu->active = true;
+			}
+			/*
+			 * The first vuart is used for VM console.
+			 * The rest of vuarts are used for connection.
+			 */
+			if (i != 0U) {
+				vuart_setup_connection(vm, &vu_config[i], i);
+			}
 		}
 	}
 }
 
-void vuart_deinit(struct acrn_vm *vm)
+void deinit_legacy_vuarts(struct acrn_vm *vm)
 {
 	uint8_t i;
 
 	for (i = 0U; i < MAX_VUART_NUM_PER_VM; i++) {
-		vm->vuart[i].active = false;
-		if (vm->vuart[i].target_vu != NULL) {
-			vuart_deinit_connect(&vm->vuart[i]);
+		if (vm->vuart[i].port_base != INVALID_COM_BASE) {
+			vm->vuart[i].active = false;
+			if (vm->vuart[i].target_vu != NULL) {
+				vuart_deinit_connection(&vm->vuart[i]);
+			}
 		}
+	}
+}
+
+void init_pci_vuart(struct pci_vdev *vdev)
+{
+	struct acrn_vuart *vu = vdev->priv_data;
+	struct acrn_vm_pci_dev_config *pci_cfg = vdev->pci_dev_config;
+	uint16_t idx = pci_cfg->vuart_idx;
+	struct acrn_vm *vm = container_of(vdev->vpci, struct acrn_vm, vpci);
+	struct acrn_vm_config *vm_cfg = get_vm_config(vm->vm_id);
+
+	setup_vuart(vm, idx);
+	vu->vdev = vdev;
+	vm_cfg->vuart[idx].type = VUART_PCI;
+	vm_cfg->vuart[idx].t_vuart.vm_id = pci_cfg->t_vuart.vm_id;
+	vm_cfg->vuart[idx].t_vuart.vuart_id = pci_cfg->t_vuart.vuart_id;
+
+	vu->active = true;
+	if (pci_cfg->vuart_idx != 0U) {
+		vuart_setup_connection(vm, &vm_cfg->vuart[idx], idx);
+	}
+
+}
+
+void deinit_pci_vuart(struct pci_vdev *vdev)
+{
+	struct acrn_vuart *vu = vdev->priv_data;
+
+	vu->active = false;
+	if (vu->target_vu != NULL) {
+		vuart_deinit_connection(vu);
 	}
 }

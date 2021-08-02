@@ -45,20 +45,9 @@
 #include "pciio.h"
 #include "pci_core.h"
 #include "acpi.h"
-
-#ifndef PCI_COMMAND_INTX_DISABLE
-#define PCI_COMMAND_INTX_DISABLE ((uint16_t)0x400)
-#endif
-
-/* Used to temporarily set mmc & mme to support only one vector for MSI,
- * remove it when multiple vectors for MSI is ready.
- */
-#define FORCE_MSI_SINGLE_VECTOR 1
-
-#define MSIX_TABLE_COUNT(ctrl) (((ctrl) & PCIM_MSIXCTRL_TABLE_SIZE) + 1)
-#define MSIX_CAPLEN 12
-
-#define	PCI_BDF_GPU		0x00000010	/* 00:02.0 */
+#include "dm.h"
+#include "passthru.h"
+#include "ptm.h"
 
 /* Some audio drivers get topology data from ACPI NHLT table.
  * For such drivers, we need to copy the host NHLT table to make it
@@ -69,79 +58,18 @@
  */
 #define AUDIO_NHLT_HACK 1
 
+#define PCI_BDF_GPU			0x00000010	/* 00:02.0 */
+
 extern uint64_t audio_nhlt_len;
+
+uint32_t gpu_dsm_hpa = 0;
+uint32_t gpu_dsm_gpa = 0;
+uint32_t gpu_opregion_hpa = 0;
+uint32_t gpu_opregion_gpa = 0;
 
 /* reference count for libpciaccess init/deinit */
 static int pciaccess_ref_cnt;
 static pthread_mutex_t ref_cnt_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-/* Not check reset capability before assign ptdev.
- * Set false by default, that is, always check.
- */
-static bool no_reset = false;
-
-struct mmio_map {
-	uint64_t gpa;
-	uint64_t hpa;
-	size_t size;
-};
-
-struct passthru_dev {
-	struct pci_vdev *dev;
-	struct pcibar bar[PCI_BARMAX + 1];
-	struct {
-		int		capoff;
-		int		msgctrl;
-		int		emulated;
-	} msi;
-	struct {
-		int		capoff;
-		int		table_size;		/* page aligned size */
-		void		*table_pages;
-		int		table_offset;		/* page aligned */
-		bool		ptirq_allocated;
-	} msix;
-	bool pcie_cap;
-	struct pcisel sel;
-	int phys_pin;
-	uint16_t phys_bdf;
-	struct pci_device *phys_dev;
-	/* Options for passthrough device:
-	 *   need_reset - reset dev before passthrough
-	 */
-	bool need_reset;
-	/* The memory pages, which not overlap with MSI-X table will be
-	 * passed-through to guest, two potential ranges, before and after MSI-X
-	 * Table if any.
-	 */
-	struct mmio_map	msix_bar_mmio[2];
-};
-
-void ptdev_no_reset(bool enable)
-{
-	no_reset = enable;
-}
-
-static int
-msi_caplen(int msgctrl)
-{
-	int len;
-
-	len = 10;		/* minimum length of msi capability */
-
-	if (msgctrl & PCIM_MSICTRL_64BIT)
-		len += 4;
-
-	/*
-	 * Ignore the 'mask' and 'pending' bits in the MSI capability
-	 * (msgctrl & PCIM_MSICTRL_VECTOR).
-	 * Ignore 10 bytes in total (2-byte reserved, 4-byte mask bits,
-	 * 4-byte pending bits).
-	 * We'll let the guest manipulate them directly.
-	 */
-
-	return len;
-}
 
 static uint32_t
 read_config(struct pci_device *phys_dev, long reg, int width)
@@ -159,7 +87,7 @@ read_config(struct pci_device *phys_dev, long reg, int width)
 		pci_device_cfg_read_u32(phys_dev, &temp, reg);
 		break;
 	default:
-		warnx("%s: invalid reg width", __func__);
+		pr_warn("%s: invalid reg width", __func__);
 		return -1;
 	}
 
@@ -182,40 +110,17 @@ write_config(struct pci_device *phys_dev, long reg, int width, uint32_t data)
 		temp = pci_device_cfg_write_u32(phys_dev, data, reg);
 		break;
 	default:
-		warnx("%s: invalid reg width", __func__);
+		pr_warn("%s: invalid reg width", __func__);
 	}
 
 	return temp;
 }
 
-
-#ifdef FORCE_MSI_SINGLE_VECTOR
-/* Temporarily set mmc & mme to 0.
- * Remove it when multiple vectors for MSI ready.
- */
-static inline void
-clear_mmc_mme(uint32_t *val)
-{
-	*val &= ~((uint32_t)PCIM_MSICTRL_MMC_MASK << 16);
-	*val &= ~((uint32_t)PCIM_MSICTRL_MME_MASK << 16);
-}
-#endif
-
 static int
 cfginit_cap(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
-	int ptr, capptr, cap, sts, caplen;
-	uint32_t u32;
-	struct pci_vdev *dev;
+	int ptr, cap, sts;
 	struct pci_device *phys_dev = ptdev->phys_dev;
-	uint16_t virt_bdf = PCI_BDF(ptdev->dev->bus,
-				    ptdev->dev->slot,
-				    ptdev->dev->func);
-	uint32_t pba_info;
-	uint32_t table_info;
-	uint16_t msgctrl;
-
-	dev = ptdev->dev;
 
 	/*
 	 * Parse the capabilities and cache the location of the MSI
@@ -227,156 +132,38 @@ cfginit_cap(struct vmctx *ctx, struct passthru_dev *ptdev)
 		while (ptr != 0 && ptr != 0xff) {
 			cap = read_config(phys_dev, ptr + PCICAP_ID, 1);
 			if (cap == PCIY_MSI) {
-				/*
-				 * Copy the MSI capability into the config
-				 * space of the emulated pci device
-				 */
 				ptdev->msi.capoff = ptr;
-				ptdev->msi.msgctrl = read_config(phys_dev,
-					ptr + 2, 2);
-
-#ifdef FORCE_MSI_SINGLE_VECTOR
-				/* Temporarily set mmc & mme to 0,
-				 * which means supporting 1 vector. So that
-				 * guest will not enable more than 1 vector.
-				 * Remove it when multiple vectors ready.
-				 */
-				ptdev->msi.msgctrl &= ~PCIM_MSICTRL_MMC_MASK;
-				ptdev->msi.msgctrl &= ~PCIM_MSICTRL_MME_MASK;
-#endif
-
-				ptdev->msi.emulated = 0;
-				caplen = msi_caplen(ptdev->msi.msgctrl);
-				capptr = ptr;
-				while (caplen > 0) {
-					u32 = read_config(phys_dev, capptr, 4);
-
-#ifdef FORCE_MSI_SINGLE_VECTOR
-					/* Temporarily set mmc & mme to 0.
-					 * which means supporting 1 vector.
-					 * Remove it when multiple vectors ready
-					 */
-					if (capptr == ptdev->msi.capoff)
-						clear_mmc_mme(&u32);
-#endif
-
-					pci_set_cfgdata32(dev, capptr, u32);
-					caplen -= 4;
-					capptr += 4;
-				}
 			} else if (cap == PCIY_MSIX) {
-				/*
-				 * Copy the MSI-X capability
-				 */
 				ptdev->msix.capoff = ptr;
-				caplen = 12;
-				capptr = ptr;
-				while (caplen > 0) {
-					u32 = read_config(phys_dev, capptr, 4);
-					pci_set_cfgdata32(dev, capptr, u32);
-					caplen -= 4;
-					capptr += 4;
-				}
-			} else if (cap == PCIY_EXPRESS)
+			} else if (cap == PCIY_EXPRESS) {
 				ptdev->pcie_cap = true;
+			} else if (cap == PCIY_PMG)
+				ptdev->pmcap.capoff = ptr;
 
 			ptr = read_config(phys_dev, ptr + PCICAP_NEXTPTR, 1);
 		}
 	}
 
-	dev->msix.table_bar = -1;
-	dev->msix.pba_bar = -1;
-	if (ptdev->msix.capoff != 0) {
-		capptr = ptdev->msix.capoff;
-
-		pba_info = pci_get_cfgdata32(dev, capptr + 8);
-		dev->msix.pba_bar = pba_info & PCIM_MSIX_BIR_MASK;
-		dev->msix.pba_offset = pba_info & ~PCIM_MSIX_BIR_MASK;
-
-		table_info = pci_get_cfgdata32(dev, capptr + 4);
-		dev->msix.table_bar = table_info & PCIM_MSIX_BIR_MASK;
-		dev->msix.table_offset = table_info & ~PCIM_MSIX_BIR_MASK;
-
-		msgctrl = pci_get_cfgdata16(dev, capptr + 2);
-		dev->msix.table_count = MSIX_TABLE_COUNT(msgctrl);
-		dev->msix.pba_size = PBA_SIZE(dev->msix.table_count);
-	} else if (ptdev->msi.capoff != 0) {
-		struct ic_ptdev_irq ptirq;
-
-		ptirq.type = IRQ_MSI;
-		ptirq.virt_bdf = virt_bdf;
-		ptirq.phys_bdf = ptdev->phys_bdf;
-		/* currently, only support one vector for MSI */
-		ptirq.msix.vector_cnt = 1;
-		ptirq.msix.table_paddr = 0;
-		ptirq.msix.table_size = 0;
-		vm_set_ptdev_msix_info(ctx, &ptirq);
-	}
-
 	return 0;
 }
 
-static uint64_t
-msix_table_read(struct passthru_dev *ptdev, uint64_t offset, int size)
-{
-	uint8_t *src8;
-	uint16_t *src16;
-	uint32_t *src32;
-	uint64_t *src64;
-	uint64_t data;
+static int
+passthru_set_power_state(struct passthru_dev *ptdev, uint16_t dpsts) {
+	int ret = -1;
+	uint32_t val;
 
-	switch (size) {
-	case 1:
-		src8 = (uint8_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		data = *src8;
-		break;
-	case 2:
-		src16 = (uint16_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		data = *src16;
-		break;
-	case 4:
-		src32 = (uint32_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		data = *src32;
-		break;
-	case 8:
-		src64 = (uint64_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		data = *src64;
-		break;
-	default:
-		return -1;
+	dpsts &= PCIM_PSTAT_DMASK;
+	if (ptdev->pmcap.capoff != 0) {
+		val = read_config(ptdev->phys_dev,
+				ptdev->pmcap.capoff + PCIR_POWER_STATUS, 2);
+		val = (val & ~PCIM_PSTAT_DMASK) | dpsts;
 
+		write_config(ptdev->phys_dev,
+				ptdev->pmcap.capoff + PCIR_POWER_STATUS, 2, val);
+
+		ret = 0;
 	}
-	return data;
-}
-
-static void
-msix_table_write(struct passthru_dev *ptdev, uint64_t offset, int size, uint64_t data)
-{
-	uint8_t *dest8;
-	uint16_t *dest16;
-	uint32_t *dest32;
-	uint64_t *dest64;
-
-	switch (size) {
-	case 1:
-		dest8 = (uint8_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		*dest8 = data;
-		break;
-	case 2:
-		dest16 = (uint16_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		*dest16 = data;
-		break;
-	case 4:
-		dest32 = (uint32_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		*dest32 = data;
-		break;
-	case 8:
-		dest64 = (uint64_t *)(ptdev->msix.table_pages + offset - ptdev->msix.table_offset);
-		*dest64 = data;
-		break;
-	default:
-		break;
-	}
+	return ret;
 }
 
 static inline int ptdev_msix_table_bar(struct passthru_dev *ptdev)
@@ -390,146 +177,6 @@ static inline int ptdev_msix_pba_bar(struct passthru_dev *ptdev)
 }
 
 static int
-init_msix_table(struct vmctx *ctx, struct passthru_dev *ptdev, uint64_t base)
-{
-	int b, s, f;
-	int error, idx;
-	size_t len, remaining;
-	uint32_t table_size, table_offset;
-	vm_paddr_t start;
-	struct pci_vdev *dev = ptdev->dev;
-	uint16_t virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
-	struct ic_ptdev_irq ptirq;
-
-	b = ptdev->sel.bus;
-	s = ptdev->sel.dev;
-	f = ptdev->sel.func;
-
-	/*
-	 * If the MSI-X table BAR maps memory intended for
-	 * other uses, it is at least assured that the table
-	 * either resides in its own page within the region,
-	 * or it resides in a page shared with only the PBA.
-	 */
-	table_offset = rounddown2(dev->msix.table_offset, 4096);
-
-	table_size = dev->msix.table_offset - table_offset;
-	table_size += dev->msix.table_count * MSIX_TABLE_ENTRY_SIZE;
-	table_size = roundup2(table_size, 4096);
-
-	idx = dev->msix.table_bar;
-	start = dev->bar[idx].addr;
-	remaining = dev->bar[idx].size;
-
-	/* Map everything before the MSI-X table */
-	if (table_offset > 0) {
-		len = table_offset;
-		error = vm_map_ptdev_mmio(ctx, b, s, f, start, len, base);
-		if (error) {
-			warnx(
-			"Failed to map MSI-X BAR passthru pages on %x/%x/%x",
-				b,s,f);
-			return error;
-		}
-		/* save mapping info, which need to be unmapped when deinit */
-		ptdev->msix_bar_mmio[0].gpa = start;
-		ptdev->msix_bar_mmio[0].hpa = base;
-		ptdev->msix_bar_mmio[0].size = len;
-
-		base += len;
-		start += len;
-		remaining -= len;
-	}
-
-	/* remap real msix table (page-aligned) to user space */
-	error = pci_device_map_range(ptdev->phys_dev, base, table_size,
-		PCI_DEV_MAP_FLAG_WRITABLE, &ptdev->msix.table_pages);
-	if (error) {
-		warnx("Failed to map MSI-X table pages on %x/%x/%x", b,s,f);
-		return error;
-	}
-	ptdev->msix.table_offset = table_offset;
-	ptdev->msix.table_size = table_size;
-
-	/* Handle MSI-X vectors:
-	 * request to alloc vector entries of MSI-X.
-	 * Set table_paddr/table_size to 0 to skip ioremap in sos kernel.
-	 */
-	ptirq.type = IRQ_MSIX;
-	ptirq.virt_bdf = virt_bdf;
-	ptirq.phys_bdf = ptdev->phys_bdf;
-	ptirq.msix.vector_cnt = dev->msix.table_count;
-	ptirq.msix.table_paddr = 0;
-	ptirq.msix.table_size = 0;
-	error = vm_set_ptdev_msix_info(ctx, &ptirq);
-	if (error) {
-		warnx("Failed to alloc ptirq entry on %x/%x/%x", b,s,f);
-		return error;
-	}
-	ptdev->msix.ptirq_allocated = true;
-
-
-	/* Skip the MSI-X table */
-	base += table_size;
-	start += table_size;
-	remaining -= table_size;
-
-	/* Map everything beyond the end of the MSI-X table */
-	if (remaining > 0) {
-		len = remaining;
-		error = vm_map_ptdev_mmio(ctx, b, s, f, start, len, base);
-		if (error) {
-			warnx(
-			"Failed to map MSI-X BAR passthru pages on %x/%x/%x",
-				b,s,f);
-			return error;
-		}
-		/* save mapping info, which need to be unmapped when deinit */
-		ptdev->msix_bar_mmio[1].gpa = start;
-		ptdev->msix_bar_mmio[1].hpa = base;
-		ptdev->msix_bar_mmio[1].size = len;
-	}
-
-	return 0;
-}
-
-static void
-deinit_msix_table(struct vmctx *ctx, struct passthru_dev *ptdev)
-{
-	struct pci_vdev *dev = ptdev->dev;
-	uint16_t virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
-	int vector_cnt = dev->msix.table_count;
-
-	if (ptdev->msix.ptirq_allocated) {
-		printf("ptdev reset msix: 0x%x-%x, vector_cnt=%d.\n",
-				virt_bdf, ptdev->phys_bdf, vector_cnt);
-		vm_reset_ptdev_msix_info(ctx, virt_bdf, ptdev->phys_bdf, vector_cnt);
-		ptdev->msix.ptirq_allocated = false;
-	}
-
-	if (ptdev->msix.table_pages) {
-		pci_device_unmap_range(ptdev->phys_dev, ptdev->msix.table_pages, ptdev->msix.table_size);
-		ptdev->msix.table_pages = NULL;
-	}
-
-	/* We passthrough the pages not overlap with MSI-X table to guest,
-	 * need to unmap them  when deinit.
-	 */
-	for (int i = 0; i < 2; i++) {
-		if(ptdev->msix_bar_mmio[i].size != 0) {
-			if (vm_unmap_ptdev_mmio(ctx, ptdev->sel.bus,
-					ptdev->sel.dev, ptdev->sel.func,
-					ptdev->msix_bar_mmio[i].gpa,
-					ptdev->msix_bar_mmio[i].size,
-					ptdev->msix_bar_mmio[i].hpa)) {
-				warnx("Failed to  unmap MSI-X BAR pt pages.");
-			}
-			ptdev->msix_bar_mmio[i].size = 0;
-		}
-	}
-}
-
-static int
 cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
 	int i, error;
@@ -537,6 +184,7 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 	struct pci_bar_io bar;
 	enum pcibar_type bartype;
 	uint64_t base, size;
+	uint32_t vbar_lo32;
 
 	dev = ptdev->dev;
 
@@ -570,7 +218,7 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 		if (bartype != PCIBAR_IO) {
 			/* note here PAGE_MASK is 0xFFFFF000 */
 			if ((base & ~PAGE_MASK) != 0) {
-				warnx("passthru device %x/%x/%x BAR %d: "
+				pr_info("passthru device %x/%x/%x BAR %d: "
 				    "base %#lx not page aligned\n",
 				    ptdev->sel.bus, ptdev->sel.dev,
 				    ptdev->sel.func, i, base);
@@ -578,7 +226,7 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 			}
 			/* roundup to PAGE_SIZE for bar size */
 			if ((size & ~PAGE_MASK) != 0) {
-				warnx("passthru device %x/%x/%x BAR %d: "
+				pr_info("passthru device %x/%x/%x BAR %d: "
 					"size[%lx] is expanded to page aligned [%lx]\n",
 				    ptdev->sel.bus, ptdev->sel.dev,
 				    ptdev->sel.func, i, size, roundup2(size, PAGE_SIZE));
@@ -600,20 +248,22 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 		if (error)
 			return -1;
 
-		/* The MSI-X table needs special handling */
-		if (i == ptdev_msix_table_bar(ptdev)) {
-			error = init_msix_table(ctx, ptdev, base);
-			if (error) {
-				deinit_msix_table(ctx, ptdev);
-				return -1;
-			}
-		} else if (bartype != PCIBAR_IO) {
-			/* Map the physical BAR in the guest MMIO space */
-			error = vm_map_ptdev_mmio(ctx, ptdev->sel.bus,
-				ptdev->sel.dev, ptdev->sel.func,
-				dev->bar[i].addr, dev->bar[i].size, base);
-			if (error)
-				return -1;
+		/*
+		 * For pass-thru devices,
+		 * set the bar prefetchable property the same as physical bar.
+		 *
+		 * the pci bar prefetchable property has set by pci_emul_alloc_pbar,
+		 * here, override the prefetchable property according to the physical bar.
+		 */
+		if (bartype == PCIBAR_MEM32 ||  bartype == PCIBAR_MEM64) {
+			vbar_lo32 = pci_get_cfgdata32(dev, PCIR_BAR(i));
+
+			if (bar.base & PCIM_BAR_MEM_PREFETCH)
+				vbar_lo32 |= PCIM_BAR_MEM_PREFETCH;
+			else
+				vbar_lo32 &= ~PCIM_BAR_MEM_PREFETCH;
+
+			pci_set_cfgdata32(dev, PCIR_BAR(i), vbar_lo32);
 		}
 
 		/*
@@ -622,7 +272,7 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 		if (bartype == PCIBAR_MEM64) {
 			i++;
 			if (i > PCI_BARMAX) {
-				warnx("BAR count out of range\n");
+				pr_err("BAR count out of range\n");
 				return -1;
 			}
 
@@ -636,14 +286,14 @@ cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
  * return value:
  * -1 : fail
  * >=0: succeed
- *     IRQ_INTX(0): phy dev has no MSI support
- *     IRQ_MSI(1):  phy dev has MSI support
+ *     ACRN_PTDEV_IRQ_INTX(0): phy dev has no MSI support
+ *     ACRN_PTDEV_IRQ_MSI(1):  phy dev has MSI support
  */
 static int
 cfginit(struct vmctx *ctx, struct passthru_dev *ptdev, int bus,
 	int slot, int func)
 {
-	int irq_type = IRQ_MSI;
+	int irq_type = ACRN_PTDEV_IRQ_MSI;
 	char reset_path[60];
 	int fd;
 
@@ -653,16 +303,16 @@ cfginit(struct vmctx *ctx, struct passthru_dev *ptdev, int bus,
 	ptdev->sel.func = func;
 
 	if (cfginit_cap(ctx, ptdev) != 0) {
-		warnx("Capability check fails for PCI %x/%x/%x",
+		pr_err("Capability check fails for PCI %x/%x/%x",
 		    bus, slot, func);
 		return -1;
 	}
 
 	/* Check MSI or MSIX capabilities */
 	if (ptdev->msi.capoff == 0 && ptdev->msix.capoff == 0) {
-		warnx("MSI not supported for PCI %x/%x/%x",
+		pr_dbg("MSI not supported for PCI %x/%x/%x",
 		    bus, slot, func);
-		irq_type = IRQ_INTX;
+		irq_type = ACRN_PTDEV_IRQ_INTX;
 	}
 
 	/* If SOS kernel provides 'reset' entry in sysfs, related dev has some
@@ -671,26 +321,28 @@ cfginit(struct vmctx *ctx, struct passthru_dev *ptdev, int bus,
 	 *   UOS reboot
 	 * - refuse to passthrough PCIe dev without any reset capability
 	 */
-	snprintf(reset_path, 40,
-		"/sys/bus/pci/devices/0000:%02x:%02x.%x/reset",
-		bus, slot, func);
+	if (ptdev->need_reset) {
+		snprintf(reset_path, 40,
+			"/sys/bus/pci/devices/0000:%02x:%02x.%x/reset",
+			bus, slot, func);
 
-	fd = open(reset_path, O_WRONLY);
-	if (fd >= 0) {
-		if (ptdev->need_reset && write(fd, "1", 1) < 0)
-			warnx("reset dev %x/%x/%x failed!\n",
-			      bus, slot, func);
-		close(fd);
-	} else if (errno == ENOENT && ptdev->pcie_cap) {
-		warnx("No reset capability for PCIe %x/%x/%x, "
-				"remove it from ptdev list!!\n",
-				bus, slot, func);
-		if (!no_reset)
-			return -1;
+		fd = open(reset_path, O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, "1", 1) < 0)
+				pr_err("reset dev %x/%x/%x failed!\n",
+				      bus, slot, func);
+			close(fd);
+		}
+	}
+
+	if (ptdev->d3hot_reset) {
+		if ((passthru_set_power_state(ptdev, PCIM_PSTAT_D3) != 0) ||
+				passthru_set_power_state(ptdev, PCIM_PSTAT_D0) != 0)
+			pr_warn("ptdev %x/%x/%x do d3hot_reset failed!\n", bus, slot, func);
 	}
 
 	if (cfginitbar(ctx, ptdev) != 0) {
-		warnx("failed to initialize BARs for PCI %x/%x/%x",
+		pr_err("failed to initialize BARs for PCI %x/%x/%x",
 		    bus, slot, func);
 		return -1;
 	} else
@@ -735,7 +387,7 @@ pciaccess_init(void)
 	if (!pciaccess_ref_cnt) {
 		error = native_pci_system_init();
 		if (error < 0) {
-			warnx("libpciaccess couldn't access PCI system");
+			pr_err("libpciaccess couldn't access PCI system");
 			pthread_mutex_unlock(&ref_cnt_mtx);
 			return error;
 		}
@@ -745,6 +397,136 @@ pciaccess_init(void)
 	pthread_mutex_unlock(&ref_cnt_mtx);
 
 	return 0;	/* success */
+}
+
+static bool
+has_virt_pcicfg_regs_on_ehl_gpu(int offset)
+{
+	return ((offset == PCIR_GEN11_BDSM_DW0) || (offset == PCIR_GEN11_BDSM_DW1) ||
+		(offset == PCIR_ASLS_CTL));
+}
+
+static bool
+has_virt_pcicfg_regs_on_def_gpu(int offset)
+{
+	return ((offset == PCIR_BDSM) || (offset == PCIR_ASLS_CTL));
+}
+
+uint32_t
+get_gpu_rsvmem_base_gpa()
+{
+	return gpu_opregion_gpa;
+}
+
+uint32_t
+get_gpu_rsvmem_size()
+{
+	return GPU_OPREGION_SIZE + GPU_DSM_SIZE;
+}
+
+/*
+ * passthrough GPU DSM(Data Stolen Memory) and Opregion to guest
+ */
+void
+passthru_gpu_dsm_opregion(struct vmctx *ctx, struct passthru_dev *ptdev,
+			struct acrn_pcidev *pcidev, uint16_t device)
+{
+	uint32_t opregion_phys, dsm_mask_val;
+
+	/* get opregion hpa */
+	opregion_phys = read_config(ptdev->phys_dev, PCIR_ASLS_CTL, 4);
+	gpu_opregion_hpa = opregion_phys & PCIM_ASLS_OPREGION_MASK;
+
+	switch (device) {
+	/* ElkhartLake */
+	case 0x4500:
+	case 0x4541:
+	case 0x4551:
+	case 0x4571:
+	/* TigerLake */
+	case 0x9a40:
+	case 0x9a49:
+	case 0x9a59:
+	case 0x9a60:
+	case 0x9a68:
+	case 0x9a70:
+	case 0x9a78:
+	case 0x9ac0:
+	case 0x9ac9:
+	case 0x9ad9:
+	case 0x9af8:
+	/* AlderLake */
+	case 0x4680:
+	case 0x4681:
+	case 0x4682:
+	case 0x4683:
+	case 0x4690:
+	case 0x4691:
+	case 0x4692:
+	case 0x4693:
+	case 0x4698:
+	case 0x4699:
+		/* BDSM register has 64 bits.
+		 * bits 63:20 contains the base address of stolen memory
+		 */
+		gpu_dsm_hpa = read_config(ptdev->phys_dev, PCIR_GEN11_BDSM_DW0, 4);
+		dsm_mask_val = gpu_dsm_hpa & ~PCIM_BDSM_MASK;
+		gpu_dsm_hpa &= PCIM_BDSM_MASK;
+		gpu_dsm_hpa |= (uint64_t)read_config(ptdev->phys_dev, PCIR_GEN11_BDSM_DW1, 4) << 32;
+		/* Keep identical mapping for DSM region on TGL platform due to windows
+		* graphic driver obtain the DSM address from one mmio register locate
+		* in BAR instead of pci config space.
+		*/
+		gpu_dsm_gpa = gpu_dsm_hpa;
+
+		pci_set_cfgdata32(ptdev->dev, PCIR_GEN11_BDSM_DW0, gpu_dsm_gpa | dsm_mask_val);
+		/* write 0 to high 32-bits of BDSM on EHL platform */
+		pci_set_cfgdata32(ptdev->dev, PCIR_GEN11_BDSM_DW1, 0);
+
+		ptdev->has_virt_pcicfg_regs = &has_virt_pcicfg_regs_on_ehl_gpu;
+		break;
+	/* If on default platforms, such as KBL,WHL  */
+	default:
+		/* bits 31:20 contains the base address of stolen memory */
+		gpu_dsm_hpa = read_config(ptdev->phys_dev, PCIR_BDSM, 4);
+		dsm_mask_val = gpu_dsm_hpa & ~PCIM_BDSM_MASK;
+		gpu_dsm_hpa &= PCIM_BDSM_MASK;
+		gpu_dsm_gpa = GPU_DSM_GPA;
+
+		pci_set_cfgdata32(ptdev->dev, PCIR_BDSM, gpu_dsm_gpa | dsm_mask_val);
+
+		ptdev->has_virt_pcicfg_regs = &has_virt_pcicfg_regs_on_def_gpu;
+		break;
+	}
+
+	gpu_opregion_gpa = gpu_dsm_gpa - GPU_OPREGION_SIZE;
+	pci_set_cfgdata32(ptdev->dev, PCIR_ASLS_CTL, gpu_opregion_gpa | (opregion_phys & ~PCIM_ASLS_OPREGION_MASK));
+
+	/* initialize the EPT mapping for passthrough GPU dsm region */
+	vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
+	vm_map_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
+
+	/* initialize the EPT mapping for passthrough GPU opregion */
+	vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_opregion_gpa, GPU_OPREGION_SIZE, gpu_opregion_hpa);
+	vm_map_ptdev_mmio(ctx, 0, 2, 0, gpu_opregion_gpa, GPU_OPREGION_SIZE, gpu_opregion_hpa);
+
+	pcidev->type = ACRN_PTDEV_QUIRK_ASSIGN;
+}
+
+static int
+parse_vmsix_on_msi_bar_id(char *s, int *id, int base)
+{
+	char *str, *cp;
+	int ret = 0;
+
+	if (s == NULL)
+		return -EINVAL;
+
+	str = cp = strdup(s);
+	ret = dm_strtoi(cp, &cp, base, id);
+	free(str);
+
+	return ret;
 }
 
 /*
@@ -761,52 +543,73 @@ pciaccess_init(void)
 static int
 passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
-	int bus, slot, func, error;
+	int bus, slot, func, idx, error;
 	struct passthru_dev *ptdev;
 	struct pci_device_iterator *iter;
 	struct pci_device *phys_dev;
 	char *opt;
 	bool keep_gsi = false;
-	bool need_reset = false;
+	bool need_reset = true;
+	bool d3hot_reset = false;
+	bool enable_ptm = false;
+	int vrp_sec_bus = 0;
+	int vmsix_on_msi_bar_id = -1;
+	struct acrn_pcidev pcidev = {};
+	uint16_t vendor = 0, device = 0;
 
 	ptdev = NULL;
 	error = -EINVAL;
 
 	if (opts == NULL) {
-		warnx("Empty passthru options\n");
+		pr_err("Empty passthru options\n");
 		return -EINVAL;
 	}
 
 	opt = strsep(&opts, ",");
 	if (parse_bdf(opt, &bus, &slot, &func, 16) != 0) {
-		warnx("Invalid passthru BDF options:%s", opt);
+		pr_err("Invalid passthru BDF options:%s", opt);
+		return -EINVAL;
+	}
+
+	if (is_rtvm && (PCI_BDF(bus, slot, func) == PCI_BDF_GPU)) {
+		pr_err("%s RTVM doesn't support GVT-D.", __func__);
 		return -EINVAL;
 	}
 
 	while ((opt = strsep(&opts, ",")) != NULL) {
 		if (!strncmp(opt, "keep_gsi", 8))
 			keep_gsi = true;
-		else if (!strncmp(opt, "reset", 5))
-			need_reset = true;
-		else
-			warnx("Invalid passthru options:%s", opt);
-	}
-
-	if (vm_assign_ptdev(ctx, bus, slot, func) != 0) {
-		warnx("PCI device at %x/%x/%x is not using the pt(4) driver",
-			bus, slot, func);
-		goto done;
+		else if (!strncmp(opt, "no_reset", 8))
+			need_reset = false;
+		else if (!strncmp(opt, "d3hot_reset", 11))
+			d3hot_reset = true;
+		else if (!strncmp(opt, "gpu", 3)) {
+			/* Create the dedicated "igd-lpc" on 00:1f.0 for IGD passthrough */
+			if (pci_parse_slot("31,igd-lpc") != 0)
+				pr_warn("faild to create igd-lpc");
+		} else if (!strncmp(opt, "vmsix_on_msi", 12)) {
+			opt = strsep(&opts, ",");
+			if (parse_vmsix_on_msi_bar_id(opt, &vmsix_on_msi_bar_id, 10) != 0) {
+				pr_err("faild to parse msix emulation bar id");
+				return -EINVAL;
+			}
+		} else if (!strncmp(opt, "enable_ptm", 10)) {
+			pr_notice("<PTM>: opt=enable_ptm.\n");
+			enable_ptm = true;
+		} else
+			pr_warn("Invalid passthru options:%s", opt);
 	}
 
 	ptdev = calloc(1, sizeof(struct passthru_dev));
 	if (ptdev == NULL) {
-		warnx("%s: calloc FAIL!", __func__);
+		pr_err("%s: calloc FAIL!", __func__);
 		error = -ENOMEM;
 		goto done;
 	}
 
 	ptdev->phys_bdf = PCI_BDF(bus, slot, func);
 	ptdev->need_reset = need_reset;
+	ptdev->d3hot_reset = d3hot_reset;
 	update_pt_info(ptdev->phys_bdf);
 
 	error = pciaccess_init();
@@ -826,7 +629,7 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_iterator_destroy(iter);
 
 	if (error < 0) {
-		warnx("No physical PCI device %x:%x.%x!", bus, slot, func);
+		pr_err("No physical PCI device %x:%x.%x!", bus, slot, func);
 		goto done;
 	}
 
@@ -842,12 +645,20 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_set_cfgdata16(dev, PCIR_MINGNT,
 			  read_config(ptdev->phys_dev, PCIR_MINGNT, 2));
 
+
+	/* Once this device is assigned to other guest, the original guest can't access it again
+	 * So we need to cache verdor and device for filling DSDT.
+	 */
+	vendor = read_config(ptdev->phys_dev, PCIR_VENDOR, 2);
+	device = read_config(ptdev->phys_dev, PCIR_DEVICE, 2);
+	pci_set_cfgdata16(dev, PCIR_VENDOR, vendor);
+	pci_set_cfgdata16(dev, PCIR_DEVICE, device);
+
 #if AUDIO_NHLT_HACK
 	/* device specific handling:
 	 * audio: enable NHLT ACPI table
 	 */
-	if (read_config(ptdev->phys_dev, PCIR_VENDOR, 2) == 0x8086 &&
-		read_config(ptdev->phys_dev, PCIR_DEVICE, 2) == 0x5a98)
+	if (vendor == 0x8086 && device == 0x5a98)
 		acpi_table_enable(NHLT_ENTRY_NO);
 #endif
 
@@ -856,31 +667,60 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	if (error < 0)
 		goto done;
 
+	if (vmsix_on_msi_bar_id != -1) {
+		error = pci_emul_alloc_pbar(dev, vmsix_on_msi_bar_id, 0, PCIBAR_MEM32, 4096);
+		if (error < 0)
+			goto done;
+		error = ACRN_PTDEV_IRQ_MSI;
+	}
+
+	if (ptdev->phys_bdf == PCI_BDF_GPU)
+		passthru_gpu_dsm_opregion(ctx, ptdev, &pcidev, device);
+
+	pcidev.virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
+	pcidev.phys_bdf = ptdev->phys_bdf;
+	for (idx = 0; idx <= PCI_BARMAX; idx++) {
+		pcidev.bar[idx] = pci_get_cfgdata32(dev, PCIR_BAR(idx));
+	}
+
 	/* If ptdev support MSI/MSIX, stop here to skip virtual INTx setup.
 	 * Forge Guest to use MSI/MSIX in this case to mitigate IRQ sharing
 	 * issue
 	 */
-	if (error == IRQ_MSI && !keep_gsi)
-		return 0;
+	if (error != ACRN_PTDEV_IRQ_MSI || keep_gsi) {
+		/* Allocates the virq if ptdev only support INTx */
+		pci_lintr_request(dev);
 
-	/* Allocates the virq if ptdev only support INTx */
-	pci_lintr_request(dev);
+		ptdev->phys_pin = read_config(ptdev->phys_dev, PCIR_INTLINE, 1);
 
-	ptdev->phys_pin = read_config(ptdev->phys_dev, PCIR_INTLINE, 1);
-
-	if (ptdev->phys_pin == -1 || ptdev->phys_pin > 256) {
-		warnx("ptdev %x/%x/%x has wrong phys_pin %d, likely fail!",
-		    bus, slot, func, ptdev->phys_pin);
-		goto done;
+		if (ptdev->phys_pin == -1 || ptdev->phys_pin > 256) {
+			pr_err("ptdev %x/%x/%x has wrong phys_pin %d, likely fail!",
+				bus, slot, func, ptdev->phys_pin);
+			error = -1;
+			goto done;
+		}
 	}
 
-	error = 0;		/* success */
-done:
-	if (error) {
-		if (ptdev != NULL) {
-			free(ptdev);
+	if (enable_ptm) {
+		error = ptm_probe(ctx, ptdev, &vrp_sec_bus);
+
+		if (!error && (vrp_sec_bus > 0)) {
+			/* if ptm is enabled, ptm capable ptdev (ptm requestor) is connected to virtual
+			 * root port (ptm root), instead of virutal host bridge. */
+			pcidev.virt_bdf = PCI_BDF(vrp_sec_bus, 0, 0);
 		}
-		vm_unassign_ptdev(ctx, bus, slot, func);
+		else {
+			enable_ptm = false;
+			pr_err("%s: Failed to enable PTM on passthrough device %x:%x:%x.\n", __func__, bus, slot, func);
+		}
+	}
+
+	pcidev.intr_line = pci_get_cfgdata8(dev, PCIR_INTLINE);
+	pcidev.intr_pin = pci_get_cfgdata8(dev, PCIR_INTPIN);
+	error = vm_assign_pcidev(ctx, &pcidev);
+done:
+	if (error && (ptdev != NULL)) {
+			free(ptdev);
 	}
 	return error;
 }
@@ -899,84 +739,60 @@ static void
 passthru_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 {
 	struct passthru_dev *ptdev;
-	uint8_t bus, slot, func;
 	uint16_t virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
-	int i;
+	struct acrn_pcidev pcidev = {};
+	uint16_t phys_bdf = 0;
+	char reset_path[60];
+	int fd;
 
 	if (!dev->arg) {
-		warnx("%s: passthru_dev is NULL", __func__);
+		pr_warn("%s: passthru_dev is NULL", __func__);
 		return;
 	}
 
 	ptdev = (struct passthru_dev *) dev->arg;
-	bus = (ptdev->phys_bdf >> 8) & 0xff;
-	slot = (ptdev->phys_bdf & 0xff) >> 3;
-	func = ptdev->phys_bdf & 0x7;
 
-	if (ptdev->msix.capoff != 0)
-		deinit_msix_table(ctx, ptdev);
-	else if(ptdev->msi.capoff != 0) {
-		/* Currently only support 1 vector */
-		vm_reset_ptdev_msix_info(ctx, virt_bdf, ptdev->phys_bdf, 1);
-	}
-
-	printf("vm_reset_ptdev_intx:0x%x-%x, ioapic virpin=%d.\n",
+	pr_info("vm_reset_ptdev_intx:0x%x-%x, ioapic virpin=%d.\n",
 			virt_bdf, ptdev->phys_bdf, dev->lintr.ioapic_irq);
-
 	if (dev->lintr.pin != 0) {
 		vm_reset_ptdev_intx_info(ctx, virt_bdf, ptdev->phys_bdf, dev->lintr.ioapic_irq, false);
 	}
 
-	/* unmap the physical BAR in guest MMIO space */
-	for (i = 0; i <= PCI_BARMAX; i++) {
+	if (ptdev)
+		phys_bdf = ptdev->phys_bdf;
 
-		if (ptdev->bar[i].size == 0 ||
-			i == ptdev_msix_table_bar(ptdev) ||
-			ptdev->bar[i].type == PCIBAR_IO)
-			continue;
-
-		vm_unmap_ptdev_mmio(ctx, ptdev->sel.bus,
-				ptdev->sel.dev, ptdev->sel.func,
-				dev->bar[i].addr, ptdev->bar[i].size,
-				ptdev->bar[i].addr);
+	if (ptdev->phys_bdf == PCI_BDF_GPU) {
+		vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
+		vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_opregion_gpa, GPU_OPREGION_SIZE, gpu_opregion_hpa);
 	}
 
+	pcidev.virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
+	pcidev.phys_bdf = ptdev->phys_bdf;
 	pciaccess_cleanup();
 	free(ptdev);
-	vm_unassign_ptdev(ctx, bus, slot, func);
-}
 
-static void
-passthru_update_bar_map(struct vmctx *ctx, struct pci_vdev *dev,
-	int idx, uint64_t orig_addr)
-{
-	struct passthru_dev *ptdev;
-
-	if (!dev->arg) {
-		warnx("%s: passthru_dev is NULL", __func__);
-		return;
+	if (!is_rtvm) {
+		/* Let the HV to deassign the pt device for RTVM, In this case, the RTVM
+		 * could still be alive if DM died.
+		 */
+		vm_deassign_pcidev(ctx, &pcidev);
 	}
+	if (!is_rtvm && phys_bdf) {
+		memset(reset_path, 0, sizeof(reset_path));
+		snprintf(reset_path, 40,
+			"/sys/bus/pci/devices/0000:%02x:%02x.%x/reset",
+			(phys_bdf >> 8) & 0xFF,
+			(phys_bdf >> 3) & 0x1F,
+			(phys_bdf & 0x7));
 
-	ptdev = (struct passthru_dev *)dev->arg;
-
-	if (ptdev->bar[idx].size == 0 ||
-		idx == ptdev_msix_table_bar(ptdev) ||
-		ptdev->bar[idx].type == PCIBAR_IO)
-		return;
-
-	if (dev->bar[idx].addr + dev->bar[idx].size > PCI_EMUL_MEMLIMIT64 ||
-		orig_addr + dev->bar[idx].size > PCI_EMUL_MEMLIMIT64)
-		return;
-
-	vm_unmap_ptdev_mmio(ctx, ptdev->sel.bus,
-			ptdev->sel.dev, ptdev->sel.func,
-			orig_addr, ptdev->bar[idx].size,
-			ptdev->bar[idx].addr);
-
-	vm_map_ptdev_mmio(ctx, ptdev->sel.bus,
-			ptdev->sel.dev, ptdev->sel.func,
-			dev->bar[idx].addr, ptdev->bar[idx].size,
-			ptdev->bar[idx].addr);
+		fd = open(reset_path, O_WRONLY);
+		if (fd >= 0) {
+			if (write(fd, "1", 1) < 0)
+				pr_warn("reset dev %x failed!\n",
+				      phys_bdf);
+			close(fd);
+		}
+	}
 }
 
 /* bind pin info for pass-through device */
@@ -992,9 +808,9 @@ passthru_bind_irq(struct vmctx *ctx, struct pci_vdev *dev)
 	if (dev->lintr.pin == 0)
 		return;
 
-	printf("vm_set_ptdev_intx for %d:%d.%d, ",
+	pr_info("vm_set_ptdev_intx for %d:%d.%d, ",
 		dev->bus, dev->slot, dev->func);
-	printf("virt_pin=%d, phys_pin=%d, virt_bdf=0x%x, phys_bdf=0x%x.\n",
+	pr_info("virt_pin=%d, phys_pin=%d, virt_bdf=0x%x, phys_bdf=0x%x.\n",
 		dev->lintr.ioapic_irq, ptdev->phys_pin,
 		virt_bdf, ptdev->phys_bdf);
 
@@ -1003,43 +819,15 @@ passthru_bind_irq(struct vmctx *ctx, struct pci_vdev *dev)
 }
 
 static int
-bar_access(int coff)
-{
-	if (coff >= PCIR_BAR(0) && coff < PCIR_BAR(PCI_BARMAX + 1))
-		return 1;
-	else
-		return 0;
-}
-
-static int
 passthru_cfgread(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 		 int coff, int bytes, uint32_t *rv)
 {
-	struct passthru_dev *ptdev;
+	struct passthru_dev *ptdev = dev->arg;
 
-	ptdev = dev->arg;
-
-	/*
-	 * PCI BARs and MSI capability is emulated.
-	 */
-	if (bar_access(coff))
-		return -1;
-
-	/* INTLINE/INTPIN/MINGNT/MAXLAT need to be hacked */
-	if (coff >= PCIR_INTLINE && coff <= PCIR_MAXLAT)
-		return -1;
-
-	/* Everything else just read from the device's config space */
-	*rv = read_config(ptdev->phys_dev, coff, bytes);
-
-	/*
-	 * return zero for graphics stolen memory since acrn does not have
-	 * support for RMRR
-	 */
-	if ((PCI_BDF(dev->bus, dev->slot, dev->func) == PCI_BDF_GPU)
-		&& (coff == PCIR_GMCH_CTL)) {
-		*rv &= ~PCIM_GMCH_CTL_GMS;
-	}
+	if (ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff))
+		*rv = pci_get_cfgdata32(dev, coff);
+	else
+		*rv = read_config(ptdev->phys_dev, coff, bytes);
 
 	return 0;
 }
@@ -1048,21 +836,10 @@ static int
 passthru_cfgwrite(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 		  int coff, int bytes, uint32_t val)
 {
-	struct passthru_dev *ptdev;
+	struct passthru_dev *ptdev = dev->arg;
 
-	ptdev = dev->arg;
-
-	/*
-	 * PCI BARs are emulated
-	 */
-	if (bar_access(coff))
-		return -1;
-
-	/* INTLINE/INTPIN/MINGNT/MAXLAT need to be hacked */
-	if (coff >= PCIR_INTLINE && coff <= PCIR_MAXLAT)
-		return -1;
-
-	write_config(ptdev->phys_dev, coff, bytes, val);
+	if (!(ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff)))
+		write_config(ptdev->phys_dev, coff, bytes, val);
 
 	return 0;
 }
@@ -1071,42 +848,19 @@ static void
 passthru_write(struct vmctx *ctx, int vcpu, struct pci_vdev *dev, int baridx,
 	       uint64_t offset, int size, uint64_t value)
 {
-	struct passthru_dev *ptdev;
-
-	ptdev = dev->arg;
-
-	if (baridx == ptdev_msix_table_bar(ptdev)) {
-		msix_table_write(ptdev, offset, size, value);
-	} else {
-		/* TODO: Add support for IO BAR of PTDev */
-		warnx("Passthru: PIO write not supported, ignored\n");
-	}
 }
 
 static uint64_t
 passthru_read(struct vmctx *ctx, int vcpu, struct pci_vdev *dev, int baridx,
 	      uint64_t offset, int size)
 {
-	struct passthru_dev *ptdev;
-	uint64_t val;
-
-	ptdev = dev->arg;
-
-	if (baridx == ptdev_msix_table_bar(ptdev)) {
-		val = msix_table_read(ptdev, offset, size);
-	} else {
-		/* TODO: Add support for IO BAR of PTDev */
-		warnx("Passthru: PIO read not supported\n");
-		val = (uint64_t)(-1);
-	}
-
-	return val;
+	return ~0UL;
 }
 
 static void
 write_dsdt_xdci(struct pci_vdev *dev)
 {
-	printf("write virt-%x:%x.%x in dsdt for XDCI @ 00:15.1\n",
+	pr_info("write virt-%x:%x.%x in dsdt for XDCI @ 00:15.1\n",
 	       dev->bus,
 	       dev->slot,
 	       dev->func);
@@ -1124,7 +878,7 @@ write_dsdt_xdci(struct pci_vdev *dev)
 static void
 write_dsdt_hdac(struct pci_vdev *dev)
 {
-	printf("write virt-%x:%x.%x in dsdt for HDAC @ 00:17.0\n",
+	pr_info("write virt-%x:%x.%x in dsdt for HDAC @ 00:17.0\n",
 	       dev->bus,
 	       dev->slot,
 	       dev->func);
@@ -1243,7 +997,7 @@ write_dsdt_hdac(struct pci_vdev *dev)
 static void
 write_dsdt_hdas(struct pci_vdev *dev)
 {
-	printf("write virt-%x:%x.%x in dsdt for HDAS @ 00:e.0\n",
+	pr_info("write virt-%x:%x.%x in dsdt for HDAS @ 00:e.0\n",
 	       dev->bus,
 	       dev->slot,
 	       dev->func);
@@ -1463,7 +1217,7 @@ write_dsdt_hdas(struct pci_vdev *dev)
 static void
 write_dsdt_ipu_i2c(struct pci_vdev *dev)
 {
-	printf("write virt-%x:%x.%x in dsdt for ipu's i2c-bus @ 00:16.0\n",
+	pr_info("write virt-%x:%x.%x in dsdt for ipu's i2c-bus @ 00:16.0\n",
 			dev->bus, dev->slot, dev->func);
 
 	/* physical I2C 0:16.0 */
@@ -1693,7 +1447,7 @@ write_dsdt_ipu_i2c(struct pci_vdev *dev)
 static void
 write_dsdt_urt1(struct pci_vdev *dev)
 {
-	printf("write virt-%x:%x.%x in dsdt for URT1 @ 00:18.0\n",
+	pr_info("write virt-%x:%x.%x in dsdt for URT1 @ 00:18.0\n",
 	       dev->bus,
 	       dev->slot,
 	       dev->func);
@@ -1715,7 +1469,7 @@ write_dsdt_urt1(struct pci_vdev *dev)
 static void
 write_dsdt_sdc(struct pci_vdev *dev)
 {
-	printf("write SDC-%x:%x.%x in dsdt for SDC @ 00:1b.0\n",
+	pr_info("write SDC-%x:%x.%x in dsdt for SDC @ 00:1b.0\n",
 	       dev->bus,
 	       dev->slot,
 	       dev->func);
@@ -1750,17 +1504,87 @@ write_dsdt_sdc(struct pci_vdev *dev)
 }
 
 static void
+write_dsdt_tsn(struct pci_vdev *dev, uint16_t device)
+{
+	char device_name[4];
+	uint16_t pcs_id;
+
+	if (device == 0x4b32) {
+		strncpy(device_name, "GTSN", 4);
+		pcs_id = 0;
+	} else if (device == 0x4ba0) {
+		strncpy(device_name, "OTN0", 4);
+		pcs_id = 1;
+	} else if (device == 0x4bb0) {
+		strncpy(device_name, "OTN1", 4);
+		pcs_id = 2;
+	} else {
+		return;
+	}
+
+	pr_info("write TSN-%x:%x.%x in dsdt for TSN-%d\n", dev->bus, dev->slot, dev->func, pcs_id);
+
+	dsdt_line("");
+	dsdt_line("Device (%.4s)", device_name);
+	dsdt_line("{");
+	dsdt_line("    Name (_ADR, 0x%04X%04X)", dev->slot, dev->func);  // _ADR: Address
+	dsdt_line("    OperationRegion (TSRT, PCI_Config, Zero, 0x0100)");
+	dsdt_line("    Field (TSRT, AnyAcc, NoLock, Preserve)");
+	dsdt_line("    {");
+	dsdt_line("        DVID,   16,");
+	dsdt_line("        Offset (0x10),");
+	dsdt_line("        TADL,   32,");
+	dsdt_line("        TADH,   32");
+	dsdt_line("    }");
+	dsdt_line("}");
+	dsdt_line("");
+	dsdt_line("Scope (_SB)");
+	dsdt_line("{");
+	dsdt_line("    Device (PCS%01X)", pcs_id);
+	dsdt_line("    {");
+	dsdt_line("        Name (_HID, \"INTC1033\")");  // _HID: Hardware ID
+	dsdt_line("        Name (_UID, Zero)");  // _UID: Unique ID
+	dsdt_line("        Method (_STA, 0, NotSerialized)");  // _STA: Status
+	dsdt_line("        {");
+	dsdt_line("");
+	dsdt_line("            Return (0x0F)");
+	dsdt_line("        }");
+	dsdt_line("");
+	dsdt_line("        Method (_CRS, 0, Serialized)");  // _CRS: Current Resource Settings
+	dsdt_line("        {");
+	dsdt_line("            Name (PCSR, ResourceTemplate ()");
+	dsdt_line("            {");
+	dsdt_line("                Memory32Fixed (ReadWrite,");
+	dsdt_line("                    0x00000000,");         // Address Base
+	dsdt_line("                    0x00000004,");         // Address Length
+	dsdt_line("                    _Y55)");
+	dsdt_line("                Memory32Fixed (ReadWrite,");
+	dsdt_line("                    0x00000000,");         // Address Base
+	dsdt_line("                    0x00000004,");         // Address Length
+	dsdt_line("                    _Y56)");
+	dsdt_line("            })");
+	dsdt_line("            CreateDWordField (PCSR, \\_SB.PCS%01X._CRS._Y55._BAS, MAL0)", pcs_id);  // _BAS: Base Address
+	dsdt_line("            MAL0 = ((^^PCI0.%.4s.TADL & 0xFFFFF000) + 0x0200)", device_name);
+	dsdt_line("            CreateDWordField (PCSR, \\_SB.PCS%01X._CRS._Y56._BAS, MDL0)", pcs_id);  // _BAS: Base Address
+	dsdt_line("            MDL0 = ((^^PCI0.%.4s.TADL & 0xFFFFF000) + 0x0204)", device_name);
+	dsdt_line("            Return (PCSR)"); /* \_SB_.PCS0._CRS.PCSR */
+	dsdt_line("        }");
+	dsdt_line("    }");
+	dsdt_line("}");
+	dsdt_line("");
+}
+
+static void
 passthru_write_dsdt(struct pci_vdev *dev)
 {
-	struct passthru_dev *ptdev = (struct passthru_dev *) dev->arg;
-	uint32_t vendor = 0, device = 0;
+	uint16_t vendor = 0, device = 0;
 
-	vendor = read_config(ptdev->phys_dev, PCIR_VENDOR, 2);
+	vendor = pci_get_cfgdata16(dev, PCIR_VENDOR);
 
 	if (vendor != 0x8086)
 		return;
 
-	device = read_config(ptdev->phys_dev, PCIR_DEVICE, 2);
+	device = pci_get_cfgdata16(dev, PCIR_DEVICE);
 
 	/* Provides ACPI extra info */
 	if (device == 0x5aaa)
@@ -1781,7 +1605,8 @@ passthru_write_dsdt(struct pci_vdev *dev)
 	else if (device == 0x5aca)
 		/* SDC @ 00:1b.0 */
 		write_dsdt_sdc(dev);
-
+	else if ((device == 0x4b32) || (device == 0x4ba0) || (device == 0x4bb0))
+		write_dsdt_tsn(dev, device);
 }
 
 struct pci_vdev_ops passthru = {
@@ -1793,7 +1618,6 @@ struct pci_vdev_ops passthru = {
 	.vdev_barwrite		= passthru_write,
 	.vdev_barread		= passthru_read,
 	.vdev_phys_access	= passthru_bind_irq,
-	.vdev_update_bar_map	= passthru_update_bar_map,
 	.vdev_write_dsdt	= passthru_write_dsdt,
 };
 DEFINE_PCI_DEVTYPE(passthru);

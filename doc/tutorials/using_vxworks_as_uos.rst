@@ -1,21 +1,21 @@
 .. _using_vxworks_as_uos:
 
-Using VxWorks* as User OS
-#########################
+Run VxWorks as the User VM
+##########################
 
 `VxWorks`_\* is a real-time proprietary OS designed for use in embedded systems requiring real-time, deterministic
-performance. This tutorial describes how to run VxWorks as the User OS on the ACRN hypervisor
-based on Clear Linux 29970 (ACRN tag v1.1).
+performance. This tutorial describes how to run VxWorks as the User VM on the ACRN hypervisor
+based on Ubuntu Service VM (ACRN tag v2.0).
 
-.. note:: You'll need to be a WindRiver* customer and have purchased VxWorks to follow this tutorial.
+.. note:: You'll need to be a Wind River* customer and have purchased VxWorks to follow this tutorial.
 
-Steps for Using VxWorks as User OS
+Steps for Using VxWorks as User VM
 **********************************
 
 #. Build VxWorks
 
    Follow the `VxWorks Getting Started Guide <https://docs.windriver.com/bundle/vxworks_7_tutorial_kernel_application_workbench_sr0610/page/rbu1422461642318.html>`_
-   to setup the VxWorks development environment and build the VxWorks Image.
+   to set up the VxWorks development environment and build the VxWorks Image.
 
    .. note::
       The following kernel configuration should be **excluded**:
@@ -31,7 +31,7 @@ Steps for Using VxWorks as User OS
         * CONSOLE_BAUD_RATE = 115200
         * SYS_CLK_RATE_MAX = 1000
 
-#. Build GRUB2 BootLoader Image
+#. Build GRUB2 bootloader Image
 
    We use grub-2.02 as the bootloader of VxWorks in this tutorial; other versions may also work.
 
@@ -92,28 +92,28 @@ Steps for Using VxWorks as User OS
 
    You now have a virtual disk image with bootable VxWorks in ``VxWorks.img``.
 
-#. Follow :ref:`getting-started-apl-nuc` to boot "The ACRN Service OS".
+#. Follow :ref:`install-ubuntu-Service VM-NVMe` to boot the ACRN Service VM.
 
-#. Boot VxWorks as User OS.
 
-   On the ACRN SOS, prepare a directory and populate it with VxWorks files.
+#. Boot VxWorks as User VM.
+
+   On the ACRN Service VM, prepare a directory and populate it with VxWorks files.
 
    .. code-block:: none
 
       $ mkdir vxworks && cd vxworks
       $ cp /usr/share/acrn/samples/nuc/launch_vxworks.sh .
-      $ cp /usr/share/acrn/bios/OVMF.fd .
 
    You will also need to copy the ``VxWorks.img`` created in the VxWorks build environment into directory
-   ``vxworks`` (via, e.g. a USB stick or network).
+   ``vxworks`` (via, e.g. a USB drive or network).
 
-   Run the ``launch_vxworks.sh`` script to launch VxWorks as Uos.
+   Run the ``launch_vxworks.sh`` script to launch VxWorks as the User VM.
 
    .. code-block:: none
 
       $ sudo ./launch_vxworks.sh
 
-   Then VxWorks will boot up automatically. You will see the prompt.
+   Then VxWorks will boot automatically. You will see the prompt.
 
    .. code-block:: console
 
@@ -132,7 +132,7 @@ Steps for Using VxWorks as User OS
 
       ->
 
-   Finally, you can type ``help`` to check whether the VxWorks works well.
+   Finally, you can type ``help`` to see available VxWorks commands.
 
    .. code-block:: console
 

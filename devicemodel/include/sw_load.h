@@ -39,9 +39,11 @@
 #define E820_TYPE_ACPI_NVS      4U   /* EFI 10 */
 #define E820_TYPE_UNUSABLE      5U   /* EFI 8 */
 
-#define NUM_E820_ENTRIES        8
-#define LOWRAM_E820_ENTRY       2
-#define HIGHRAM_E820_ENTRY      7
+#define NUM_E820_ENTRIES	7
+#define LOWRAM_E820_ENTRY	1
+#define HIGHRAM_E820_ENTRY	6
+
+#define HIGHRAM_START_ADDR	 0x100000000UL /* 4GB */
 
 /* Defines a single entry in an E820 memory map. */
 struct e820_entry {
@@ -55,7 +57,6 @@ struct e820_entry {
 
 extern const struct e820_entry e820_default_entries[NUM_E820_ENTRIES];
 extern int with_bootargs;
-extern bool writeback_nv_storage;
 
 size_t ovmf_image_size(void);
 

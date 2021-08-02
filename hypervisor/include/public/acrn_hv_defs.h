@@ -20,6 +20,7 @@
  */
 
 #define BASE_HC_ID(x, y) (((x)<<24U)|(y))
+#define HC_IDX(id) ((id)&(0xFFUL))
 
 #define HC_ID 0x80UL
 
@@ -64,6 +65,12 @@
 #define HC_VM_PCI_MSIX_REMAP        BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x02UL)
 #define HC_SET_PTDEV_INTR_INFO      BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x03UL)
 #define HC_RESET_PTDEV_INTR_INFO    BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x04UL)
+#define HC_ASSIGN_PCIDEV            BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x05UL)
+#define HC_DEASSIGN_PCIDEV          BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x06UL)
+#define HC_ASSIGN_MMIODEV           BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x07UL)
+#define HC_DEASSIGN_MMIODEV         BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x08UL)
+#define HC_ADD_VDEV                 BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x09UL)
+#define HC_REMOVE_VDEV              BASE_HC_ID(HC_ID, HC_ID_PCI_BASE + 0x0AUL)
 
 /* DEBUG */
 #define HC_ID_DBG_BASE              0x60UL
@@ -247,28 +254,21 @@ struct hc_ptdev_irq {
 	/** physical BDF of the ptdev */
 	uint16_t phys_bdf;
 
-	union irq_source {
-		/** INTX remapping info */
-		struct intx_info {
-			/** virtual IOAPIC/PIC pin */
-			uint32_t virt_pin;
+	/** INTX remapping info */
+	struct intx_info {
+		/** virtual IOAPIC/PIC pin */
+		uint32_t virt_pin;
 
-			/** physical IOAPIC pin */
-			uint32_t phys_pin;
+		/** physical IOAPIC pin */
+		uint32_t phys_pin;
 
-			/** is virtual pin from PIC */
-			bool pic_pin;
+		/** is virtual pin from PIC */
+		bool pic_pin;
 
-			/** Reserved */
-			uint8_t reserved[3];
-		} intx;
+		/** Reserved */
+		uint8_t reserved[3];
+	} intx;
 
-		/** MSIx remapping info */
-		struct msix_info {
-			/** vector count of MSI/MSIX */
-			uint32_t vector_cnt;
-		} msix;
-	} is;	/* irq source */
 } __aligned(8);
 
 /**
@@ -282,26 +282,66 @@ struct hc_api_version {
 	uint32_t minor_version;
 } __aligned(8);
 
+#define ACRN_PLATFORM_LAPIC_IDS_MAX	64
 /**
  * Hypervisor API, return it for HC_GET_PLATFORM_INFO hypercall
  */
-struct hc_platform_info {
+struct acrn_platform_info {
 	/** Hardware Information */
-	/** Physical CPU number */
-	uint16_t cpu_num;
+	struct {
+		/** Physical CPU number */
+		uint16_t cpu_num;
+		/** version of this structure */
+		uint16_t version;
 
-	/** Align the size of version & hardware info to 128Bytes. */
-	uint8_t reserved0[126];
+		uint32_t l2_cat_shift;
+		uint32_t l3_cat_shift;
+
+		/** pLAPIC ID list */
+		uint8_t  lapic_ids[ACRN_PLATFORM_LAPIC_IDS_MAX];
+
+		/**
+		 * sizeof(uint8_t reserved0[]) + sizeof(l2_cat_shift)
+		 * + sizeof(l3_cat_shift) + sizeof(uint8_t lapic_ids[]) = 124
+		 *
+		 * Note:
+		 * 1. DM needs to use the same logic as hypervisor to calculate vLAPIC IDs
+		 * based on physical APIC IDs and CPU affinity setting.
+		 *
+		 * 2. Can only support at most 116 cores. And it assumes LAPIC ID is 8bits
+		 * (X2APIC mode supports 32 bits)
+		 */
+		uint8_t  reserved[52];
+	} hw;
 
 	/** Configuration Information */
-	/** Maximum vCPU number for one VM. */
-	uint16_t max_vcpus_per_vm;
+	struct {
+		/** Maximum vCPU number for one VM. */
+		uint16_t max_vcpus_per_vm;
+		/** Number of configured VMs */
+		uint16_t max_vms;
+		/**
+		 * The size of acrn_vm_config is various on different platforms.
+		 * This is the size of this struct which is used by the caller
+		 * to parse the vm_configs array.
+		 */
+		uint32_t vm_config_size;
 
-	/** Maximum Kata container number in SOS VM */
-	uint8_t max_kata_containers;
+		/**
+		 * Address to an array of struct acrn_vm_config, containing all
+		 * the configurations of all VMs. VHM treats it as an opague data
+		 * structure.
+		 *
+		 * The size of one array element is vm_config_entry_size while
+		 * the number of elements is max_vms.
+		 */
+		uint64_t vm_configs_addr;
 
-	/** Align the size of Configuration info to 128Bytes. */
-	uint8_t reserved1[125];
+		/** Maximum Kata container number in SOS VM */
+		uint64_t max_kata_containers;
+		/** Align the size of Configuration info to 128Bytes. */
+		uint8_t  reserved[104];
+	} sw;
 } __aligned(8);
 
 /**

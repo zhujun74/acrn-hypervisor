@@ -46,6 +46,7 @@
 #include "block_if.h"
 #include "ahci.h"
 #include "dm_string.h"
+#include "log.h"
 
 /*
  * Notes:
@@ -69,8 +70,8 @@
  * Debug printf
  */
 static int block_if_debug;
-#define DPRINTF(params) do { if (block_if_debug) printf params; } while (0)
-#define WPRINTF(params) (printf params)
+#define DPRINTF(params) do { if (block_if_debug) pr_dbg params; } while (0)
+#define WPRINTF(params) (pr_err params)
 
 enum blockop {
 	BOP_READ,
@@ -478,7 +479,7 @@ sub_file_unlock(struct blockif_ctxt *bc)
 		DPRINTF(("blockif: release file lock...\n"));
 		fl->l_type = F_UNLCK;
 		if (fcntl(bc->fd, F_OFD_SETLK, fl) == -1) {
-			fprintf(stderr, "blockif: failed to unlock subfile!\n");
+			pr_err("blockif: failed to unlock subfile!\n");
 			exit(1);
 		}
 		DPRINTF(("blockif: release done\n"));
@@ -579,7 +580,7 @@ blockif_open(const char *optstr, const char *ident)
 			else
 				goto err;
 		} else {
-			fprintf(stderr, "Invalid device option \"%s\"\n", cp);
+			pr_err("Invalid device option \"%s\"\n", cp);
 			goto err;
 		}
 	}
@@ -599,12 +600,12 @@ blockif_open(const char *optstr, const char *ident)
 	}
 
 	if (fd < 0) {
-		warn("Could not open backing file: %s", nopt);
+		pr_err("Could not open backing file: %s", nopt);
 		goto err;
 	}
 
 	if (fstat(fd, &sbuf) < 0) {
-		warn("Could not stat backing file %s", nopt);
+		pr_err("Could not stat backing file %s", nopt);
 		goto err;
 	}
 
@@ -619,7 +620,7 @@ blockif_open(const char *optstr, const char *ident)
 		/* get size */
 		err_code = ioctl(fd, BLKGETSIZE, &sz);
 		if (err_code) {
-			fprintf(stderr, "error %d getting block size!\n",
+			pr_err("error %d getting block size!\n",
 				err_code);
 			size = sbuf.st_size;	/* set default value */
 		} else {
@@ -641,7 +642,7 @@ blockif_open(const char *optstr, const char *ident)
 		/* get physical sector size */
 		err_code = ioctl(fd, BLKPBSZGET, &psectsz);
 		if (err_code) {
-			fprintf(stderr, "error %d getting physical sectsz!\n",
+			pr_err("error %d getting physical sectsz!\n",
 				err_code);
 			psectsz = DEV_BSIZE;  /* set default physical size */
 		}
@@ -668,7 +669,7 @@ blockif_open(const char *optstr, const char *ident)
 	if (ssopt != 0) {
 		if (!powerof2(ssopt) || !powerof2(pssopt) || ssopt < 512 ||
 		    ssopt > pssopt) {
-			fprintf(stderr, "Invalid sector size %d/%d\n",
+			pr_err("Invalid sector size %d/%d\n",
 			    ssopt, pssopt);
 			goto err;
 		}
@@ -682,8 +683,7 @@ blockif_open(const char *optstr, const char *ident)
 		 */
 		if (S_ISCHR(sbuf.st_mode)) {
 			if (ssopt < sectsz || (ssopt % sectsz) != 0) {
-				fprintf(stderr,
-				"Sector size %d incompatible with underlying device sector size %d\n",
+				pr_err("Sector size %d incompatible with underlying device sector size %d\n",
 				    ssopt, sectsz);
 				goto err;
 			}
@@ -696,7 +696,7 @@ blockif_open(const char *optstr, const char *ident)
 
 	bc = calloc(1, sizeof(struct blockif_ctxt));
 	if (bc == NULL) {
-		perror("calloc");
+		pr_err("calloc");
 		goto err;
 	}
 
@@ -709,7 +709,7 @@ blockif_open(const char *optstr, const char *ident)
 		err_code = sub_file_validate(bc, fd, ro, bc->sub_file_start_lba,
 					     size);
 		if (err_code < 0) {
-			fprintf(stderr, "subfile range specified not valid!\n");
+			pr_err("subfile range specified not valid!\n");
 			exit(1);
 		}
 		DPRINTF(("Validated done!\n"));
@@ -750,7 +750,7 @@ blockif_open(const char *optstr, const char *ident)
 	for (i = 0; i < BLOCKIF_NUMTHR; i++) {
 		if (snprintf(tname, sizeof(tname), "blk-%s-%d",
 					ident, i) >= sizeof(tname)) {
-			perror("blk thread name too long");
+			pr_err("blk thread name too long");
 		}
 		pthread_create(&bc->btid[i], NULL, blockif_thr, bc);
 		pthread_setname_np(bc->btid[i], tname);

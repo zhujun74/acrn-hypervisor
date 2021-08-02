@@ -6,7 +6,7 @@
 
 #ifndef LOGMSG_H
 #define LOGMSG_H
-#include <cpu.h>
+#include <asm/cpu.h>
 
 /* Logging severity levels */
 #define LOG_FATAL		1U
@@ -27,7 +27,7 @@
  */
 #define LOG_MESSAGE_MAX_SIZE	(4U * LOG_ENTRY_SIZE)
 
-#define ACRN_DBG_LAPICPT	5U
+#define DBG_LEVEL_LAPICPT	5U
 #if defined(HV_DEBUG)
 
 extern uint16_t console_loglevel;

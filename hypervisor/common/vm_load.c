@@ -4,35 +4,85 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <vm.h>
-#include <e820.h>
-#include <zeropage.h>
-#include <boot_context.h>
-#include <ept.h>
-#include <mmu.h>
-#include <multiboot.h>
+#include <asm/guest/vm.h>
+#include <asm/e820.h>
+#include <asm/zeropage.h>
+#include <asm/guest/ept.h>
+#include <asm/mmu.h>
+#include <boot.h>
+#include <efi_mmap.h>
 #include <errno.h>
-#include <sprintf.h>
 #include <logmsg.h>
 
-#define NUM_REMAIN_1G_PAGES	3UL
-
-/*
- * We put the guest init gdt after kernel/bootarg/ramdisk images. Suppose this is a
- * safe place for guest init gdt of guest whatever the configuration is used by guest.
+/* Define a 32KB memory block to store LaaG VM load params in guest address space
+ * The params including:
+ *	Init GDT entries : 1KB (must be 8byte aligned)
+ *	Linux Zeropage : 4KB
+ *	Boot cmdline : 2KB
+ *	EFI memory map : 12KB
+ *	Reserved region for trampoline code : 8KB
+ * Each param should keep 8byte aligned and the total region size should be less than 32KB
+ * so that it could be put below MEM_1M.
+ * Please note in Linux VM, the last 8KB space below MEM_1M is for trampoline code. The block
+ * should be able to accommodate it and so that avoid the trampoline corruption.
  */
-static uint64_t get_guest_gdt_base_gpa(const struct acrn_vm *vm)
+#define BZIMG_LOAD_PARAMS_SIZE			(MEM_4K * 8)
+#define BZIMG_INITGDT_GPA(load_params_gpa)	(load_params_gpa + 0UL)
+#define BZIMG_ZEROPAGE_GPA(load_params_gpa)	(load_params_gpa + MEM_1K)
+#define BZIMG_CMDLINE_GPA(load_params_gpa)	(load_params_gpa + MEM_1K + MEM_4K)
+#define BZIMG_EFIMMAP_GPA(load_params_gpa)	(load_params_gpa + MEM_1K + MEM_4K + MEM_2K)
+
+/**
+ * @pre vm != NULL && efi_mmap_desc != NULL
+ */
+static uint16_t create_sos_vm_efi_mmap_desc(struct acrn_vm *vm, struct efi_memory_desc *efi_mmap_desc)
 {
-	uint64_t new_guest_gdt_base_gpa, guest_kernel_end_gpa, guest_bootargs_end_gpa, guest_ramdisk_end_gpa;
+	uint16_t i, desc_idx = 0U;
+	const struct efi_memory_desc *hv_efi_mmap_desc = get_efi_mmap_entry();
 
-	guest_kernel_end_gpa = (uint64_t)vm->sw.kernel_info.kernel_load_addr + vm->sw.kernel_info.kernel_size;
-	guest_bootargs_end_gpa = (uint64_t)vm->sw.bootargs_info.load_addr + vm->sw.bootargs_info.size;
-	guest_ramdisk_end_gpa = (uint64_t)vm->sw.ramdisk_info.load_addr + vm->sw.ramdisk_info.size;
+	for (i = 0U; i < get_efi_mmap_entries_count(); i++) {
+		/* Below efi mmap desc types in native should be kept as original for SOS VM */
+		if ((hv_efi_mmap_desc[i].type == EFI_RESERVED_MEMORYTYPE)
+				|| (hv_efi_mmap_desc[i].type == EFI_UNUSABLE_MEMORY)
+				|| (hv_efi_mmap_desc[i].type == EFI_ACPI_RECLAIM_MEMORY)
+				|| (hv_efi_mmap_desc[i].type == EFI_ACPI_MEMORY_NVS)
+				|| (hv_efi_mmap_desc[i].type == EFI_BOOT_SERVICES_CODE)
+				|| (hv_efi_mmap_desc[i].type == EFI_BOOT_SERVICES_DATA)
+				|| (hv_efi_mmap_desc[i].type == EFI_RUNTIME_SERVICES_CODE)
+				|| (hv_efi_mmap_desc[i].type == EFI_RUNTIME_SERVICES_DATA)
+				|| (hv_efi_mmap_desc[i].type == EFI_MEMORYMAPPED_IO)
+				|| (hv_efi_mmap_desc[i].type == EFI_MEMORYMAPPED_IOPORTSPACE)
+				|| (hv_efi_mmap_desc[i].type == EFI_PALCODE)
+				|| (hv_efi_mmap_desc[i].type == EFI_PERSISTENT_MEMORY)) {
 
-	new_guest_gdt_base_gpa = max(guest_kernel_end_gpa, max(guest_bootargs_end_gpa, guest_ramdisk_end_gpa));
-	new_guest_gdt_base_gpa = (new_guest_gdt_base_gpa + 7UL) & ~(8UL - 1UL);
+			efi_mmap_desc[desc_idx] = hv_efi_mmap_desc[i];
+			desc_idx++;
+		}
+	}
 
-	return new_guest_gdt_base_gpa;
+	for (i = 0U; i < vm->e820_entry_num; i++) {
+		/* The memory region with e820 type of RAM could be acted as EFI_CONVENTIONAL_MEMORY
+		 * for SOS VM, the region which occupied by HV and pre-launched VM has been filtered
+		 * already, so it is safe for SOS VM.
+		 * As SOS VM start to run after efi call ExitBootService(), the type of EFI_LOADER_CODE
+		 * and EFI_LOADER_DATA which have been mapped to E820_TYPE_RAM are not needed.
+		 */
+		if (vm->e820_entries[i].type == E820_TYPE_RAM) {
+			efi_mmap_desc[desc_idx].type = EFI_CONVENTIONAL_MEMORY;
+			efi_mmap_desc[desc_idx].phys_addr = vm->e820_entries[i].baseaddr;
+			efi_mmap_desc[desc_idx].virt_addr = vm->e820_entries[i].baseaddr;
+			efi_mmap_desc[desc_idx].num_pages = vm->e820_entries[i].length / PAGE_SIZE;
+			efi_mmap_desc[desc_idx].attribute = EFI_MEMORY_WB;
+			desc_idx++;
+		}
+	}
+
+	for (i = 0U; i < desc_idx; i++) {
+		pr_dbg("SOS VM efi mmap desc[%d]: addr: 0x%lx, len: 0x%lx, type: %d", i,
+			efi_mmap_desc[i].phys_addr, efi_mmap_desc[i].num_pages * PAGE_SIZE, efi_mmap_desc[i].type);
+	}
+
+	return desc_idx;
 }
 
 /**
@@ -56,18 +106,17 @@ static uint32_t create_zeropage_e820(struct zero_page *zp, const struct acrn_vm 
 
 /**
  * @pre vm != NULL
+ * @pre (vm->min_mem_addr <= kernel_load_addr) && (kernel_load_addr < vm->max_mem_addr)
  */
-static uint64_t create_zero_page(struct acrn_vm *vm)
+static uint64_t create_zero_page(struct acrn_vm *vm, uint64_t load_params_gpa)
 {
-	struct zero_page *zeropage;
+	struct zero_page *zeropage, *hva;
 	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
 	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
 	struct sw_module_info *ramdisk_info = &(vm->sw.ramdisk_info);
-	struct zero_page *hva;
 	uint64_t gpa, addr;
 
-	/* Set zeropage in Linux Guest RAM region just past boot args */
-	gpa = (uint64_t)bootargs_info->load_addr + MEM_4K;
+	gpa = BZIMG_ZEROPAGE_GPA(load_params_gpa);
 	hva = (struct zero_page *)gpa2hva(vm, gpa);
 	zeropage = hva;
 
@@ -75,6 +124,27 @@ static uint64_t create_zero_page(struct acrn_vm *vm)
 	/* clear the zeropage */
 	(void)memset(zeropage, 0U, MEM_2K);
 
+#ifdef CONFIG_MULTIBOOT2
+	if (is_sos_vm(vm)) {
+		struct acrn_boot_info *abi = get_acrn_boot_info();
+
+		if (boot_from_uefi(abi)) {
+			struct efi_info *sos_efi_info = &zeropage->boot_efi_info;
+			uint64_t efi_mmap_gpa = BZIMG_EFIMMAP_GPA(load_params_gpa);
+			struct efi_memory_desc *efi_mmap_desc = (struct efi_memory_desc *)gpa2hva(vm, efi_mmap_gpa);
+			uint16_t efi_mmap_desc_nr = create_sos_vm_efi_mmap_desc(vm, efi_mmap_desc);
+
+			sos_efi_info->loader_signature = 0x34364c45; /* "EL64" */
+			sos_efi_info->memdesc_version = abi->uefi_info.memdesc_version;
+			sos_efi_info->memdesc_size = sizeof(struct efi_memory_desc);
+			sos_efi_info->memmap_size = efi_mmap_desc_nr * sizeof(struct efi_memory_desc);
+			sos_efi_info->memmap = (uint32_t)efi_mmap_gpa;
+			sos_efi_info->memmap_hi = (uint32_t)(efi_mmap_gpa >> 32U);
+			sos_efi_info->systab = abi->uefi_info.systab;
+			sos_efi_info->systab_hi = abi->uefi_info.systab_hi;
+		}
+	}
+#endif
 	/* copy part of the header into the zero page */
 	hva = (struct zero_page *)gpa2hva(vm, (uint64_t)sw_kernel->kernel_load_addr);
 	(void)memcpy_s(&(zeropage->hdr), sizeof(zeropage->hdr),
@@ -108,15 +178,12 @@ static uint64_t create_zero_page(struct acrn_vm *vm)
 /**
  * @pre vm != NULL
  */
-static void prepare_loading_bzimage(struct acrn_vm *vm, struct acrn_vcpu *vcpu)
+static void prepare_loading_bzimage(struct acrn_vm *vm, struct acrn_vcpu *vcpu, uint64_t load_params_gpa)
 {
 	uint32_t i;
-	char  dyn_bootargs[100] = {0};
 	uint32_t kernel_entry_offset;
 	struct zero_page *zeropage;
 	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
-	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
-	const struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
 	/* calculate the kernel entry point */
 	zeropage = (struct zero_page *)sw_kernel->kernel_src_addr;
@@ -137,25 +204,10 @@ static void prepare_loading_bzimage(struct acrn_vm *vm, struct acrn_vcpu *vcpu)
 		vcpu_set_gpreg(vcpu, i, 0UL);
 	}
 
-	/* add "hugepagesz=1G hugepages=x" to cmdline for 1G hugepage
-	 * reserving. Current strategy is "total_mem_size in Giga -
-	 * remained 1G pages" for reserving.
-	 */
-	if (is_sos_vm(vm) && (bootargs_info->load_addr != NULL)) {
-		int64_t reserving_1g_pages;
-
-		reserving_1g_pages = (vm_config->memory.size >> 30U) - NUM_REMAIN_1G_PAGES;
-		if (reserving_1g_pages > 0) {
-			snprintf(dyn_bootargs, 100U, " hugepagesz=1G hugepages=%lld", reserving_1g_pages);
-			(void)copy_to_gpa(vm, dyn_bootargs, ((uint64_t)bootargs_info->load_addr
-				+ bootargs_info->size), (strnlen_s(dyn_bootargs, 99U) + 1U));
-		}
-	}
-
 	/* Create Zeropage and copy Physical Base Address of Zeropage
 	 * in RSI
 	 */
-	vcpu_set_gpreg(vcpu, CPU_REG_RSI, create_zero_page(vm));
+	vcpu_set_gpreg(vcpu, CPU_REG_RSI, create_zero_page(vm, load_params_gpa));
 	pr_info("%s, RSI pointing to zero page for VM %d at GPA %X",
 			__func__, vm->vm_id, vcpu_get_gpreg(vcpu, CPU_REG_RSI));
 }
@@ -172,61 +224,116 @@ static void prepare_loading_rawimage(struct acrn_vm *vm)
 }
 
 /**
+ * @pre sw_module != NULL
+ */
+static void load_sw_module(struct acrn_vm *vm, struct sw_module_info *sw_module)
+{
+	if (sw_module->size != 0) {
+		(void)copy_to_gpa(vm, sw_module->src_addr, (uint64_t)sw_module->load_addr, sw_module->size);
+	}
+}
+
+/**
  * @pre vm != NULL
  */
-int32_t direct_boot_sw_loader(struct acrn_vm *vm)
+static void load_sw_modules(struct acrn_vm *vm, uint64_t load_params_gpa)
 {
-	int32_t ret = 0;
 	struct sw_kernel_info *sw_kernel = &(vm->sw.kernel_info);
 	struct sw_module_info *bootargs_info = &(vm->sw.bootargs_info);
 	struct sw_module_info *ramdisk_info = &(vm->sw.ramdisk_info);
-	/* get primary vcpu */
-	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BOOT_CPU_ID);
+	struct sw_module_info *acpi_info = &(vm->sw.acpi_info);
 
 	pr_dbg("Loading guest to run-time location");
-
-	/*
-	 * TODO:
-	 *    - We need to initialize the guest bsp registers according to
-	 *      guest boot mode (real mode vs protect mode)
-	 */
-	init_vcpu_protect_mode_regs(vcpu, get_guest_gdt_base_gpa(vcpu->vm));
 
 	/* Copy the guest kernel image to its run-time location */
 	(void)copy_to_gpa(vm, sw_kernel->kernel_src_addr,
 		(uint64_t)sw_kernel->kernel_load_addr, sw_kernel->kernel_size);
 
-	/* Check if a RAM disk is present */
-	if (ramdisk_info->size != 0U) {
-		/* Copy RAM disk to its load location */
-		(void)copy_to_gpa(vm, ramdisk_info->src_addr,
-			(uint64_t)ramdisk_info->load_addr,
-			ramdisk_info->size);
+	if (vm->sw.kernel_type == KERNEL_BZIMAGE) {
+		/* Don't need to load ramdisk if src_addr and load_addr are pointed to same place. */
+		if (gpa2hva(vm, (uint64_t)ramdisk_info->load_addr) != ramdisk_info->src_addr) {
+			load_sw_module(vm, ramdisk_info);
+		}
+
+		bootargs_info->load_addr = (void *)BZIMG_CMDLINE_GPA(load_params_gpa);
+
+		load_sw_module(vm, bootargs_info);
 	}
-	/* Copy Guest OS bootargs to its load location */
-	if (bootargs_info->size != 0U) {
-		(void)copy_to_gpa(vm, bootargs_info->src_addr,
-			(uint64_t)bootargs_info->load_addr,
-			(strnlen_s((char *)bootargs_info->src_addr, MAX_BOOTARGS_SIZE) + 1U));
+
+	/* Copy Guest OS ACPI to its load location */
+	load_sw_module(vm, acpi_info);
+
+}
+
+static int32_t vm_bzimage_loader(struct acrn_vm *vm)
+{
+	int32_t ret = 0;
+	/* get primary vcpu */
+	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BSP_CPU_ID);
+	uint64_t load_params_gpa = find_space_from_ve820(vm, BZIMG_LOAD_PARAMS_SIZE, MEM_4K, MEM_1M);
+
+	if (load_params_gpa != INVALID_GPA) {
+		/* We boot bzImage from protected mode directly */
+		init_vcpu_protect_mode_regs(vcpu, BZIMG_INITGDT_GPA(load_params_gpa));
+
+		load_sw_modules(vm, load_params_gpa);
+
+		prepare_loading_bzimage(vm, vcpu, load_params_gpa);
+	} else {
+		ret = -ENOMEM;
 	}
-	switch (vm->sw.kernel_type) {
-	case KERNEL_BZIMAGE:
-		prepare_loading_bzimage(vm, vcpu);
-		break;
-	case KERNEL_ZEPHYR:
-		prepare_loading_rawimage(vm);
-		break;
-	default:
-		pr_err("%s, Loading VM SW failed", __func__);
+
+	return ret;
+}
+
+static int32_t vm_rawimage_loader(struct acrn_vm *vm)
+{
+	int32_t ret = 0;
+	uint64_t load_params_gpa = 0x800;
+
+	/*
+	 * TODO:
+	 *    - We need to initialize the guest bsp registers according to
+	 *	guest boot mode (real mode vs protect mode)
+	 *    - The memory layout usage is unclear, only GDT might be needed as its boot param.
+	 *	currently we only support Zephyr which has no needs on cmdline/e820/efimmap/etc.
+	 *	hardcode the vGDT GPA to 0x800 where is not used by Zephyr so far;
+	 */
+	init_vcpu_protect_mode_regs(vcpu_from_vid(vm, BSP_CPU_ID), load_params_gpa);
+
+	load_sw_modules(vm, load_params_gpa);
+
+	prepare_loading_rawimage(vm);
+
+	return ret;
+}
+
+/**
+ * @pre vm != NULL
+ */
+int32_t vm_sw_loader(struct acrn_vm *vm)
+{
+	int32_t ret = 0;
+	/* get primary vcpu */
+	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BSP_CPU_ID);
+
+	if (vm->sw.kernel_type == KERNEL_BZIMAGE) {
+
+		ret = vm_bzimage_loader(vm);
+
+	} else if (vm->sw.kernel_type == KERNEL_ZEPHYR){
+
+		ret = vm_rawimage_loader(vm);
+
+	} else {
 		ret = -EINVAL;
-		break;
 	}
 
 	if (ret == 0) {
 		/* Set VCPU entry point to kernel entry */
-		vcpu_set_rip(vcpu, (uint64_t)sw_kernel->kernel_entry_addr);
-		pr_info("%s, VM %hu VCPU %hu Entry: 0x%016llx ", __func__, vm->vm_id, vcpu->vcpu_id,
-			sw_kernel->kernel_entry_addr);
+		vcpu_set_rip(vcpu, (uint64_t)vm->sw.kernel_info.kernel_entry_addr);
+		pr_info("%s, VM %hu VCPU %hu Entry: 0x%016lx ", __func__, vm->vm_id, vcpu->vcpu_id,
+			vm->sw.kernel_info.kernel_entry_addr);
 	}
 
 	return ret;

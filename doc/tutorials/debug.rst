@@ -15,13 +15,13 @@ full list of commands, or see a summary of available commands by using
 the ``help`` command within the ACRN shell.
 
 
-An example
+An Example
 **********
 
-As an example, we'll show how to obtain the interrupts of a pass-through USB device.
+As an example, we'll show how to obtain the interrupts of a passthrough USB device.
 
 First, we can get the USB controller BDF number (0:15.0) through the
-following command in the SOS console::
+following command in the Service VM console::
 
    lspci | grep "USB controller"
 
@@ -50,11 +50,11 @@ interrupt vector to find the interrupt number (909) on CPU3.
 ACRN Log
 ********
 
-ACRN log provides console log and mem log for a user to analyze.
+ACRN log provides a console log and a mem log for a user to analyze.
 We can use console log to debug directly, while mem log is a userland tool
-used to capture a ACRN hypervisor log.
+used to capture an ACRN hypervisor log.
 
-Turn on the logging info
+Turn on the Logging Info
 ========================
 
 ACRN enables a console log by default.
@@ -65,10 +65,10 @@ To enable and start the mem log::
    $ systemctl start acrnlog
 
 
-Set and grab log
+Set and Grab Log
 ================
 
-We have 1-6 log levels for console log and mem log. The following
+We have six (1-6) log levels for console log and mem log. The following
 functions print different levels of console log and mem log::
 
       pr_dbg("debug...level %d", LOG_DEBUG);       //level 6
@@ -90,8 +90,8 @@ noted above.  For example, add the following code into function
    shell_cmd_help added information
 
 Once you have instrumented the code, you need to rebuild the hypervisor and
-install it on your platform. Refer to :ref:`getting-started-building` and
-:ref:`getting-started-apl-nuc` for detailed instructions on how to do that.
+install it on your platform. Refer to :ref:`getting-started-building`
+for detailed instructions on how to do that.
 
 We set console log level to 5, and mem log level to 2 through the
 command::
@@ -110,7 +110,7 @@ Then we use the command, on the ACRN console::
 
    vm_console
 
-to switch to the SOS console. Then we use the command::
+to switch to the Service VM console. Then we use the command::
 
    cat /tmp/acrnlog/acrnlog_cur.0
 
@@ -125,17 +125,17 @@ and we will see the following log:
 ACRN Trace
 **********
 
-ACRN trace is a tool running on the Service OS (SOS) to capture trace
+ACRN trace is a tool running on the Service VM to capture trace
 data. We can use the existing trace information to analyze, and we can
-add self-defined tracing to analyze code which we care about.
+add self-defined tracing to analyze code that we care about.
 
-Using Existing trace event id to analyze trace
+Using Existing Trace Event ID to Analyze Trace
 ==============================================
 
 As an example, we can use the existing vm_exit trace to analyze the
 reason and times of each vm_exit after we have done some operations.
 
-1. Run the following SOS console command to collect
+1. Run the following Service VM console command to collect
    trace data::
 
       # acrntrace -c
@@ -151,7 +151,7 @@ reason and times of each vm_exit after we have done some operations.
       # acrnalyze.py -i /home/trace/acrntrace/20190219-001529/1 -o vmexit --vm_exit
 
    .. note:: The acrnalyze.py script is in the
-      ``acrn-hypervisor/misc/tools/acrntrace/scripts`` folder.  The location
+      ``misc/tools/acrntrace/scripts`` folder.  The location
       of the trace files produced by ``acrntrace`` may be different in your system.
 
    .. figure:: images/debug_image28.png
@@ -159,22 +159,22 @@ reason and times of each vm_exit after we have done some operations.
 
       vmexit summary information
 
-Using Self-defined trace event id to analyze trace
+Using Self-Defined Trace Event ID to Analyze Trace
 ==================================================
 
-For some undefined trace event id, we can define it by ourselves as
+For some undefined trace event ID, we can define it by ourselves as
 shown in the following example:
 
-1. Add the following new event id into
+1. Add the following new event ID into
    ``acrn-hypervisor/hypervisor/include/debug/trace.h``:
 
    .. figure:: images/debug_image25.png
       :align: center
 
-      trace event id
+      trace event ID
 
 2. Add the following format to
-   ``acrn-hypervisor/misc/tools/acrntrace/scripts/formats``:
+   ``misc/tools/acrntrace/scripts/formats``:
 
    .. figure:: images/debug_image1.png
       :align: center
@@ -184,18 +184,18 @@ shown in the following example:
    .. note::
 
       Formats:
-        0x00000005: event id for trace test
+        ``0x00000005``: event ID for trace test
 
-        %(cpu)d: corresponding cpu index with 'decimal' format
+        ``%(cpu)d``: corresponding CPU index with decimal format
 
-        %(event)016x: corresponding event id with 'hex' format
+        ``%(event)016x``: corresponding event id with hex format
 
-        %(tsc)d: corresponding event time stamp with 'decimal' format
+        ``%(tsc)d``: corresponding event time stamp with decimal format
 
-        %(1)08x: corresponding first 'Long' data in TRACE_2L
+        ``%(1)08x``: corresponding first Long data in TRACE_2L
 
 3. Add trace into function ``emulate_io`` in
-   ``acrn-hypervisor/hypervisor/arch/x86/guest/io_emul.c`` which we want to
+   ``acrn-hypervisor/hypervisor/arch/x86/guest/io_emul.c`` that we want to
    trace for the calling times of function ``emulate_io``:
 
    .. figure:: images/debug_image2.png
@@ -205,10 +205,10 @@ shown in the following example:
 
 4. After we have inserted the trace code addition, we need to rebuild
    the ACRN hypervisor and install it on the platform. Refer to
-   :ref:`getting-started-building` and :ref:`getting-started-apl-nuc` for
+   :ref:`getting-started-building` for
    detailed instructions on how to do that.
 
-5. Now we can use the following command in the SOS console
+5. Now we can use the following command in the Service VM console
    to generate acrntrace data into the current directory::
 
       acrntrace -c
@@ -224,7 +224,7 @@ shown in the following example:
         formats /home/trace/acrntrace/20190219-001529/1 | grep "trace test"
 
    .. note:: The acrnalyze.py script is in the
-      ``acrn-hypervisor/misc/tools/acrntrace/scripts`` folder.  The location
+      ``misc/tools/acrntrace/scripts`` folder.  The location
       of the trace files produced by ``acrntrace`` may be different in your system.
 
    and we will get the following log:

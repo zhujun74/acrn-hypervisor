@@ -28,14 +28,14 @@
  */
 #include <types.h>
 #include <rtl.h>
-#include "acpi.h"
-#include <pgtable.h>
-#include <ioapic.h>
+#include <acpi.h>
+#include <asm/pgtable.h>
+#include <asm/ioapic.h>
 #include <logmsg.h>
-#include <host_pm.h>
+#include <asm/host_pm.h>
+#include <pci.h>
 #include <acrn_common.h>
-#include <vcpu.h>
-#include <vm_reset.h>
+#include <asm/rtcm.h>
 
 /* Per ACPI spec:
  * There are two fundamental types of ACPI tables:
@@ -52,23 +52,6 @@
  * When ACRN go FuSa, the platform ACPI data should be fixed and this file is not needed.
  */
 
-#define ACPI_SIG_FACS		0x53434146U	/* "FACS" */
-#define ACPI_SIG_FADT             "FACP" 	/* Fixed ACPI Description Table */
-
-/* FACP field offsets */
-#define OFFSET_FACS_ADDR	36U
-#define OFFSET_RESET_REGISTER	116U
-#define OFFSET_RESET_VALUE	128U
-#define OFFSET_FACS_X_ADDR	132U
-#define OFFSET_PM1A_EVT         148U
-#define OFFSET_PM1A_CNT         172U
-
-/* FACS field offsets */
-#define OFFSET_FACS_SIGNATURE	0U
-#define OFFSET_FACS_LENGTH	4U
-#define OFFSET_WAKE_VECTOR_32	12U
-#define OFFSET_WAKE_VECTOR_64	24U
-
 /* get a dword value from given table and its offset */
 static inline uint32_t get_acpi_dt_dword(const uint8_t *dt_addr, uint32_t dt_offset)
 {
@@ -81,20 +64,12 @@ static inline uint64_t get_acpi_dt_qword(const uint8_t *dt_addr, uint32_t dt_off
 	return *(uint64_t *)(dt_addr + dt_offset);
 }
 
-struct packed_gas {
-	uint8_t 	space_id;
-	uint8_t 	bit_width;
-	uint8_t 	bit_offset;
-	uint8_t 	access_size;
-	uint64_t	address;
-} __attribute__((packed));
-
 /* get a GAS struct from given table and its offset.
  * ACPI table stores packed gas, but it is not guaranteed that
- * struct acpi_generic_address is packed, so do not use memcpy in function.
+ * struct acrn_acpi_generic_address is packed, so do not use memcpy in function.
  * @pre dt_addr != NULL && gas != NULL
  */
-static inline void get_acpi_dt_gas(const uint8_t *dt_addr, uint32_t dt_offset, struct acpi_generic_address *gas)
+static inline void get_acpi_dt_gas(const uint8_t *dt_addr, uint32_t dt_offset, struct acrn_acpi_generic_address *gas)
 {
 	struct packed_gas *dt_gas = (struct packed_gas *)(dt_addr + dt_offset);
 
@@ -138,22 +113,37 @@ static void *get_facs_table(const uint8_t *facp_addr)
 	return (void *)facs_addr;
 }
 
-/* put all ACPI fix up code here */
-void acpi_fixup(void)
+/* @pre mcfg_addr != NULL */
+static struct acpi_mcfg_allocation *parse_mcfg_allocation_tables(const uint8_t *mcfg_addr)
 {
-	uint8_t *facp_addr, *facs_addr;
-	struct acpi_generic_address pm1a_cnt, pm1a_evt;
+	struct acpi_mcfg_allocation *mcfg_table = NULL;
+	uint32_t length = get_acpi_dt_dword(mcfg_addr, OFFSET_MCFG_LENGTH);
+
+	if (length > OFFSET_MCFG_ENTRY1) {
+		pr_fatal("Multiple PCI segment groups is not supported!");
+	} else {
+		mcfg_table = (struct acpi_mcfg_allocation *)(mcfg_addr + OFFSET_MCFG_ENTRY0_BASE);
+	}
+	return mcfg_table;
+}
+
+/* put all ACPI fix up code here */
+int32_t acpi_fixup(void)
+{
+	uint8_t *facp_addr = NULL, *facs_addr = NULL, *mcfg_addr = NULL, *rtct_tbl_addr = NULL;
+	struct acpi_mcfg_allocation *mcfg_table = NULL;
+	int32_t ret = 0;
+	struct acrn_acpi_generic_address pm1a_cnt, pm1a_evt;
 	struct pm_s_state_data *sx_data = get_host_sstate_data();
 
 	facp_addr = (uint8_t *)get_acpi_tbl(ACPI_SIG_FADT);
-
 	if (facp_addr != NULL) {
 		get_acpi_dt_gas(facp_addr, OFFSET_PM1A_EVT, &pm1a_evt);
 		get_acpi_dt_gas(facp_addr, OFFSET_PM1A_CNT, &pm1a_cnt);
-		(void)memcpy_s((void *)&sx_data->pm1a_evt, sizeof(struct acpi_generic_address),
-				(const void *)&pm1a_evt, sizeof(struct acpi_generic_address));
-		(void)memcpy_s((void *)&sx_data->pm1a_cnt, sizeof(struct acpi_generic_address),
-				(const void *)&pm1a_cnt, sizeof(struct acpi_generic_address));
+		(void)memcpy_s((void *)&sx_data->pm1a_evt, sizeof(struct acrn_acpi_generic_address),
+				(const void *)&pm1a_evt, sizeof(struct acrn_acpi_generic_address));
+		(void)memcpy_s((void *)&sx_data->pm1a_cnt, sizeof(struct acrn_acpi_generic_address),
+				(const void *)&pm1a_cnt, sizeof(struct acrn_acpi_generic_address));
 
 		facs_addr = (uint8_t *)get_facs_table(facp_addr);
 		if (facs_addr != NULL) {
@@ -170,4 +160,28 @@ void acpi_fixup(void)
 			rr_data->val = *(facp_addr + OFFSET_RESET_VALUE);
 		}
 	}
+
+	mcfg_addr = (uint8_t *)get_acpi_tbl(ACPI_SIG_MCFG);
+	if (mcfg_addr != NULL) {
+		mcfg_table = parse_mcfg_allocation_tables(mcfg_addr);
+		if (mcfg_table != NULL) {
+			set_mmcfg_region((struct pci_mmcfg_region*)mcfg_table);
+		}
+	}
+
+	rtct_tbl_addr = (uint8_t *)get_acpi_tbl(ACPI_SIG_RTCT);
+	if (rtct_tbl_addr == NULL) {
+		rtct_tbl_addr = (uint8_t *)get_acpi_tbl(ACPI_SIG_RTCT_V2);
+	}
+
+	if (rtct_tbl_addr != NULL) {
+		set_rtct_tbl((void *)rtct_tbl_addr);
+	}
+
+	if ((facp_addr == NULL) || (facs_addr == NULL)
+				|| (mcfg_addr == NULL) || (mcfg_table == NULL)) {
+		ret = -1;
+	}
+
+	return ret;
 }

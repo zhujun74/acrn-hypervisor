@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Intel Corporation
+ * Copyright (c) 2011 - 2021, Intel Corporation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -44,6 +44,8 @@
 #ifndef __STDLIB_H__
 #define __STDLIB_H__
 
+#include <efi.h>
+#include <efilib.h>
 
 static inline void memset(void *dstv, char ch, UINTN size)
 {
@@ -106,6 +108,21 @@ static inline char *ch16_2_ch8(CHAR16 *str16, UINTN len)
 	str8[len] = 0;
 
 	return str8;
+}
+
+static inline CHAR16 *ch8_2_ch16(char *str8, UINTN len)
+{
+	UINTN i;
+	CHAR16 *str16;
+
+	str16 = AllocatePool((len + 1) * sizeof(CHAR16));
+
+	for (i = 0; i < len; i++)
+		str16[i] = str8[i];
+
+	str16[len] = 0;
+
+	return str16;
 }
 
 #endif /* __STDLIB_H__ */

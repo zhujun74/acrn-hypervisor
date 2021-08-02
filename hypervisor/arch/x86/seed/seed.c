@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include <types.h>
-#include <cpu.h>
-#include <pgtable.h>
+#include <asm/cpu.h>
+#include <asm/pgtable.h>
 #include <rtl.h>
-#include <mmu.h>
+#include <asm/mmu.h>
 #include <sprintf.h>
-#include <ept.h>
+#include <asm/guest/ept.h>
 #include <logmsg.h>
-#include <multiboot.h>
+#include <boot.h>
 #include <crypto_api.h>
-#include <seed.h>
+#include <asm/seed.h>
 #include "seed_abl.h"
 #include "seed_sbl.h"
 
@@ -39,20 +39,13 @@ static struct physical_seed g_phy_seed;
 
 static uint32_t parse_seed_arg(void)
 {
-	char *cmd_src = NULL;
+	const char *cmd_src = NULL;
 	char *arg, *arg_end;
-	struct multiboot_info *mbi = NULL;
+	struct acrn_boot_info *abi = get_acrn_boot_info();
 	uint32_t i = SEED_ARG_NUM - 1U;
 	uint32_t len;
 
-	if (boot_regs[0U] == MULTIBOOT_INFO_MAGIC) {
-		mbi = (struct multiboot_info *)hpa2hva((uint64_t)boot_regs[1U]);
-		if (mbi != NULL) {
-			if ((mbi->mi_flags & MULTIBOOT_INFO_HAS_CMDLINE) != 0U) {
-				cmd_src = (char *)hpa2hva((uint64_t)mbi->mi_cmdline);
-			}
-		}
-	}
+	cmd_src = abi->cmdline;
 
 	if (cmd_src != NULL) {
 		for (i = 0U; seed_arg[i].str != NULL; i++) {
@@ -81,46 +74,42 @@ static uint32_t parse_seed_arg(void)
 }
 
 /*
- * append_seed_arg
+ * fill_seed_arg
  *
  * description:
- *     append seed argument to Guest's cmdline
+ *     fill seed argument to cmdline buffer which has MAX size of MAX_SEED_ARG_SIZE
  *
  * input:
- *    vm        pointer to target VM
+ *    cmd_dst   pointer to cmdline buffer
+ *    cmd_sz    size of cmd_dst buffer
  *
  * output:
- *    cmd_dst   pointer to cmdline for Guest
+ *    cmd_dst   pointer to cmdline buffer
  *
  * return value:
  *    none
+ *
+ * @pre cmd_dst != NULL
  */
-void append_seed_arg(char *cmd_dst, bool vm_is_sos)
+void fill_seed_arg(char *cmd_dst, size_t cmd_sz)
 {
 	uint32_t i;
-	char buf[MEM_1K];
 
-	if ((cmd_dst != NULL) && vm_is_sos) {
-		for (i = 0U; seed_arg[i].str != NULL; i++) {
-			if (seed_arg[i].addr != 0ULL) {
-				(void)memset(buf, 0U, sizeof(buf));
+	for (i = 0U; seed_arg[i].str != NULL; i++) {
+		if (seed_arg[i].addr != 0UL) {
 
-				snprintf(buf, sizeof(buf), "%s0x%X ", seed_arg[i].str,
-						sos_vm_hpa2gpa(seed_arg[i].addr));
+			snprintf(cmd_dst, cmd_sz, "%s0x%X ", seed_arg[i].str, sos_vm_hpa2gpa(seed_arg[i].addr));
 
-				if (seed_arg[i].bootloader_id == BOOTLOADER_SBL) {
-					struct image_boot_params *boot_params =
-						(struct image_boot_params *)hpa2hva(seed_arg[i].addr);
+			if (seed_arg[i].bootloader_id == BOOTLOADER_SBL) {
+				struct image_boot_params *boot_params =
+					(struct image_boot_params *)hpa2hva(seed_arg[i].addr);
 
-					boot_params->p_seed_list = sos_vm_hpa2gpa(boot_params->p_seed_list);
+				boot_params->p_seed_list = sos_vm_hpa2gpa(boot_params->p_seed_list);
 
-					boot_params->p_platform_info = sos_vm_hpa2gpa(boot_params->p_platform_info);
-				}
-
-				(void)strncpy_s(cmd_dst, MAX_BOOTARGS_SIZE, buf, strnlen_s(buf, MEM_1K));
-
-				break;
+				boot_params->p_platform_info = sos_vm_hpa2gpa(boot_params->p_platform_info);
 			}
+
+			break;
 		}
 	}
 }
@@ -248,7 +237,7 @@ void init_seed(void)
 	}
 
 	/* Failed to parse seed from Bootloader, using dummy seed */
-	if (status == false) {
+	if (!status) {
 		g_phy_seed.num_seeds = 1U;
 		(void)memset(&g_phy_seed.seed_list[0], 0xA5U, sizeof(g_phy_seed.seed_list));
 	}

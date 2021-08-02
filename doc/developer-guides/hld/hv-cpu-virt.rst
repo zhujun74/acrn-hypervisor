@@ -9,66 +9,83 @@ CPU Virtualization
 
    ACRN Hypervisor CPU Virtualization Components
 
-The following sections discuss the major modules (shown in blue) in the
-CPU virtualization overview shown in :numref:`hv-cpu-virt-components`.
+The following sections discuss the major modules (indicated above in blue)
+in the CPU virtualization overview shown in :numref:`hv-cpu-virt-components`.
 
 Based on Intel VT-x virtualization technology, ACRN emulates a virtual CPU
 (vCPU) with the following methods:
 
 -  **core partition**: one vCPU is dedicated and associated with one
    physical CPU (pCPU),
-   making much of hardware register emulation simply
-   pass-through and provides good isolation for physical interrupt
+   making much of the hardware register emulation simply
+   passthrough. This provides good isolation for physical interrupts
    and guest execution.  (See `Static CPU Partitioning`_ for more
    information.)
 
--  **simple schedule**: only two thread loops are maintained for a CPU -
-   vCPU thread and default idle thread. A CPU runs most of the time in
-   the vCPU thread for emulating a guest CPU, switching between VMX root
-   mode and non-root mode. A CPU schedules out to default idle when an
-   operation needs it to stay in VMX root mode, such as when waiting for
-   an I/O request from DM or ready to destroy.
+-  **core sharing** (to be added): two or more vCPUs share one
+   physical CPU (pCPU). A more complicated context switch is needed
+   between different vCPUs' switching. This provides flexible computing
+   resources sharing for low-performance demand vCPU tasks.
+   (See `Flexible CPU Sharing`_ for more information.)
+
+-  **simple schedule**: a well-designed scheduler framework that allows ACRN
+   to adopt different scheduling policies, such as the **noop** and **round-robin**:
+
+   - **noop scheduler**: only two thread loops are maintained for a CPU: a
+     vCPU thread and a default idle thread. A CPU runs most of the time in
+     the vCPU thread for emulating a guest CPU, switching between VMX root
+     mode and non-root mode. A CPU schedules out to default idle when an
+     operation needs it to stay in VMX root mode, such as when waiting for
+     an I/O request from the DM or when ready to destroy.
+
+   - **round-robin scheduler** (to be added): allows more vCPU thread loops
+     to run on a CPU. A CPU switches among different vCPU threads and default
+     idle threads as it runs out corresponding timeslices or necessary
+     scheduling outs such as waiting for an I/O request. A vCPU can yield
+     itself as well, such as when it executes "PAUSE" instruction.
+
 
 Static CPU Partitioning
 ***********************
 
 CPU partitioning is a policy for mapping a virtual
-CPU (VCPU) to a physical CPU. The current ACRN implementation forces a
-static 1:1 mapping between VCPUs and physical CPUs and does
-not support multiple VCPUs running on a physical CPU and does not
-support VCPU migration from one physical CPU to another.
+CPU (vCPU) to a physical CPU. To enable this, the ACRN hypervisor can
+configure a noop scheduler as the schedule policy for this physical CPU.
 
-ACRN forces a fixed 1:1 mapping between a VCPU and a physical CPU when
-creating a VCPU for the guest Operating System. This makes the VCPU
+ACRN then forces a fixed 1:1 mapping between a vCPU and this physical CPU
+when creating a vCPU for the guest Operating System. This makes the vCPU
 management code much simpler.
 
-An array is used to track the physical CPU allocation information. When
-a VCPU is created, we query, allocate, and update the array to map the
-VCPU to an available physical CPU.
+``cpu_affinity`` in ``vm config`` helps to decide which physical CPU a
+VCPU in a VM affines to, then finalize the fixed mapping. When launching a
+User VM, need to choose pCPUs from the VM's cpu_affinity that are not
+used by any other VMs.
 
-The physical CPU number assignment for each guest is pre-defined. For
-example, on a platform with four CPU cores, one physical CPU is assigned
-to run the Service Operating System (SOS) and other three physical CPUs
-are assigned to run the User Operating System (UOS) instances.
+Flexible CPU Sharing
+********************
 
-.. note::
+To enable CPU sharing, ACRN hypervisor can configure IORR
+(IO sensitive Round-Robin) or the BVT (Borrowed Virtual Time) scheduler
+policy.
 
-   To improvement SOS boot time, all physical CPUs are assigned to the SOS
-   during the SOS boot. Afterward, the physical CPUs defined for the UOS
-   are allocated by the Device Model (DM) by running the launch_uos.sh
-   script.
+``cpu_affinity`` in ``vm config`` indicates all the physical CPUs on which
+this VM is allowed to run. A pCPU can be shared among a Service VM and any
+User VM as long as the local APIC passthrough is not enabled in that User
+VM.
 
-CPU management in SOS
-=====================
+See :ref:`cpu_sharing` for more information.
 
-With ACRN, all ACPI table entries are pass-thru to the SOS, including
-the Multiple Interrupt Controller Table (MADT). The SOS sees all
-physical CPUs by parsing the MADT when the SOS  kernel boots. All
-physical CPUs are initially assigned to the SOS by creating the same
+CPU Management in the Service VM Under Static CPU Partitioning
+==============================================================
+
+With ACRN, all ACPI table entries are passthrough to the Service VM, including
+the Multiple Interrupt Controller Table (MADT). The Service VM sees all
+physical CPUs by parsing the MADT when the Service VM kernel boots. All
+physical CPUs are initially assigned to the Service VM by creating the same
 number of virtual CPUs.
 
-When the SOS boot is finished, it releases the physical CPUs intended
-for UOS use.
+When the Service VM boot is finished, it releases the physical CPUs intended
+for User VM use.
 
 Here is an example flow of CPU allocation on a multi-core platform.
 
@@ -79,80 +96,33 @@ Here is an example flow of CPU allocation on a multi-core platform.
 
    CPU allocation on a multi-core platform
 
-CPU management in UOS
-=====================
+CPU Management in the Service VM Under Flexible CPU Sharing
+===========================================================
 
-From the UOS point of view, CPU management is very simple, using a
-hypercall to create the virtual CPUs. Here's an example from from the DM
-code:
+As all Service VM CPUs could share with different User VMs, ACRN can still passthrough
+MADT to Service VM, and the Service VM is still able to see all physical CPUs.
 
-.. code-block:: c
+But as under CPU sharing, the Service VM does not need offline/release the physical
+CPUs intended for User VM use.
 
-   int vm_create_vcpu(struct vmctx *ctx, uint16_t vcpu_id)
-   {
-      struct acrn_create_vcpu cv;
-      int error;
+CPU Management in the User VM
+=============================
 
-      bzero(&cv, sizeof(struct acrn_create_vcpu));
-      cv.vcpu_id = vcpu_id;
-      error = ioctl(ctx->fd, IC_CREATE_VCPU, &cv);
-      return error;
-   }
+``cpu_affinity`` in ``vm config`` defines a set of pCPUs that a User VM
+is allowed to run on. acrn-dm could choose to launch on only a subset of the pCPUs
+or on all pCPUs listed in cpu_affinity, but it can't assign
+any pCPU that is not included in it.
 
-The VHM will respond to the ioctl:
-
-.. code-block:: c
-
-   case IC_CREATE_VCPU: {
-      struct acrn_create_vcpu cv;
-
-      if (copy_from_user(&cv, (void *)ioctl_param,
-                         sizeof(struct acrn_create_vcpu)))
-         return -EFAULT;
-
-      ret = acrn_hypercall2(HC_CREATE_VCPU, vm->vmid,
-                            virt_to_phys(&cv));
-      if (ret < 0) {
-         pr_err("vhm: failed to create vcpu %d!\\n",
-                 cv.vcpu_id);
-         return -EFAULT;
-      }
-
-      atomic_inc(&vm->vcpu_num);
-      return ret;
-   }
-
-The hypercall ``HC_CREATE_VCPU`` is handled in the hypervisor with
-the parameter:
-
-.. doxygenstruct:: acrn_create_vcpu
-   :project: Project ACRN
-
-CPU assignment management in HV
+CPU Assignment Management in HV
 ===============================
 
-When we create a VCPU in the hypervisor, an available physical CPU is
-picked and marked as used. When we destroy the VCPU, we mark the
-physical CPU as available again.
-
-.. figure:: images/static-core-image1.png
-   :width: 600px
-   :align: center
-   :name: static-core-cpu-assign
-
-   HV CPU Assignment Management
-
-#. ``allocate_pcpu()`` queries the physical CPU allocation info to get an
-   available physical CPU and marks physical CPU as not available
-#. Physical CPU info is passed to ``create_vcpu()`` and a mapping is built
-   between the physical CPU and virtual CPU
-#. When the VCPU is destroyed VCPU, the physical CPU is passed to the
-   ``free_pcpu()`` function
-#. ``free_pcpu()`` marks the physical CPU available again.
+The physical CPU assignment is pre-defined by ``cpu_affinity`` in
+``vm config``, while post-launched VMs could be launched on pCPUs that are
+a subset of it.
 
 Currently, the ACRN hypervisor does not support virtual CPU migration to
 different physical CPUs. This means no changes to the virtual CPU to
-physical CPU can happen without first calling destroy_vcpu.
+physical CPU can happen without first calling offline_vcpu.
 
 
 .. _vCPU_lifecycle:
@@ -163,17 +133,19 @@ vCPU Lifecycle
 A vCPU lifecycle is shown in :numref:`hv-vcpu-transitions` below, where
 the major states are:
 
--  **VCPU_INIT**: vCPU is in an initialized state, and its associated CPU
-   is running in default_idle
+-  **VCPU_INIT**: vCPU is in an initialized state, and its vCPU thread
+   is not ready to run on its associated CPU
 
--  **VCPU_RUNNING**: vCPU is running, and its associated CPU is running in
-   vcpu_thread
+-  **VCPU_RUNNING**: vCPU is running, and its vCPU thread is ready (in
+   the queue) or running on its associated CPU
 
--  **VCPU_PAUSED**: vCPU is paused, and its associated CPU is running in
-   default_idle
+-  **VCPU_PAUSED**: vCPU is paused, and its vCPU thread is not running
+   on its associated CPU
 
--  **VPCU_ZOMBIE**: vCPU is being destroyed, and its associated CPU
-   is running in default_idle
+-  **VPCU_ZOMBIE**: vCPU is being offline, and its vCPU thread is not
+   running on its associated CPU
+
+-  **VPCU_OFFLINE**: vCPU is offline
 
 .. figure:: images/hld-image17.png
    :align: center
@@ -187,42 +159,35 @@ lifecycle:
 .. doxygenfunction:: create_vcpu
    :project: Project ACRN
 
-.. doxygenfunction:: schedule_vcpu
-   :project: Project ACRN
-
-.. doxygenfunction:: pause_vcpu
-   :project: Project ACRN
-
-.. doxygenfunction:: resume_vcpu
+.. doxygenfunction:: zombie_vcpu
    :project: Project ACRN
 
 .. doxygenfunction:: reset_vcpu
    :project: Project ACRN
 
-.. doxygenfunction:: run_vcpu
+.. doxygenfunction:: offline_vcpu
    :project: Project ACRN
 
 
-vCPU Scheduling
-***************
+vCPU Scheduling Under Static CPU Partitioning
+*********************************************
 
 .. figure:: images/hld-image35.png
    :align: center
    :name: hv-vcpu-schedule
 
-   ACRN vCPU scheduling flow
+   ACRN vCPU scheduling flow under static CPU partitioning
 
-As describes in the CPU virtualization overview, ACRN implements a simple
-scheduling mechanism based on two threads: vcpu_thread and
-default_idle. A vCPU with VCPU_RUNNING state always runs in
-a vcpu_thread loop, meanwhile a vCPU with VCPU_PAUSED or VCPU_ZOMBIE
-state runs in default_idle loop. The detail behaviors in
-vcpu_thread and default_idle threads are illustrated in
-:numref:`hv-vcpu-schedule`:
+As describes in the CPU virtualization overview, if under static
+CPU partitioning, ACRN implements a simple scheduling mechanism
+based on two threads: vcpu_thread and default_idle. A vCPU with
+VCPU_RUNNING state always runs in a vcpu_thread loop, meanwhile
+a vCPU with VCPU_PAUSED or VCPU_ZOMBIE state runs in default_idle
+loop. The detail behaviors in vcpu_thread and default_idle threads
+are illustrated in :numref:`hv-vcpu-schedule`:
 
--  The **vcpu_thread** loop will try to initialize a vCPU's vmcs during
-   its first launch and then do the loop of handling its associated
-   softirq, vm exits, and pending requests around the VM entry/exit.
+-  The **vcpu_thread** loop will do the loop of handling VM exits,
+   and pending requests around the VM entry/exit.
    It will also check the reschedule request then schedule out to
    default_idle if necessary. See `vCPU Thread`_ for more details
    of vcpu_thread.
@@ -243,14 +208,14 @@ Some example scenario flows are shown here:
 
    ACRN vCPU scheduling scenarios
 
--  **During starting a VM**: after create a vCPU, BSP calls *schedule_vcpu*
-   through *start_vm*, AP calls *schedule_vcpu* through vlapic
+-  **During starting a VM**: after create a vCPU, BSP calls *launch_vcpu*
+   through *start_vm*, AP calls *launch_vcpu* through vlapic
    INIT-SIPI emulation, finally this vCPU runs in a
    *vcpu_thread* loop.
 
 -  **During shutting down a VM**: *pause_vm* function call makes a vCPU
    running in *vcpu_thread* to schedule out to *default_idle*. The
-   following *reset_vcpu*  and *destroy_vcpu* de-init and then destroy
+   following *reset_vcpu*  and *offline_vcpu* de-init and then offline
    this vCPU instance.
 
 -  **During IOReq handling**: after an IOReq is sent to DM for emulation, a
@@ -259,6 +224,11 @@ Some example scenario flows are shown here:
    complete the emulation for this IOReq, it calls
    *hcall_notify_ioreq_finish->resume_vcpu* and makes the vCPU
    schedule back to *vcpu_thread* to continue its guest execution.
+
+vCPU Scheduling Under Flexible CPU Sharing
+******************************************
+
+To be added.
 
 vCPU Thread
 ***********
@@ -271,27 +241,22 @@ The vCPU thread flow is a loop as shown and described below:
    ACRN vCPU thread
 
 
-1. Check if this is the vCPU's first launch. If yes, do VMCS
-   initialization. (See `VMX Initialization`_.)
+1. Check if *vcpu_thread* needs to schedule out to *default_idle* or
+   other *vcpu_thread* by reschedule request. If needed, then schedule
+   out to *default_idle* or other *vcpu_thread*.
 
-2. Handle softirq by calling *do_softirq*.
-
-3. Handle pending request by calling *acrn_handle_pending_request*.
+2. Handle pending request by calling *acrn_handle_pending_request*.
    (See `Pending Request Handlers`_.)
 
-4. Check if *vcpu_thread* needs to schedule out to *default_idle* by
-   reschedule request. If needed, then schedule out to
-   *default_idle*.
-
-5. VM Enter by calling *start/run_vcpu*, then enter non-root mode to do
+3. VM Enter by calling *start/run_vcpu*, then enter non-root mode to do
    guest execution.
 
-6. VM Exit from *start/run_vcpu* when guest trigger vm exit reason in
+4. VM Exit from *start/run_vcpu* when guest trigger VM exit reason in
    non-root mode.
 
-7. Handle vm exit based on specific reason.
+5. Handle VM exit based on specific reason.
 
-8. Loop back to step 2.
+6. Loop back to step 1.
 
 vCPU Run Context
 ================
@@ -305,16 +270,16 @@ the vCPU is saved and restored using this structure:
 The vCPU handles runtime context saving by three different
 categories:
 
--  Always save/restore during vm exit/entry:
+-  Always save/restore during VM exit/entry:
 
-   -  These registers must be saved every time vm exit, and restored
-      every time vm entry
+   -  These registers must be saved every time VM exit, and restored
+      every time VM entry
    -  Registers include: general purpose registers, CR2, and
       IA32_SPEC_CTRL
    -  Definition in *vcpu->run_context*
    -  Get/Set them through *vcpu_get/set_xxx*
 
--  On-demand cache/update during vm exit/entry:
+-  On-demand cache/update during VM exit/entry:
 
    -  These registers are used frequently. They should be cached from
       VMCS on first time access after a VM exit, and updated to VMCS on
@@ -405,6 +370,14 @@ that will trigger an error message and return without handling:
      - external_interrupt_vmexit_handler
      - External interrupt handler for physical interrupt happening in non-root mode
 
+   * - VMX_EXIT_REASON_TRIPLE_FAULT
+     - triple_fault_vmexit_handler
+     - Handle triple fault from vcpu
+
+   * - VMX_EXIT_REASON_INIT_SIGNAL
+     - init_signal_vmexit_handler
+     - Handle INIT signal from vcpu
+
    * - VMX_EXIT_REASON_INTERRUPT_WINDOW
      - interrupt_window_vmexit_handler
      - To support interrupt window if VID is disabled
@@ -424,7 +397,7 @@ that will trigger an error message and return without handling:
    * - VMX_EXIT_REASON_IO_INSTRUCTION
      - pio_instr_vmexit_handler
      - Emulate I/O access with range in IO_BITMAP,
-       which may have a handler in hypervisor (such as vuart or vpic),
+       which may have a handler in hypervisor (such as vUART or vPIC),
        or need to create an I/O request to DM
 
    * - VMX_EXIT_REASON_RDMSR
@@ -459,7 +432,7 @@ that will trigger an error message and return without handling:
      - APIC write for APICv
 
 
-Details of each vm exit reason handler are described in other sections.
+Details of each VM exit reason handler are described in other sections.
 
 .. _pending-request-handlers:
 
@@ -477,21 +450,23 @@ A bitmap in the vCPU structure lists the different requests:
    #define ACRN_REQUEST_EVENT 1U
    #define ACRN_REQUEST_EXTINT 2U
    #define ACRN_REQUEST_NMI 3U
-   #define ACRN_REQUEST_TMR_UPDATE 4U
+   #define ACRN_REQUEST_EOI_EXIT_BITMAP_UPDATE 4U
    #define ACRN_REQUEST_EPT_FLUSH 5U
    #define ACRN_REQUEST_TRP_FAULT 6U
    #define ACRN_REQUEST_VPID_FLUSH 7U /* flush vpid tlb */
 
 
 ACRN provides the function *vcpu_make_request* to make different
-requests, set the bitmap of corresponding request, and notify the target vCPU
-through IPI if necessary (when the target vCPU is not currently running). See
-section 3.5.5 for details.
+requests, set the bitmap of the corresponding request, and notify the target
+vCPU through the IPI if necessary (when the target vCPU is not currently
+running). See :ref:`vcpu-request-interrupt-injection` for details.
 
 .. code-block:: c
 
    void vcpu_make_request(struct vcpu *vcpu, uint16_t eventid)
    {
+      uint16_t pcpu_id = pcpuid_from_vcpu(vcpu);
+
       bitmap_set_lock(eventid, &vcpu->arch_vcpu.pending_req);
       /*
        * if current hostcpu is not the target vcpu's hostcpu, we need
@@ -502,8 +477,8 @@ section 3.5.5 for details.
        *  scheduling, we need change here to determine it target vcpu is
        *  VMX non-root or root mode
        */
-      if (get_cpu_id() != vcpu->pcpu_id) {
-              send_single_ipi(vcpu->pcpu_id, VECTOR_NOTIFY_VCPU);
+      if (get_cpu_id() != pcpu_id) {
+              send_single_ipi(pcpu_id, VECTOR_NOTIFY_VCPU);
       }
    }
 
@@ -536,7 +511,7 @@ request as shown below.
 
    * - ACRN_REQUEST_EXTINT
      - Request for extint vector injection
-     - vcpu_inject_extint, triggered by vpic
+     - vcpu_inject_extint, triggered by vPIC
      - vcpu_do_pending_extint
 
    * - ACRN_REQUEST_NMI
@@ -544,11 +519,10 @@ request as shown below.
      - vcpu_inject_nmi
      - program VMX_ENTRY_INT_INFO_FIELD directly
 
-   * - ACRN_REQUEST_TMR_UPDATE
-     - Request for update vIOAPIC TMR, which also leads to vLAPIC
-       VEOI bitmap update for level triggered vector
-     - vlapic_reset_tmr or vioapic_indirect_write change trigger mode in RTC
-     - vioapic_update_tmr
+   * - ACRN_REQUEST_EOI_EXIT_BITMAP_UPDATE
+     - Request for update VEOI bitmap update for level triggered vector
+     - vlapic_reset_tmr or vlapic_set_tmr change trigger mode in RTC
+     - vcpu_set_vmcs_eoi_exit
 
    * - ACRN_REQUEST_EPT_FLUSH
      - Request for EPT flush
@@ -578,24 +552,23 @@ entry control and exit control, as shown in the table below.
 
 The table briefly shows how each field got configured.
 The guest state field is critical for a guest CPU start to run
-based on different CPU modes. One structure *boot_ctx* is used to pass
-the necessary initialized guest state to VMX,
-used only for the BSP of a guest.
+based on different CPU modes.
 
 For a guest vCPU's state initialization:
 
--  If it's BSP, the guest state configuration is based on *boot_ctx*,
-   which could be initialized on different objects:
+-  If it's BSP, the guest state configuration is done in SW load,
+   which could be initialized by different objects:
 
-   -  SOS BSP based on SBL: booting up context saved at the entry of
-      system boot up
+   -  The Service VM BSP: hypervisor will do context initialization in different
+      SW load based on different boot mode
 
-   -  UOS BSP: DM context initialization through hypercall
+
+   -  User VM BSP: DM context initialization through hypercall
 
 -  If it's AP, then it will always start from real mode, and the start
-       vector will always come from vlapic INIT-SIPI emulation. 
+       vector will always come from vlapic INIT-SIPI emulation.
 
-.. doxygenstruct:: acrn_vcpu_regs
+.. doxygenstruct:: acrn_regs
    :project: Project ACRN
 
 .. list-table::
@@ -856,7 +829,7 @@ This table describes details for CPUID emulation:
      - - Intel RDT Currently disabled
 
    * - 12H
-     - - Intel SGX Currently disabled
+     - - Fill according to SGX virtualization
 
    * - 14H
      - - Intel Processor Trace Currently disabled
@@ -876,12 +849,12 @@ ACRN always enables MSR bitmap in *VMX_PROC_VM_EXEC_CONTROLS* VMX
 execution control field. This bitmap marks the MSRs to cause a VM
 exit upon guest access for both read and write. The VM
 exit reason for reading or writing these MSRs is respectively
-*VMX_EXIT_REASON_RDMSR* or *VMX_EXIT_REASON_WRMSR* and the vm exit
+*VMX_EXIT_REASON_RDMSR* or *VMX_EXIT_REASON_WRMSR* and the VM exit
 handler is *rdmsr_vmexit_handler* or *wrmsr_vmexit_handler*.
 
-This table shows the predefined MSRs ACRN will trap
-for all the guests. For the MSRs whose bitmap are not set in the
-MSR bitmap, guest access will be pass-through directly:
+This table shows the predefined MSRs ACRN will trap for all the guests. For
+the MSRs whose bitmap are not set in the MSR bitmap, guest access will be
+passthrough directly:
 
 .. list-table::
    :widths: 33 33 33
@@ -891,23 +864,31 @@ MSR bitmap, guest access will be pass-through directly:
      - **Description**
      - **Handler**
 
+   * - MSR_IA32_TSC_ADJUST
+     - TSC adjustment of local APIC's TSC deadline mode
+     - emulates with vlapic
+
    * - MSR_IA32_TSC_DEADLINE
      - TSC target of local APIC's TSC deadline mode
      - emulates with vlapic
 
    * - MSR_IA32_BIOS_UPDT_TRIG
      - BIOS update trigger
-     - work for update microcode from SOS, the signature ID read is from
-       physical MSR, and a BIOS update trigger from SOS will trigger a
+     - work for update microcode from the Service VM, the signature ID read is from
+       physical MSR, and a BIOS update trigger from the Service VM will trigger a
        physical microcode update.
 
    * - MSR_IA32_BIOS_SIGN_ID
      - BIOS update signature ID
-     - "
+     - \"
 
    * - MSR_IA32_TIME_STAMP_COUNTER
-     - TIme-stamp counter
+     - Time-stamp counter
      - work with VMX_TSC_OFFSET_FULL to emulate virtual TSC
+
+   * - MSR_IA32_APIC_BASE
+     - APIC base address
+     - emulates with vlapic
 
    * - MSR_IA32_PAT
      - Page-attribute table
@@ -918,29 +899,65 @@ MSR bitmap, guest access will be pass-through directly:
      - Trigger real p-state change if p-state is valid when writing,
        fetch physical MSR when reading
 
+   * - MSR_IA32_FEATURE_CONTROL
+     - Feature control bits that configure operation of VMX and SMX
+     - disabled, locked
+
+   * - MSR_IA32_MCG_CAP/STATUS
+     - Machine-Check global control/status
+     - emulates with vMCE
+
+   * - MSR_IA32_MISC_ENABLE
+     - Miscellaneous feature control
+     - readonly, except MONITOR/MWAIT enable bit
+
+   * - MSR_IA32_SGXLEPUBKEYHASH0/1/2/3
+     - SHA256 digest of the authorized launch enclaves
+     - emulates with vSGX
+
+   * - MSR_IA32_SGX_SVN_STATUS
+     - Status and SVN threshold of SGX support for ACM
+     - readonly, emulates with vSGX
+
    * - MSR_IA32_MTRR_CAP
      - Memory type range register related
      - Handled by MTRR emulation.
 
    * - MSR_IA32_MTRR_DEF_TYPE
-     - "
-     - "
+     - \"
+     - \"
 
    * - MSR_IA32_MTRR_PHYSBASE_0~9
-     - "
-     - "
+     - \"
+     - \"
 
    * - MSR_IA32_MTRR_FIX64K_00000
-     - "
-     - "
+     - \"
+     - \"
 
    * - MSR_IA32_MTRR_FIX16K_80000/A0000
-     - "
-     - "
+     - \"
+     - \"
 
    * - MSR_IA32_MTRR_FIX4K_C0000~F8000
-     - "
-     - "
+     - \"
+     - \"
+
+   * - MSR_IA32_X2APIC_*
+     - x2APIC related MSRs (offset from 0x800 to 0x900)
+     - emulates with vlapic
+
+   * - MSR_IA32_L2_MASK_BASE~n
+     - L2 CAT mask for CLOSn
+     - disabled for guest access
+
+   * - MSR_IA32_L3_MASK_BASE~n
+     - L3 CAT mask for CLOSn
+     - disabled for guest access
+
+   * - MSR_IA32_MBA_MASK_BASE~n
+     - MBA delay mask for CLOSn
+     - disabled for guest access
 
    * - MSR_IA32_VMX_BASIC~VMX_TRUE_ENTRY_CTLS
      - VMX related MSRs
@@ -985,7 +1002,7 @@ hypervisor on CR writes.
 
 For ``mov to cr0`` and ``mov to cr4``, ACRN sets
 *cr0_host_mask/cr4_host_mask* into *VMX_CR0_MASK/VMX_CR4_MASK*
-for the bitmask causing vm exit.
+for the bitmask causing VM exit.
 
 As ACRN always enables ``unrestricted guest`` in
 *VMX_PROC_VM_EXEC_CONTROLS2*, *CR0.PE* and *CR0.PG* can be
@@ -1047,7 +1064,7 @@ setting.
        are fixed to be 0 under VMX operation
 
    * - CR4_TRAP_MASK
-     - CR4_PSE | CR4_PAE | CR4_VMXE | CR4_PCIDE
+     - CR4_PSE | CR4_PAE | CR4_VMXE | CR4_PCIDE | CR4_SMEP | CR4_SMAP | CR4_PKE
      - ACRN will also trap PSE, PAE, VMXE, and PCIDE bits
 
    * - cr4_host_mask
@@ -1067,34 +1084,34 @@ ACRN always enables I/O bitmap in *VMX_PROC_VM_EXEC_CONTROLS* and EPT
 in *VMX_PROC_VM_EXEC_CONTROLS2*. Based on them,
 *pio_instr_vmexit_handler* and *ept_violation_vmexit_handler* are
 used for IO/MMIO emulation for a emulated device. The emulated device
-could locate in hypervisor or DM in SOS. Please refer to the "I/O
+could locate in hypervisor or DM in the Service VM. Please refer to the "I/O
 Emulation" section for more details.
 
 For an emulated device done in the hypervisor, ACRN provide some basic
 APIs to register its IO/MMIO range:
 
--  For SOS, the default I/O bitmap are all set to 0, which means SOS will pass
-   through all I/O port access by default. Adding an I/O handler
+-  For the Service VM, the default I/O bitmap are all set to 0, which means
+   the Service VM will passthrough all I/O port access by default. Adding an I/O handler
    for a hypervisor emulated device needs to first set its corresponding
    I/O bitmap to 1.
 
--  For UOS, the default I/O bitmap are all set to 1, which means UOS will trap
+-  For the User VM, the default I/O bitmap are all set to 1, which means the User Vm will trap
    all I/O port access by default. Adding an I/O handler for a
    hypervisor emulated device does not need change its I/O bitmap.
    If the trapped I/O port access does not fall into a hypervisor
-   emulated device, it will create an I/O request and pass it to SOS
+   emulated device, it will create an I/O request and pass it to the Service VM
    DM.
 
--  For SOS, EPT maps all range of memory to the SOS except for ACRN hypervisor
-   area. This means SOS will pass through all MMIO access by
+-  For the Service VM, EPT maps all range of memory to the Service VM except for ACRN hypervisor
+   area. This means the Service VM will passthrough all MMIO access by
    default. Adding a MMIO handler for a hypervisor emulated
    device needs to first remove its MMIO range from EPT mapping.
 
--  For UOS, EPT only maps its system RAM to the UOS, which means UOS will
-   trap all MMIO access by default. Adding a MMIO handler for a
+-  For the User VM, EPT only maps its system RAM to the User VM, which means the User VM will
+   trap all MMIO access by default. Adding an MMIO handler for a
    hypervisor emulated device does not need to change its EPT mapping.
    If the trapped MMIO access does not fall into a hypervisor
-   emulated device, it will create an I/O request and pass it to SOS
+   emulated device, it will create an I/O request and pass it to the Service VM
    DM.
 
 .. list-table::
@@ -1108,15 +1125,8 @@ APIs to register its IO/MMIO range:
      - register an I/O emulation handler for a hypervisor emulated device
        by specific I/O range
 
-   * - free_io_emulation_resource
-     - free all I/O emulation resources for a VM
-
    * - register_mmio_emulation_handler
      - register a MMIO emulation handler for a hypervisor emulated device
-       by specific MMIO range
-
-   * - unregister_mmio_emulation_handler
-     - unregister a MMIO emulation handler for a hypervisor emulated device
        by specific MMIO range
 
 .. _instruction-emulation:
@@ -1188,6 +1198,34 @@ in *VMX_PROC_VM_EXEC_CONTROLS*):
 -  For read: ``val = rdtsc() + exec_vmread64(VMX_TSC_OFFSET_FULL)``
 -  For write: ``exec_vmwrite64(VMX_TSC_OFFSET_FULL, val - rdtsc())``
 
+ART Virtualization
+******************
+
+The invariant TSC is based on the invariant timekeeping hardware (called
+Always Running Timer or ART), that runs at the core crystal clock frequency.
+The ratio defined by the CPUID leaf 15H expresses the frequency relationship
+between the ART hardware and the TSC.
+
+If CPUID.15H.EBX[31:0] != 0 and CPUID.80000007H:EDX[InvariantTSC] = 1, the
+following linearity relationship holds between the TSC and the ART hardware:
+
+   ``TSC_Value = (ART_Value * CPUID.15H:EBX[31:0]) / CPUID.15H:EAX[31:0] + K``
+
+Where `K` is an offset that can be adjusted by a privileged agent.
+When ART hardware is reset, both invariant TSC and K are also reset.
+
+The guideline of ART virtualization (vART) is that software in native can run in
+VM too. The vART solution is:
+
+-  Present the ART capability to guest through CPUID leaf 15H for `CPUID.15H:EBX[31:0]`
+   and `CPUID.15H:EAX[31:0]`.
+-  Passthrough devices see the physical ART_Value (vART_Value = pART_Value)
+-  Relationship between the ART and TSC in guest is:
+   ``vTSC_Value = (vART_Value * CPUID.15H:EBX[31:0]) / CPUID.15H:EAX[31:0] + vK``
+   Where `vK = K + VMCS.TSC_OFFSET`.
+-  If `vK` or `vTSC_Value` are changed by guest, we change the `VMCS.TSC_OFFSET` accordingly.
+-  `K` should never be changed by hypervisor.
+
 XSAVE Emulation
 ***************
 
@@ -1231,7 +1269,7 @@ ACRN emulates XSAVE features through the following rules:
 2. If yes for step 1, enable XSAVE in hypervisor by CR4.OSXSAVE
 3. Emulates XSAVE related CPUID.01H & CPUID.0DH to guest
 4. Emulates XCR0 access through *xsetbv_vmexit_handler*
-5. ACRN pass-through the access of IA32_XSS MSR to guest
+5. ACRN passthrough the access of IA32_XSS MSR to guest
 6. ACRN hypervisor does NOT use any feature of XSAVE
 7. As ACRN emulate vCPU with partition mode, so based on above rules 5
    and 6, a guest vCPU will fully control the XSAVE feature in

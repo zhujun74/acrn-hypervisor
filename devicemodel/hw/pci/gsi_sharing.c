@@ -13,6 +13,7 @@
 #include <pciaccess.h>
 
 #include "pci_core.h"
+#include "mevent.h"
 
 #define MAX_DEV_PER_GSI 4
 
@@ -41,7 +42,7 @@ update_gsi_sharing_info(char *dev_name, uint8_t gsi)
 			continue;
 
 		if (group->shared_dev_num >= MAX_DEV_PER_GSI) {
-			warnx("max %d devices share one GSI", MAX_DEV_PER_GSI);
+			pr_err("max %d devices share one GSI", MAX_DEV_PER_GSI);
 			return -EINVAL;
 		}
 
@@ -52,7 +53,7 @@ update_gsi_sharing_info(char *dev_name, uint8_t gsi)
 	if (gsi_shared == 0) {
 		group = calloc(1, sizeof(struct gsi_sharing_group));
 		if (!group) {
-			warnx("%s: calloc FAIL!", __func__);
+			pr_err("%s: calloc FAIL!", __func__);
 			return -ENOMEM;
 		}
 
@@ -117,7 +118,7 @@ create_gsi_sharing_groups(void)
 	uint8_t gsi;
 	char *dev_name;
 	int i, error, msi_support;
-	struct gsi_sharing_group *group = NULL;
+	struct gsi_sharing_group *group = NULL, *temp = NULL;
 
 	error = pciaccess_init();
 	if (error < 0)
@@ -144,7 +145,7 @@ create_gsi_sharing_groups(void)
 	 * clean up gsg_head - the list for gsi_sharing_group
 	 * delete the element without gsi sharing condition (shared_dev_num < 2)
 	 */
-	LIST_FOREACH(group, &gsg_head, gsg_list) {
+	list_foreach_safe(group, &gsg_head, gsg_list, temp) {
 		if (group->shared_dev_num < 2) {
 			LIST_REMOVE(group, gsg_list);
 			free(group);
@@ -181,7 +182,7 @@ update_pt_info(uint16_t phys_bdf)
 int
 check_gsi_sharing_violation(void)
 {
-	struct gsi_sharing_group *group;
+	struct gsi_sharing_group *group, *temp;
 	int i, error, violation;
 
 	error = 0;
@@ -212,12 +213,12 @@ check_gsi_sharing_violation(void)
 			continue;
 
 		/* reject the passthrough since gsi sharing violation occurs */
-		warnx("GSI SHARING VIOLATION!");
-		warnx("following physical devices are sharing same GSI, please "
+		pr_err("GSI SHARING VIOLATION!");
+		pr_err("following physical devices are sharing same GSI, please "
 			"assign them to same VM to avoid physical GSI sharing "
 			"between multiple VMs");
 		for (i = 0; i < (group->shared_dev_num); i++) {
-			warnx("device %s \t assigned_to_this_vm %d",
+			pr_info("device %s \t assigned_to_this_vm %d",
 				group->dev[i].dev_name,
 				group->dev[i].assigned_to_this_vm);
 		}
@@ -226,7 +227,7 @@ check_gsi_sharing_violation(void)
 	}
 
 	/* destroy the gsg_head after all the checks have been done */
-	LIST_FOREACH(group, &gsg_head, gsg_list) {
+	list_foreach_safe(group, &gsg_head, gsg_list, temp) {
 		LIST_REMOVE(group, gsg_list);
 		free(group);
 	}

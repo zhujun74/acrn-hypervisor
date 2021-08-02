@@ -13,16 +13,38 @@
 #include "vmmapi.h"
 #include "tpm.h"
 #include "tpm_internal.h"
+#include "log.h"
+#include "mmio_dev.h"
+#include "dm.h"
 
 static int tpm_debug;
 #define LOG_TAG "tpm: "
 #define DPRINTF(fmt, args...) \
-	do { if (tpm_debug) printf(LOG_TAG "%s:" fmt, __func__, ##args); } while (0)
+	do { if (tpm_debug) pr_dbg(LOG_TAG "%s:" fmt, __func__, ##args); } while (0)
 #define WPRINTF(fmt, args...) \
-	do { printf(LOG_TAG "%s:" fmt, __func__, ##args); } while (0)
+	do { pr_err(LOG_TAG "%s:" fmt, __func__, ##args); } while (0)
 
 #define STR_MAX_LEN 1024U
 static char *sock_path = NULL;
+static uint32_t vtpm_crb_mmio_addr = 0U;
+
+uint32_t get_vtpm_crb_mmio_addr(void) {
+	return vtpm_crb_mmio_addr;
+}
+
+uint32_t get_tpm_crb_mmio_addr(void)
+{
+	uint32_t base;
+
+	if (pt_tpm2) {
+		base = (uint32_t)get_mmio_dev_tpm2_base_gpa();
+	} else {
+		base = get_vtpm_crb_mmio_addr();
+	}
+
+	return base;
+}
+
 
 enum {
 	SOCK_PATH_OPT = 0
@@ -51,6 +73,7 @@ int acrn_parse_vtpm2(char *arg)
 			return -1;
 		strncpy(sock_path, value, len + 1);
 	}
+	vtpm2 = true;
 
 	return 0;
 }
@@ -64,6 +87,11 @@ void init_vtpm2(struct vmctx *ctx)
 
 	if (init_tpm_emulator(sock_path) < 0) {
 		WPRINTF("Failed init tpm emulator!\n");
+		return;
+	}
+
+	if (mmio_dev_alloc_gpa_resource32(&vtpm_crb_mmio_addr, TPM_CRB_MMIO_SIZE) < 0) {
+		WPRINTF("Failed allocate gpa resorce!\n");
 		return;
 	}
 

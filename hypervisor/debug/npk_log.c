@@ -4,11 +4,11 @@
  */
 
 #include <types.h>
-#include <atomic.h>
+#include <asm/lib/atomic.h>
 #include <acrn_hv_defs.h>
-#include <io.h>
-#include <per_cpu.h>
-#include <mmu.h>
+#include <asm/io.h>
+#include <asm/per_cpu.h>
+#include <asm/mmu.h>
 #include <logmsg.h>
 #include <npk_log.h>
 
@@ -77,7 +77,7 @@ void npk_log_setup(struct hv_npk_log_param *param)
 	uint16_t i;
 	uint16_t pcpu_nums;
 
-	pr_info("HV_NPK_LOG: cmd %d param 0x%llx\n", param->cmd,
+	pr_info("HV_NPK_LOG: cmd %d param 0x%lx\n", param->cmd,
 			param->mmio_addr);
 
 	param->res = HV_NPK_LOG_RES_KO;
@@ -104,7 +104,7 @@ void npk_log_setup(struct hv_npk_log_param *param)
 				for (i = 0U; i < pcpu_nums; i++) {
 					per_cpu(npk_log_ref, i) = 0U;
 				}
-				hv_access_memory_region_update(base,
+				set_paging_supervisor(base,
 					pcpu_nums * (HV_NPK_LOG_REF_MASK + 1U)
 					* sizeof(struct npk_chan));
 			}

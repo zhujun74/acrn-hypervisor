@@ -28,113 +28,29 @@
  */
 #include <types.h>
 #include <rtl.h>
-#include <vboot.h>
 #include "acpi.h"
-#include <pgtable.h>
-#include <ioapic.h>
+#include <asm/pgtable.h>
+#include <asm/ioapic.h>
 #include <logmsg.h>
 #include <acrn_common.h>
-
-#define ACPI_SIG_RSDP             "RSD PTR " /* Root System Description Ptr */
-#define ACPI_OEM_ID_SIZE           6
-#define ACPI_SIG_MADT             "APIC" /* Multiple APIC Description Table */
-#define RSDP_CHECKSUM_LENGTH       20
-#define ACPI_NAME_SIZE             4U
-#define ACPI_MADT_TYPE_LOCAL_APIC  0U
-#define ACPI_MADT_TYPE_IOAPIC  1U
-#define ACPI_MADT_ENABLED          1U
-#define ACPI_OEM_TABLE_ID_SIZE     8
-
-struct acpi_table_rsdp {
-	/* ACPI signature, contains "RSD PTR " */
-	char                    signature[8];
-	/* ACPI 1.0 checksum */
-	uint8_t                 checksum;
-	/* OEM identification */
-	char                    oem_id[ACPI_OEM_ID_SIZE];
-	/* Must be (0) for ACPI 1.0 or (2) for ACPI 2.0+ */
-	uint8_t                 revision;
-	/* 32-bit physical address of the RSDT */
-	uint32_t                rsdt_physical_address;
-	/* Table length in bytes, including header (ACPI 2.0+) */
-	uint32_t                length;
-	/* 64-bit physical address of the XSDT (ACPI 2.0+) */
-	uint64_t                xsdt_physical_address;
-	/* Checksum of entire table (ACPI 2.0+) */
-	uint8_t                 extended_checksum;
-	/* Reserved, must be zero */
-	uint8_t                 reserved[3];
-};
-
-struct acpi_table_rsdt {
-	/* Common ACPI table header */
-	struct acpi_table_header   header;
-	/* Array of pointers to ACPI tables */
-	uint32_t                   table_offset_entry[1];
-} __packed;
-
-struct acpi_table_xsdt {
-	/* Common ACPI table header */
-	struct acpi_table_header    header;
-	/* Array of pointers to ACPI tables */
-	uint64_t                    table_offset_entry[1];
-} __packed;
-
-struct acpi_subtable_header {
-	uint8_t                   type;
-	uint8_t                   length;
-};
-
-struct acpi_table_madt {
-	/* Common ACPI table header */
-	struct acpi_table_header     header;
-	/* Physical address of local APIC */
-	uint32_t                     address;
-	uint32_t                     flags;
-};
-
-struct acpi_madt_local_apic {
-	struct acpi_subtable_header    header;
-	/* ACPI processor id */
-	uint8_t                        processor_id;
-	/* Processor's local APIC id */
-	uint8_t                        id;
-	uint32_t                       lapic_flags;
-};
+#include <util.h>
+#include <asm/e820.h>
+#include <boot.h>
 
 static struct acpi_table_rsdp *acpi_rsdp;
-struct acpi_madt_ioapic {
-	struct acpi_subtable_header    header;
-	/* IOAPIC id */
-	uint8_t				id;
-	uint8_t				rsvd;
-	uint32_t			addr;
-	uint32_t			gsi_base;
-};
 
-static struct acpi_table_rsdp*
-found_rsdp(char *base, int32_t length)
+static struct acpi_table_rsdp *found_rsdp(char *base, uint64_t length)
 {
 	struct acpi_table_rsdp *rsdp, *ret = NULL;
-	uint8_t *cp, sum;
-	int32_t ofs, idx;
+	uint64_t ofs;
 
 	/* search on 16-byte boundaries */
-	for (ofs = 0; ofs < length; ofs += 16) {
+	for (ofs = 0UL; ofs < length; ofs += 16UL) {
 		rsdp = (struct acpi_table_rsdp *)(base + ofs);
 
 		/* compare signature, validate checksum */
-		if (strncmp(rsdp->signature, ACPI_SIG_RSDP, strnlen_s(ACPI_SIG_RSDP, 8U)) == 0) {
-			cp = (uint8_t *)rsdp;
-			sum = 0U;
-			for (idx = 0; idx < RSDP_CHECKSUM_LENGTH; idx++) {
-				sum += *(cp + idx);
-			}
-
-			if (sum != 0U) {
-				continue;
-			}
-
+		if ((strncmp(rsdp->signature, ACPI_SIG_RSDP, strnlen_s(ACPI_SIG_RSDP, sizeof(rsdp->signature))) == 0)
+			&& (calculate_sum8(rsdp, ACPI_RSDP_CHECKSUM_LENGTH) == 0U)) {
 			ret = rsdp;
 			break;
 		}
@@ -148,36 +64,49 @@ found_rsdp(char *base, int32_t length)
  */
 static struct acpi_table_rsdp *get_rsdp(void)
 {
+	return acpi_rsdp;
+}
+
+void init_acpi(void)
+{
 	struct acpi_table_rsdp *rsdp = NULL;
 
-	/* If acpi_rsdp is already parsed, it will be returned directly */
-	if (acpi_rsdp != NULL) {
-		rsdp = acpi_rsdp;
-	} else {
-		rsdp = (struct acpi_table_rsdp *)get_rsdp_ptr();
-		if (rsdp == NULL) {
-			uint16_t *addr;
+	rsdp = (struct acpi_table_rsdp *)(get_acrn_boot_info()->acpi_rsdp_va);
+	if (rsdp == NULL) {
+		uint16_t *addr;
 
-			/* EBDA is addressed by the 16 bit pointer at 0x40E */
-			addr = (uint16_t *)hpa2hva(0x40eUL);
+		/* EBDA is addressed by the 16 bit pointer at 0x40E */
+		addr = (uint16_t *)hpa2hva(0x40eUL);
 
-			rsdp = found_rsdp((char *)hpa2hva((uint64_t)(*addr) << 4U), 0x400);
-		}
-		if (rsdp == NULL) {
-			/* Check the upper memory BIOS space, 0xe0000 - 0xfffff. */
-			rsdp = found_rsdp((char *)hpa2hva(0xe0000UL), 0x20000);
-		}
-
-		if (rsdp == NULL) {
-			panic("No RSDP is found");
-		}
-
-		/* After RSDP is parsed, it will be assigned to acpi_rsdp */
-		acpi_rsdp = rsdp;
+		rsdp = found_rsdp((char *)hpa2hva((uint64_t)(*addr) << 4U), 0x400UL);
+	}
+	if (rsdp == NULL) {
+		/* Check the upper memory BIOS space, 0xe0000 - 0xfffff. */
+		rsdp = found_rsdp((char *)hpa2hva(0xe0000UL), 0x20000UL);
 	}
 
+	if (rsdp == NULL) {
+		/* Check ACPI RECLAIM region, there might be multiple ACPI reclaimable regions. */
+		uint32_t i;
+		const struct e820_entry *entry = get_e820_entry();
+		uint32_t entries_count = get_e820_entries_count();
 
-	return rsdp;
+		for (i = 0U; i < entries_count; i++) {
+			if (entry[i].type == E820_TYPE_ACPI_RECLAIM) {
+				rsdp = found_rsdp((char *)hpa2hva(entry[i].baseaddr), entry[i].length);
+				if (rsdp != NULL) {
+					break;
+				}
+			}
+		}
+	}
+
+	if (rsdp == NULL) {
+		panic("No RSDP is found");
+	}
+
+	/* After RSDP is parsed, it will be assigned to acpi_rsdp */
+	acpi_rsdp = rsdp;
 }
 
 static bool probe_table(uint64_t address, const char *signature)
@@ -187,7 +116,7 @@ static bool probe_table(uint64_t address, const char *signature)
 	bool ret;
 
 	if (strncmp(table->signature, signature, ACPI_NAME_SIZE) != 0) {
-	        ret = false;
+		ret = false;
 	} else {
 		ret = true;
 	}
@@ -244,7 +173,7 @@ void *get_acpi_tbl(const char *signature)
  * of Type 0
  */
 static uint16_t
-local_parse_madt(struct acpi_table_madt *madt, uint32_t lapic_id_array[CONFIG_MAX_PCPU_NUM])
+local_parse_madt(struct acpi_table_madt *madt, uint32_t lapic_id_array[MAX_PCPU_NUM])
 {
 	uint16_t pcpu_num = 0U;
 	struct acpi_madt_local_apic *processor;
@@ -266,7 +195,7 @@ local_parse_madt(struct acpi_table_madt *madt, uint32_t lapic_id_array[CONFIG_MA
 		if (entry->type == ACPI_MADT_TYPE_LOCAL_APIC) {
 			processor = (struct acpi_madt_local_apic *)iterator;
 			if ((processor->lapic_flags & ACPI_MADT_ENABLED) != 0U) {
-				if (pcpu_num < CONFIG_MAX_PCPU_NUM) {
+				if (pcpu_num < MAX_PCPU_NUM) {
 					lapic_id_array[pcpu_num] = processor->id;
 				}
 				pcpu_num++;
@@ -277,69 +206,42 @@ local_parse_madt(struct acpi_table_madt *madt, uint32_t lapic_id_array[CONFIG_MA
 	return pcpu_num;
 }
 
-static uint16_t
-ioapic_parse_madt(void *madt, struct ioapic_info *ioapic_id_array)
+/* The lapic_id info gotten from madt will be returned in lapic_id_array */
+uint16_t parse_madt(uint32_t lapic_id_array[MAX_PCPU_NUM])
 {
-	struct acpi_madt_ioapic *ioapic;
-	struct acpi_table_madt *madt_ptr;
-	void *first, *end, *iterator;
-	struct acpi_subtable_header *entry;
-	uint16_t ioapic_idx = 0U;
+	uint16_t ret = 0U;
+	struct acpi_table_madt *madt = (struct acpi_table_madt *)get_acpi_tbl(ACPI_SIG_MADT);
 
-	madt_ptr = (struct acpi_table_madt *)madt;
+	if (madt != NULL) {
+		ret = local_parse_madt(madt, lapic_id_array);
+	}
 
-	first = madt_ptr + 1;
-	end = (void *)madt_ptr + madt_ptr->header.length;
+	return ret;
+}
 
-	for (iterator = first; (iterator) < (end); iterator += entry->length) {
-		entry = (struct acpi_subtable_header *)iterator;
-		if (entry->length < sizeof(struct acpi_subtable_header)) {
-			break;
-		}
+uint8_t parse_madt_ioapic(struct ioapic_info *ioapic_id_array)
+{
+	uint8_t ioapic_idx = 0U;
+	uint64_t entry, end;
+	const struct acpi_madt_ioapic *ioapic;
+	const struct acpi_table_madt *madt = (const struct acpi_table_madt *)get_acpi_tbl(ACPI_SIG_MADT);
 
-		if (entry->type == ACPI_MADT_TYPE_IOAPIC) {
-			ioapic = (struct acpi_madt_ioapic *)iterator;
-			if (ioapic_idx < CONFIG_MAX_IOAPIC_NUM) {
-				ioapic_id_array[ioapic_idx].id = ioapic->id;
-				ioapic_id_array[ioapic_idx].addr = ioapic->addr;
-				ioapic_id_array[ioapic_idx].gsi_base = ioapic->gsi_base;
+	if (madt != NULL) {
+		end = (uint64_t)madt + madt->header.length;
+
+		for (entry = (uint64_t)(madt + 1); entry < end; entry += ioapic->header.length) {
+			ioapic = (const struct acpi_madt_ioapic *)entry;
+
+			if (ioapic->header.type == ACPI_MADT_TYPE_IOAPIC) {
+				if (ioapic_idx < CONFIG_MAX_IOAPIC_NUM) {
+					ioapic_id_array[ioapic_idx].id = ioapic->id;
+					ioapic_id_array[ioapic_idx].addr = ioapic->addr;
+					ioapic_id_array[ioapic_idx].gsi_base = ioapic->gsi_base;
+				}
+				ioapic_idx++;
 			}
-			ioapic_idx++;
 		}
 	}
 
 	return ioapic_idx;
-}
-
-/* The lapic_id info gotten from madt will be returned in lapic_id_array */
-uint16_t parse_madt(uint32_t lapic_id_array[CONFIG_MAX_PCPU_NUM])
-{
-	uint16_t ret = 0U;
-	struct acpi_table_rsdp *rsdp = NULL;
-
-	rsdp = get_rsdp();
-	if (rsdp != NULL) {
-		struct acpi_table_madt *madt = (struct acpi_table_madt *)get_acpi_tbl(ACPI_SIG_MADT);
-		if (madt != NULL) {
-			ret = local_parse_madt(madt, lapic_id_array);
-		}
-	}
-
-	return ret;
-}
-
-uint16_t parse_madt_ioapic(struct ioapic_info *ioapic_id_array)
-{
-	uint16_t ret = 0U;
-	struct acpi_table_rsdp *rsdp = NULL;
-
-	rsdp = get_rsdp();
-	if (rsdp != NULL) {
-		void *madt = get_acpi_tbl(ACPI_SIG_MADT);
-		if (madt != NULL) {
-			ret = ioapic_parse_madt(madt, ioapic_id_array);
-		}
-	}
-
-	return ret;
 }

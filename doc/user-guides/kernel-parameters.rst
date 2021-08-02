@@ -3,11 +3,11 @@
 ACRN Kernel Parameters
 ######################
 
-Generic kernel parameters
+Generic Kernel Parameters
 *************************
 
 A number of kernel parameters control the behavior of ACRN-based systems. Some
-are applicable to the Service OS (SOS) kernel, others to the User OS (UOS)
+are applicable to the Service VM kernel, others to the User VM
 kernel, and some are applicable to both.
 
 This section focuses on generic parameters from the Linux kernel which are
@@ -18,12 +18,12 @@ relevant for configuring or debugging ACRN-based systems.
    :widths: 10,10,50,30
 
    * - Parameter
-     - Used in SOS or UOS
+     - Used in Service VM or User VM
      - Description
      - Usage example
 
-   * - module_blacklist
-     - SOS
+   * - ``module_blacklist``
+     - Service VM
      - A comma-separated list of modules that should not be loaded.
        Useful to debug or work
        around issues related to specific modules.
@@ -31,15 +31,15 @@ relevant for configuring or debugging ACRN-based systems.
 
          module_blacklist=dwc3_pci
 
-   * - no_timer_check
-     - SOS,UOS
+   * - ``no_timer_check``
+     - Service VM,User VM
      - Disables the code which tests for broken timer IRQ sources.
      - ::
 
          no_timer_check
 
-   * - console
-     - SOS,UOS
+   * - ``console``
+     - Service VM,User VM
      - Output console device and options.
 
        ``tty<n>``
@@ -64,8 +64,8 @@ relevant for configuring or debugging ACRN-based systems.
           console=ttyS0
           console=hvc0
 
-   * - loglevel
-     - SOS
+   * - ``loglevel``
+     - Service VM
      - All Kernel messages with a loglevel less than the console loglevel will
        be printed to the console. The loglevel can also be changed with
        ``klogd`` or other programs. The loglevels are defined as follows:
@@ -95,8 +95,8 @@ relevant for configuring or debugging ACRN-based systems.
 
           loglevel=7
 
-   * - ignore_loglevel
-     - UOS
+   * - ``ignore_loglevel``
+     - User VM
      - Ignoring loglevel setting will print **all**
        kernel messages to the console. Useful for debugging.
        We also add it as printk module parameter, so users
@@ -107,8 +107,8 @@ relevant for configuring or debugging ACRN-based systems.
           ignore_loglevel
 
 
-   * - log_buf_len
-     - UOS
+   * - ``log_buf_len``
+     - User VM
      - Sets the size of the printk ring buffer,
        in bytes.  n must be a power of two and greater
        than the minimal size. The minimal size is defined
@@ -120,8 +120,8 @@ relevant for configuring or debugging ACRN-based systems.
 
           log_buf_len=16M
 
-   * - consoleblank
-     - SOS,UOS
+   * - ``consoleblank``
+     - Service VM,User VM
      - The console blank (screen saver) timeout in
        seconds. Defaults to 600 (10 minutes). A value of 0
        disables the blank timer.
@@ -129,8 +129,8 @@ relevant for configuring or debugging ACRN-based systems.
 
           consoleblank=0
 
-   * - rootwait
-     - SOS,UOS
+   * - ``rootwait``
+     - Service VM,User VM
      - Wait (indefinitely) for root device to show up.
        Useful for devices that are detected asynchronously
        (e.g. USB and MMC devices).
@@ -138,8 +138,8 @@ relevant for configuring or debugging ACRN-based systems.
 
           rootwait
 
-   * - root
-     - SOS,UOS
+   * - ``root``
+     - Service VM,User VM
      - Define the root filesystem
 
        ``/dev/<disk_name><decimal>``
@@ -165,30 +165,30 @@ relevant for configuring or debugging ACRN-based systems.
           root=/dev/vda2
           root=PARTUUID=00112233-4455-6677-8899-AABBCCDDEEFF
 
-   * - rw
-     - SOS,UOS
-     - Mount root device read-write on boot
+   * - ``rw``
+     - Service VM,User VM
+     - Mount root device read/write on boot
      - ::
 
           rw
 
-   * - tsc
-     - UOS
+   * - ``tsc``
+     - User VM
      - Disable clocksource stability checks for TSC.
 
        Format: <string>, where the only supported value is:
 
        ``reliable``:
           Mark TSC clocksource as reliable, and disables clocksource
-          verification at runtime, and the stability checks done at bootup.
+          verification at runtime, and the stability checks done at boot.
           Used to enable high-resolution timer mode on older hardware, and in
           virtualized environments.
      - ::
 
           tsc=reliable
 
-   * - cma
-     - SOS
+   * - ``cma``
+     - Service VM
      - Sets the size of the kernel global memory area for
        contiguous memory allocations, and optionally the
        placement constraint by the physical address range of
@@ -199,57 +199,74 @@ relevant for configuring or debugging ACRN-based systems.
 
           cma=64M@0
 
-   * - hvlog
-     - SOS
-     - Reserve memory for the ACRN hypervisor log. The reserved space should not
-       overlap any other blocks (e.g.  hypervisor's reserved space).
+   * - ``hvlog``
+     - Service VM
+     - Sets the guest physical address and size of the dedicated hypervisor
+       log ring buffer between the hypervisor and Service VM.
+       A ``memmap`` parameter is also required to reserve the specified memory
+       from the guest VM.
+
+       If hypervisor relocation is disabled, verify that
+       :option:`hv.MEMORY.HV_RAM_START` and :option:`hv.MEMORY.HV_RAM_SIZE`
+       does not overlap with the hypervisor's reserved buffer space allocated
+       in the Service VM. Service VM GPA and HPA are a 1:1 mapping.
+
+       If hypervisor relocation is enabled, reserve the memory below 256MB,
+       since hypervisor could be relocated anywhere between 256MB and 4GB.
+
+       You should enable ASLR on SOS. This ensures that when guest Linux is
+       relocating kernel image, it will avoid this buffer address.
+
      - ::
 
-          hvlog=2M@0x6de00000
+          hvlog=2M@0xe00000
 
-   * - memmap
-     - SOS
+   * - ``memmap``
+     - Service VM
      - Mark specific memory as reserved.
 
        ``memmap=nn[KMG]$ss[KMG]``
          Region of memory to be reserved is from ``ss`` to ``ss+nn``,
-         using ``K``, ``M``, and ``G`` representing Kilobytes, Megabytes, and
-         Gigabytes, respectively.
+         using ``K``, ``M``, and ``G`` representing kilobytes, megabytes, and
+         gigabytes, respectively.
      - ::
 
-         memmap=0x400000$0x6da00000
+         memmap=0x400000$0xa00000
 
-   * - ramoops.mem_address
-       ramoops.mem_size
-       ramoops.console_size
-     - SOS
+   * - ``ramoops.mem_address``
+       ``ramoops.mem_size``
+       ``ramoops.console_size``
+     - Service VM
      - Ramoops is an oops/panic logger that writes its logs to RAM
        before the system crashes. Ramoops uses a predefined memory area
        to store the dump. See `Linux Kernel Ramoops oops/panic logger
        <https://www.kernel.org/doc/html/v4.19/admin-guide/ramoops.html#ramoops-oops-panic-logger>`_
        for details.
+
+       This buffer should not overlap with hypervisor reserved memory and
+       guest kernel image. See ``hvlog``.
      - ::
 
-         ramoops.mem_address=0x6da00000
+         ramoops.mem_address=0xa00000
          ramoops.mem_size=0x400000
          ramoops.console_size=0x200000
 
 
-   * - reboot_panic
-     - SOS
+   * - ``reboot_panic``
+     - Service VM
      - Reboot in case of panic
 
        The comma-delimited parameters are:
 
        reboot_mode:
-         ``w`` (warm), ``s`` (soft), ``c`` (cold), or ``g`` (gpio)
+         ``w`` (warm), ``s`` (soft), ``c`` (cold), or ``g`` (GPIO)
 
        reboot_type:
-         ``b`` (bios), ``a`` (acpi), ``k`` (kbd), ``t`` (triple), ``e`` (efi),
-         or ``p`` (pci)
+         ``b`` (BIOS), ``a`` (ACPI), ``k`` (kbd), ``t`` (triple), ``e`` (EFI),
+         or ``p`` (PCI)
 
        reboot_cpu:
-         ``s###`` (smp, and processor number to be used for rebooting)
+         ``s###`` (SMP, and processor number to be used for rebooting)
 
        reboot_force:
          ``f`` (force), or not specified.
@@ -257,17 +274,17 @@ relevant for configuring or debugging ACRN-based systems.
 
          reboot_panic=p,w
 
-   * - maxcpus
-     - UOS
+   * - ``maxcpus``
+     - User VM
      - Maximum number of processors that an SMP kernel
-       will bring up during bootup.
+       will bring up during boot.
 
        ``maxcpus=n`` where n >= 0 limits
-       the kernel to bring up ``n`` processors during system bootup.
+       the kernel to bring up ``n`` processors during system boot.
        Giving n=0 is a special case, equivalent to ``nosmp``,which
        also disables the I/O APIC.
 
-       After bootup, you can bring up additional plugged CPUs by executing
+       After booting, you can bring up additional plugged CPUs by executing
 
        ``echo 1 > /sys/devices/system/cpu/cpuX/online``
      - ::
@@ -275,14 +292,14 @@ relevant for configuring or debugging ACRN-based systems.
          maxcpus=1
 
    * - nohpet
-     - UOS
+     - User VM
      -  Don't use the HPET timer
      - ::
 
          nohpet
 
-   * - intel_iommu
-     - UOS
+   * - ``intel_iommu``
+     - User VM
      - Intel IOMMU driver (DMAR) option
 
        ``on``:
@@ -300,6 +317,28 @@ relevant for configuring or debugging ACRN-based systems.
 
          intel_iommu=off
 
+   * - ``hugepages``
+       ``hugepagesz``
+     - Service VM,User VM
+     - ``hugepages``:
+         HugeTLB pages to allocate at boot.
+
+       ``hugepagesz``:
+         The size of the HugeTLB pages. On x86-64 and PowerPC,
+         this option can be specified multiple times interleaved
+         with ``hugepages`` to reserve huge pages of different sizes.
+         Valid page sizes on x86-64 are 2M (when the CPU supports Page Size Extension (PSE))
+         and 1G (when the CPU supports the ``pdpe1gb`` cpuinfo flag).
+     - ::
+
+         hugepages=10
+         hugepagesz=1G
+
+.. note:: The ``hugepages`` and ``hugepagesz`` parameters are automatically
+   taken care of by ACRN config tool. In case user have customized hugepage
+   settings to satisfy their particular workloads in Service VM, the ``hugepages``
+   and ``hugepagesz`` parameters could be redefined in GRUB menu to override
+   the settings from ACRN config tool.
 
 Intel GVT-g (AcrnGT) Parameters
 *******************************
@@ -314,99 +353,47 @@ section below has more details on a few select parameters.
    :widths: 10,10,50,30
 
    * - Parameter
-     - Used in SOS or UOS
+     - Used in Service VM or User VM
      - Description
      - Usage example
 
    * - i915.enable_gvt
-     - SOS
+     - Service VM
      - Enable Intel GVT-g graphics virtualization support in the host
      - ::
 
          i915.enable_gvt=1
 
-   * - i915.enable_pvmmio
-     - SOS, UOS
-     - Control Para-Virtualized MMIO (PVMMIO). It batches sequential MMIO writes
-       into a shared buffer between the SOS and UOS
-     - ::
-
-         i915.enable_pvmmio=0x1F
-
-   * - i915.gvt_workload_priority
-     - SOS
-     - Define the priority level of UOS graphics workloads
-     - ::
-
-         i915.gvt_workload_priority=1
-
-   * - i915.enable_initial_modeset
-     - SOS
-     - On MRB, value must be ``1``.  On NUC or UP2 boards, value must be
-       ``0``. See :ref:`i915-enable-initial-modeset`.
-     - ::
-
-         i915.enable_initial_modeset=1
-         i915.enable_initial_modeset=0
-
    * - i915.nuclear_pageflip
-     - SOS,UOS
+     - Service VM,User VM
      - Force enable atomic functionality on platforms that don't have full support yet.
      - ::
 
          i915.nuclear_pageflip=1
 
-   * - i915.avail_planes_per_pipe
-     - SOS
-     - See :ref:`i915-avail-planes-owners`.
-     - ::
-
-         i915.avail_planes_per_pipe=0x01010F
-
-   * - i915.domain_plane_owners
-     - SOS
-     - See :ref:`i915-avail-planes-owners`.
-     - ::
-
-         i915.domain_plane_owners=0x011111110000
-
-   * - i915.domain_scaler_owner
-     - SOS
-     - See `i915.domain_scaler_owner`_
-     - ::
-
-         i915.domain_scaler_owner=0x021100
-
    * - i915.enable_guc
-     - SOS
+     - Service VM
      - Enable GuC load for HuC load.
      - ::
 
          i915.enable_guc=0x02
 
-   * - i915.avail_planes_per_pipe
-     - UOS
-     - See :ref:`i915-avail-planes-owners`.
-     - ::
-
-         i915.avail_planes_per_pipe=0x070F00
-
    * - i915.enable_guc
-     - UOS
+     - User VM
      - Disable GuC
      - ::
 
          i915.enable_guc=0
 
    * - i915.enable_hangcheck
-     - UOS
+     - User VM
      - Disable check GPU activity for detecting hangs.
      - ::
 
          i915.enable_hangcheck=0
 
    * - i915.enable_fbc
-     - UOS
+     - User VM
      - Enable frame buffer compression for power savings
      - ::
 
@@ -414,7 +401,7 @@ section below has more details on a few select parameters.
 
 .. _GVT-g-kernel-options:
 
-GVT-g (AcrnGT) Kernel Options details
+GVT-g (AcrnGT) Kernel Options Details
 =====================================
 
 This section provides additional information and details on the kernel command
@@ -425,224 +412,8 @@ i915.enable_gvt
 
 This option enables support for Intel GVT-g graphics virtualization
 support in the host. By default, it's not enabled, so we need to add
-``i915.enable_gvt=1`` in the SOS kernel command line.  This is a Service
-OS only parameter, and cannot be enabled in the User OS.
-
-i915.enable_pvmmio
-------------------
-
-We introduce the feature named **Para-Virtualized MMIO** (PVMMIO)
-to improve graphics performance of the GVT-g guest.
-This feature batches sequential MMIO writes into a
-shared buffer between the Service OS and User OS, and then submits a
-para-virtualized command to notify to GVT-g in Service OS. This
-effectively reduces the trap numbers of MMIO operations and improves
-overall graphics performance.
-
-The ``i915.enable_pvmmio`` option controls
-the optimization levels of the PVMMIO feature: each bit represents a
-sub-feature of the optimization. By default, all
-sub-features of PVMMIO are enabled. They can also be selectively
-enabled or disabled..
-
-The PVMMIO optimization levels are:
-
-* PVMMIO_ELSP_SUBMIT = 0x1 - Batch submission of the guest graphics
-  workloads
-* PVMMIO_PLANE_UPDATE = 0x2 - Batch plane register update operations
-* PVMMIO_PLANE_WM_UPDATE = 0x4 - Batch watermark registers update operations
-* PVMMIO_MASTER_IRQ = 0x8 - Batch IRQ related registers
-* PVMMIO_PPGTT_UPDATE = 0x10 - Use PVMMIO method to update the PPGTT table
-  of guest.
-
-.. note:: This parameter works in both the Service OS and User OS, but
-   changes to one will affect the other. For example, if either SOS or UOS
-   disables the PVMMIO_PPGTT_UPDATE feature, this optimization will be
-   disabled for both.
-
-i915.gvt_workload_priority
---------------------------
-
-AcrnGT supports **Prioritized Rendering** as described in the
-:ref:`GVT-g-prioritized-rendering` high-level design.  This
-configuration option controls the priority level of GVT-g guests.
-Priority levels range from -1023 to 1023.
-
-The default priority is zero, the same priority as the Service OS. If
-the level is less than zero, the guest's priority will be lower than the
-Service OS, so graphics preemption will work and the prioritized
-rendering feature will be enabled.  If the level is greater than zero,
-UOS graphics workloads will preempt most of the SOS graphics workloads,
-except for display updating related workloads that use a default highest
-priority (1023).
-
-Currently, all UOSes share the same priority.
-This is a Service OS only parameters, and does
-not work in the User OS.
-
-.. _i915-enable-initial-modeset:
-
-i915.enable_initial_modeset
----------------------------
-
-At time, kernel graphics must be initialized with a valid display
-configuration with full display pipeline programming in place before the
-user space is initialized and without a fbdev & fb console.
-
-When ``i915.enable_initial_modeset=1``, the FBDEV of i915 will not be
-initialized, so users would not be able to see the fb console on screen.
-If there is no graphics UI running by default, users will see black
-screens displayed.
-
-When ``i915.enable_initial_modeset=0`` in SOS, the plane restriction
-(also known as plane-based domain ownership) feature will be disabled.
-(See the next section and :ref:`plane_restriction` in the ACRN GVT-g
-High Level Design for more information about this feature.)
-
-In the current configuration, we will set
-``i915.enable_initial_modeset=1`` in SOS and
-``i915.enable_initial_modeset=0`` in UOS.
-
-This parameter is not used on UEFI platforms.
-
-.. _i915-avail-planes-owners:
-
-i915.avail_planes_per_pipe and i915.domain_plane_owners
--------------------------------------------------------
-
-Both Service OS and User OS are provided a set of HW planes where they
-can display their contents.  Since each domain provides its content,
-there is no need for any extra composition to be done through SOS.
-``i915.avail_planes_per_pipe`` and ``i915.domain_plane_owners`` work
-together to provide the plane restriction (or plan-based domain
-ownership) feature.
-
-* i915.domain_plane_owners
-
-  On Intel's display hardware, each pipeline contains several planes, which are
-  blended
-  together by their Z-order and rendered to the display monitors. In
-  AcrnGT, we can control each planes' ownership so that the domains can
-  display contents on the planes they own.
-
-  The ``i915.domain_plane_owners`` parameter controls the ownership of all
-  the planes in the system, as shown in :numref:`i915-planes-pipes`. Each
-  4-bit nibble identifies the domain id owner for that plane and a group
-  of 4 nibbles represents a pipe. This is a Service OS only configuration
-  and cannot be modified at runtime.  Domain ID 0x0 is for the Service OS,
-  the User OS use domain IDs from 0x1 to 0xF.
-
-  .. figure:: images/i915-image1.png
-     :width: 900px
-     :align: center
-     :name: i915-planes-pipes
-
-     i915.domain_plane_owners
-
-  For example, if we set ``i915.domain_plane_owners=0x010001101110``, the
-  plane ownership will be as shown in :numref:`i915-planes-example1` - SOS
-  (green) owns plane 1A, 1B, 4B, 1C, and 2C, and UOS #1 owns plane 2A, 3A,
-  4A, 2B, 3B and 3C.
-
-  .. figure:: images/i915-image2.png
-     :width: 900px
-     :align: center
-     :name: i915-planes-example1
-
-     i915.domain_plane_owners example
-
-  Some other examples:
-
-  * i915.domain_plane_owners=0x022211110000 - SOS (0x0) owns planes on pipe A;
-    UOS #1 (0x1) owns all planes on pipe B; and UOS #2 (0x2) owns all
-    planes on pipe C (since, in the representation in
-    :numref:`i915-planes-pipes` above, there are only 3 planes attached to
-    pipe C).
-
-  * i915.domain_plane_owners=0x000001110000 - SOS owns all planes on pipe A
-    and pipe C; UOS #1 owns plane 1, 2 and 3 on pipe B. Plane 4 on pipe B
-    is owned by the SOS so that if it wants to display notice message, it
-    can display on top of the UOS.
-
-* i915.avail_planes_per_pipe
-
-  Option ``i915.avail_planes_per_pipe`` is a bitmask (shown in
-  :numref:`i915-avail-planes`) that tells the i915
-  driver which planes are available and can be exposed to the compositor.
-  This is a parameter that must to be set in each domain. If
-  ``i915.avail_planes_per_pipe=0``, the plane restriction feature is disabled.
-
-  .. figure:: images/i915-image3.png
-     :width: 600px
-     :align: center
-     :name: i915-avail-planes
-
-     i915.avail_planes_per_pipe
-
-  For example, if we set ``i915.avail_planes_per_pipe=0x030901`` in SOS
-  and ``i915.avail_planes_per_pipe=0x04060E`` in UOS, the planes will be as
-  shown in :numref:`i915-avail-planes-example1` and
-  :numref:`i915-avail-planes-example1`:
-
-  .. figure:: images/i915-image4.png
-     :width: 500px
-     :align: center
-     :name: i915-avail-planes-example1
-
-     SOS i915.avail_planes_per_pipe
-
-  .. figure:: images/i915-image5.png
-     :width: 500px
-     :align: center
-     :name: i915-avail-planes-example2
-
-     UOS i915.avail_planes_per_pipe
-
-  ``i915.avail_planes_per_pipe`` controls the view of planes from i915 drivers
-  inside of every domain, and ``i915.domain_plane_owners`` is the global
-  arbiter controlling which domain can present its content onto the
-  real hardware.  Generally, they are aligned. For example, we can set
-  ``i915.domain_plane_owners= 0x011111110000``,
-  ``i915.avail_planes_per_pipe=0x00000F`` in SOS, and
-  ``i915.avail_planes_per_pipe=0x070F00`` in domain 1, so every domain will
-  only flip on the planes they owns.
-
-  However, we don't force alignment: ``avail_planes_per_pipe`` might
-  not be aligned with the
-  setting of ``domain_plane_owners``. Consider this example:
-  ``i915.domain_plane_owners=0x011111110000``,
-  ``i915.avail_planes_per_pipe=0x01010F`` in SOS and
-  ``i915.avail_planes_per_pipe=0x070F00`` in domain 1.
-  With this configuration, SOS will be able to render on plane 1B and
-  plane 1C, however, the content of plane 1B and plane 1C will not be
-  flipped onto the real hardware.
-
-i915.domain_scaler_owner
-========================
-
-On each Intel GPU display pipeline, there are several plane scalers
-to zoom in/out the planes. For example, if a 720p video is played
-full-screen on a 1080p display monitor, the kernel driver will use a
-scaler to zoom in the video plane to a 1080p image and present it onto a
-display pipeline. (Refer to "Intel Open Source Graphics PRM Vol 7:
-display" for the details.)
-
-On Broxton platforms, Pipe A and Pipe B each
-have two plane scalers, and Pipe C has one plane scaler. To support the
-plane scaling in AcrnGT guest OS, we introduced the parameter
-``i915.domain_scaler_owner``, to assign a specific scaler to the target
-guest OS.
-
-As with the parameter ``i915.domain_plane_owners``, each nibble of
-``i915.domain_scaler_owner`` represents the domain id that owns the scaler;
-every nibble (4 bits) represents a scaler and every group of 2 nibbles
-represents a pipe. This is a Service OS only configuration and cannot be
-modified at runtime. Domain ID 0x0 is for the Service OS, the User OS
-use domain IDs from 0x1 to 0xF.
-
-For example, if we set ``i915.domain_scaler_owner=0x021100``, the SOS
-owns scaler 1A, 2A; UOS #1 owns scaler 1B, 2B; and UOS #2 owns scaler
-1C.
+``i915.enable_gvt=1`` in the Service VM kernel command line.  This is a Service
+OS only parameter, and cannot be enabled in the User VM.
 
 i915.enable_hangcheck
 =====================
@@ -651,8 +422,8 @@ This parameter enable detection of a GPU hang. When enabled, the i915
 will start a timer to check if the workload is completed in a specific
 time. If not, i915 will treat it as a GPU hang and trigger a GPU reset.
 
-In AcrnGT, the workload in SOS and UOS can be set to different
-priorities. If SOS is assigned a higher priority than the UOS, the UOS's
+In AcrnGT, the workload in Service VM and User VM can be set to different
+priorities. If Service VM is assigned a higher priority than the User VM, the User VM's
 workload might not be able to run on the HW on time. This may lead to
 the guest i915 triggering a hangcheck and lead to a guest GPU reset.
 This reset is unnecessary so we use ``i915.enable_hangcheck=0`` to

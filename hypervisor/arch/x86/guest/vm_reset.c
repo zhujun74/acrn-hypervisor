@@ -4,30 +4,12 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include <vm.h>
-#include <io.h>
+#include <asm/guest/vm.h>
+#include <asm/io.h>
+#include <asm/host_pm.h>
 #include <logmsg.h>
-#include <per_cpu.h>
-#include <vm_reset.h>
-#include <default_acpi_info.h>
-#include <platform_acpi_info.h>
-
-/* host reset register defined in ACPI */
-static struct acpi_reset_reg host_reset_reg = {
-	.reg = {
-		.space_id = RESET_REGISTER_SPACE_ID,
-		.bit_width = RESET_REGISTER_BIT_WIDTH,
-		.bit_offset = RESET_REGISTER_BIT_OFFSET,
-		.access_size = RESET_REGISTER_ACCESS_SIZE,
-		.address = RESET_REGISTER_ADDRESS,
-	},
-	.val = RESET_REGISTER_VALUE
-};
-
-struct acpi_reset_reg *get_host_reset_reg_data(void)
-{
-	return &host_reset_reg;
-}
+#include <asm/per_cpu.h>
+#include <asm/guest/vm_reset.h>
 
 /**
  * @pre vm != NULL
@@ -40,11 +22,11 @@ void triple_fault_shutdown_vm(struct acrn_vcpu *vcpu)
 		struct io_request *io_req = &vcpu->req;
 
 		/* Device model emulates PM1A for post-launched VMs */
-		io_req->io_type = REQ_PORTIO;
-		io_req->reqs.pio.direction = REQUEST_WRITE;
-		io_req->reqs.pio.address = VIRTUAL_PM1A_CNT_ADDR;
-		io_req->reqs.pio.size = 2ULL;
-		io_req->reqs.pio.value = (VIRTUAL_PM1A_SLP_EN | (5U << 10U));
+		io_req->io_type = ACRN_IOREQ_TYPE_PORTIO;
+		io_req->reqs.pio_request.direction = ACRN_IOREQ_DIR_WRITE;
+		io_req->reqs.pio_request.address = VIRTUAL_PM1A_CNT_ADDR;
+		io_req->reqs.pio_request.size = 2UL;
+		io_req->reqs.pio_request.value = (VIRTUAL_PM1A_SLP_EN | (5U << 10U));
 
 		/* Inject pm1a S5 request to SOS to shut down the guest */
 		(void)emulate_io(vcpu, io_req);
@@ -56,56 +38,24 @@ void triple_fault_shutdown_vm(struct acrn_vcpu *vcpu)
 			for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 				struct acrn_vm *pl_vm = get_vm_from_vmid(vm_id);
 
+				get_vm_lock(pl_vm);
 				if (!is_poweroff_vm(pl_vm) && is_postlaunched_vm(pl_vm) && !is_rt_vm(pl_vm)) {
+					pause_vm(pl_vm);
 					(void)shutdown_vm(pl_vm);
 				}
+				put_vm_lock(pl_vm);
 			}
 		}
 
 		/* Either SOS or pre-launched VMs */
+		get_vm_lock(vm);
+		poweroff_if_rt_vm(vm);
 		pause_vm(vm);
+		put_vm_lock(vm);
 
-		per_cpu(shutdown_vm_id, vcpu->pcpu_id) = vm->vm_id;
-		make_shutdown_vm_request(vcpu->pcpu_id);
-	}
-}
-
-static void reset_host(void)
-{
-	struct acpi_generic_address *gas = &(host_reset_reg.reg);
-
-
-	/* TODO: gracefully shut down all guests before doing host reset. */
-
-	/*
-	 * UEFI more likely sets the reset value as 0x6 (not 0xe) for 0xcf9 port.
-	 * This asserts PLTRST# to reset devices on the platform, but not the
-	 * SLP_S3#/4#/5# signals, which power down the systems. This might not be
-	 * enough for us.
-	 */
-	if ((gas->space_id == SPACE_SYSTEM_IO) &&
-		(gas->bit_width == 8U) && (gas->bit_offset == 0U) &&
-		(gas->address != 0U) && (gas->address != 0xcf9U)) {
-		pio_write8(host_reset_reg.val, (uint16_t)host_reset_reg.reg.address);
-	}
-
-	/*
-	 * Fall back
-	 * making sure bit 2 (RST_CPU) is '0', when the reset command is issued.
-	 */
-	pio_write8(0x2U, 0xcf9U);
-	pio_write8(0xeU, 0xcf9U);
-
-	/*
-	 * Fall back
-	 * keyboard controller might cause the INIT# being asserted,
-	 * and not power cycle the system.
-	 */
-	pio_write8(0xfeU, 0x64U);
-
-	pr_fatal("%s(): can't reset host.", __func__);
-	while (1) {
-		asm_pause();
+		bitmap_set_nolock(vm->vm_id,
+				&per_cpu(shutdown_vm_bitmap, pcpuid_from_vcpu(vcpu)));
+		make_shutdown_vm_request(pcpuid_from_vcpu(vcpu));
 	}
 }
 
@@ -123,11 +73,10 @@ static bool handle_reset_reg_read(struct acrn_vcpu *vcpu, __unused uint16_t addr
 		ret = false;
 	} else {
 		/*
-		 * - keyboard control/status register 0x64: ACRN doesn't expose kbd controller to the guest.
 		 * - reset control register 0xcf9: hide this from guests for now.
 		 * - FADT reset register: the read behavior is not defined in spec, keep it simple to return all '1'.
 		 */
-		vcpu->req.reqs.pio.value = ~0U;
+		vcpu->req.reqs.pio_request.value = ~0U;
 	}
 
 	return ret;
@@ -136,27 +85,42 @@ static bool handle_reset_reg_read(struct acrn_vcpu *vcpu, __unused uint16_t addr
 /**
  * @pre vm != NULL
  */
-static bool handle_common_reset_reg_write(struct acrn_vm *vm, bool reset)
+static bool handle_common_reset_reg_write(struct acrn_vcpu *vcpu, bool reset)
 {
+	struct acrn_vm *vm = vcpu->vm;
 	bool ret = true;
 
-	if (is_highest_severity_vm(vm)) {
-		if (reset) {
-			reset_host();
-		}
-	} else if (is_postlaunched_vm(vm)) {
-		/* re-inject to DM */
-		ret = false;
+	get_vm_lock(vm);
+	if (reset) {
+		poweroff_if_rt_vm(vm);
 
-		if (reset && is_rt_vm(vm)) {
-			vm->state = VM_POWERING_OFF;
+		if (get_highest_severity_vm(true) == vm) {
+			reset_host();
+		} else if (is_postlaunched_vm(vm)) {
+			/* re-inject to DM */
+			ret = false;
+		} else {
+			/*
+			 * If it's SOS reset while RTVM is still alive
+			 *    or pre-launched VM reset,
+			 * ACRN doesn't support re-launch, just shutdown the guest.
+			 */
+			pause_vm(vm);
+			bitmap_set_nolock(vm->vm_id,
+					&per_cpu(shutdown_vm_bitmap, pcpuid_from_vcpu(vcpu)));
+			make_shutdown_vm_request(pcpuid_from_vcpu(vcpu));
 		}
 	} else {
+		if (is_postlaunched_vm(vm)) {
+			/* If post-launched VM write none reset value, re-inject to DM */
+			ret = false;
+		}
 		/*
-		 * ignore writes from SOS or pre-launched VMs.
-		 * equivalent to hide this port from guests.
+		 * Ignore writes from SOS and pre-launched VM.
+		 * Equivalent to hiding this port from the guest.
 		 */
 	}
+	put_vm_lock(vm);
 
 	return ret;
 }
@@ -168,8 +132,21 @@ static bool handle_common_reset_reg_write(struct acrn_vm *vm, bool reset)
 static bool handle_kb_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, size_t bytes, uint32_t val)
 {
 	/* ignore commands other than system reset */
-	return handle_common_reset_reg_write(vcpu->vm, ((bytes == 1U) && (val == 0xfeU)));
+	return handle_common_reset_reg_write(vcpu, ((bytes == 1U) && (val == 0xfeU)));
 }
+
+static bool handle_kb_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t bytes)
+{
+	if (is_sos_vm(vcpu->vm) && (bytes == 1U)) {
+		/* In case i8042 is defined as ACPI PNP device in BIOS, HV need expose physical 0x64 port. */
+		vcpu->req.reqs.pio_request.value = pio_read8(addr);
+	} else {
+		/* ACRN will not expose kbd controller to the guest in this case. */
+		vcpu->req.reqs.pio_request.value = ~0U;
+	}
+	return true;
+}
+
 
 /*
  * Reset Control register at I/O port 0xcf9.
@@ -186,7 +163,7 @@ static bool handle_kb_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, size
 static bool handle_cf9_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, size_t bytes, uint32_t val)
 {
 	/* We don't differentiate among hard/soft/warm/cold reset */
-	return handle_common_reset_reg_write(vcpu->vm,
+	return handle_common_reset_reg_write(vcpu,
 			((bytes == 1U) && ((val & 0x4U) == 0x4U) && ((val & 0xaU) != 0U)));
 }
 
@@ -196,13 +173,13 @@ static bool handle_cf9_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, siz
  */
 static bool handle_reset_reg_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t bytes, uint32_t val)
 {
+	bool ret = true;
+
 	if (bytes == 1U) {
-		if (val == host_reset_reg.val) {
-			if (is_highest_severity_vm(vcpu->vm)) {
-				reset_host();
-			} else {
-				/* ignore reset request */
-			}
+		struct acpi_reset_reg *reset_reg = get_host_reset_reg_data();
+
+		if (val == reset_reg->val) {
+			ret = handle_common_reset_reg_write(vcpu, true);
 		} else {
 			/*
 			 * ACPI defines the reset value but doesn't specify the meaning of other values.
@@ -213,7 +190,7 @@ static bool handle_reset_reg_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t
 		}
 	}
 
-	return true;
+	return ret;
 }
 
 /**
@@ -223,21 +200,21 @@ void register_reset_port_handler(struct acrn_vm *vm)
 {
 	/* Don't support SOS and pre-launched VM re-launch for now. */
 	if (!is_postlaunched_vm(vm) || is_rt_vm(vm)) {
-		struct acpi_generic_address *gas = &(host_reset_reg.reg);
+		struct acpi_reset_reg *reset_reg = get_host_reset_reg_data();
+		struct acrn_acpi_generic_address *gas = &(reset_reg->reg);
 
 		struct vm_io_range io_range = {
 			.len = 1U
 		};
 
 		io_range.base = 0x64U;
-		register_pio_emulation_handler(vm, KB_PIO_IDX, &io_range, handle_reset_reg_read, handle_kb_write);
+		register_pio_emulation_handler(vm, KB_PIO_IDX, &io_range, handle_kb_read, handle_kb_write);
 
+		/* ACPI reset register is fixed at 0xcf9 for post-launched and pre-launched VMs */
 		io_range.base = 0xcf9U;
 		register_pio_emulation_handler(vm, CF9_PIO_IDX, &io_range, handle_reset_reg_read, handle_cf9_write);
 
 		/*
-		 * - pre-launched VMs don't support ACPI;
-		 * - ACPI reset register is fixed at 0xcf9 for post-launched VMs;
 		 * - here is taking care of SOS only:
 		 *   Don't support MMIO or PCI based reset register for now.
 		 *   ACPI Spec: Register_Bit_Width must be 8 and Register_Bit_Offset must be 0.
@@ -247,7 +224,7 @@ void register_reset_port_handler(struct acrn_vm *vm)
 			(gas->bit_width == 8U) && (gas->bit_offset == 0U) &&
 			(gas->address != 0xcf9U) && (gas->address != 0x64U)) {
 
-			io_range.base = (uint16_t)host_reset_reg.reg.address;
+			io_range.base = (uint16_t)reset_reg->reg.address;
 			register_pio_emulation_handler(vm, PIO_RESET_REG_IDX, &io_range,
 					handle_reset_reg_read, handle_reset_reg_write);
 		}
@@ -256,7 +233,17 @@ void register_reset_port_handler(struct acrn_vm *vm)
 
 void shutdown_vm_from_idle(uint16_t pcpu_id)
 {
-	struct acrn_vm *vm = get_vm_from_vmid(per_cpu(shutdown_vm_id, pcpu_id));
+	uint16_t vm_id;
+	uint64_t *vms = &per_cpu(shutdown_vm_bitmap, pcpu_id);
+	struct acrn_vm *vm;
 
-	(void)shutdown_vm(vm);
+	for (vm_id = fls64(*vms); vm_id < CONFIG_MAX_VM_NUM; vm_id = fls64(*vms)) {
+		vm = get_vm_from_vmid(vm_id);
+		get_vm_lock(vm);
+		if (is_paused_vm(vm)) {
+			(void)shutdown_vm(vm);
+		}
+		put_vm_lock(vm);
+		bitmap_clear_nolock(vm_id, vms);
+	}
 }

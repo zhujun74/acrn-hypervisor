@@ -1,41 +1,59 @@
+config SCENARIO
+	string "ACRN scenario"
+	default "industry"
+	help
+	  By specifying SCENARIO name, ACRN will load corresponding VM configurations
+	  to build the hypervisor. Currently ACRN provides four reference scenarios:
+
+	  - industry: Typical scenario for industry usage with 8 VMs: one pre-launched SOS VM,
+	    one post-launched KATA VM, one post-launched RT VM for real-time control,
+	    and up to five post-launched Standard VMs;
+	  - hybrid: Typical scenario for hybrid usage with 3 VMs: one pre-launched Safety VM,
+	    one pre-launched Service VM and one post-launched Standard VM;
+	  - hybrid_rt: Typical scenario for hybrid real-time usage with 4 VMs: one
+	    pre-launched RTVM, one pre-launched Service VM and two post-launched Standard VMs;
+	  - logical_partition: Typical scenario that run two isolated pre-launched VMs
+
+	  Other values are possible if a corresponding scenario has been created
+	  under 'misc/vm_configs/scenarios/' in the source code.
+
+config MULTIBOOT2
+	bool "Multiboot2 support"
+	default y
+	help
+	  Support boot ACRN from multiboot2 protocol. Multiboot2 support is needed for
+	  some EFI platforms to get correct ACPI RSDP, it also could provide host efi
+	  information for hypervisor.
+
 choice
-	prompt "ACRN Scenario"
-	default SDC
+	prompt "ACRN Scheduler"
+	default SCHED_BVT
 	help
-	  Select the scenario name to load corresponding VM configuration.
+	  Select the CPU scheduler to be used by the hypervisor
 
-config SDC
-	bool "Software Defined Cockpit"
+config SCHED_NOOP
+	bool "NOOP scheduler"
 	help
-	  SDC (Software Defined Cockpit) is a typical scenario that ACRN supported.
-	  SDC will have one pre-launched SOS VM and one post-launched VM.
+	  The NOOP (No-Operation) scheduler means there is a strict 1 to 1 mapping
+	  between vCPUs and pCPUs.
 
-config SDC2
-        bool "Software Defined Cockpit 2"
+config SCHED_IORR
+        bool "IORR scheduler"
         help
-          SDC2 (Software Defined Cockpit 2) is an extended scenario for automotive SDC system.
-          SDC2 will have one pre-launched SOS VM and up to three post-launched VM.
+          IORR (IO sensitive Round Robin) scheduler supports multipule vCPUs running on
+	  on one pCPU, and they will be scheduled by a IO sensitive round robin policy.
 
-config LOGICAL_PARTITION
-	bool "Logical Partition VMs"
-	help
-	  This scenario will run two pre-launched VMs.
-
-config INDUSTRY 
-	bool "Industry VMs"
-	help
-	  This scenario is a typical scenario for industry usage with 4 VMs: 
-	  one pre-launched SOS VM, one post-launched Standard VM for HMI, one or two
-	  post-launched  RT VM for real-time control.
-
-config HYBRID
-	bool "Hybrid VMs"
-	help
-	  This scenario is a typical scenario for hybrid usage with 3 VMs:
-	  one pre-launched VM, one pre-launched SOS VM and one post-launched Standard
-	  VM.
+config SCHED_BVT
+        bool "BVT scheduler"
+        help
+	  BVT (Borrowed Virtual time) is virtual time based scheduling algorithm, it
+	  dispatching the runnable thread with the earliest effective virtual time.
+	  TODO: BVT scheduler will be built on top of prioritized scheduling mechanism,
+	  i.e. higher priority threads get scheduled first, and same priority tasks are
+	  scheduled per BVT.
 
 endchoice
+
 
 config BOARD
 	string "Target board"
@@ -45,7 +63,7 @@ config BOARD
 config DEFCONFIG_LIST
 	string
 	option defconfig_list
-	default "arch/x86/configs/$BOARD.config"
+	default "../misc/vm_configs/scenarios/$SCENARIO/$(BOARD)/$BOARD.config"
 
 config RELEASE
 	bool "Release build"
@@ -55,19 +73,6 @@ config RELEASE
 	  console and hypervisor shell are available only in non-release
 	  (i.e. debug) builds. Assertions are not effective in release builds.
 
-config MAX_VCPUS_PER_VM
-	int "Maximum number of VCPUs per VM"
-	range 1 8
-	default 8
-	help
-	  The maximum number of virtual CPUs the hypervisor can support in a
-	  single VM.
-
-config MAX_PCPU_NUM
-	int "Maximum number of PCPU"
-	range 1 8
-	default 8
-
 config MAX_EMULATED_MMIO_REGIONS
 	int "Maximum number of emulated MMIO regions"
 	range 0 128
@@ -75,15 +80,8 @@ config MAX_EMULATED_MMIO_REGIONS
 
 config MAX_PT_IRQ_ENTRIES
 	int "Maximum number of interrupt source for PT devices"
-	range 0 128
+	range 0 256
 	default 64
-
-config MAX_IOMMU_NUM
-	int "Maximum number of IOMMU devices"
-	range 1 6
-	default 2
-	help
-	  The maximum number of physical IOMMUs the hypervisor can support.
 
 config STACK_SIZE
 	hex "Capacity of one stack, in bytes"
@@ -128,14 +126,20 @@ config SERIAL_LEGACY
 	  Select this if the serial port shall be accessed via legacy port in/out
 	  instructions.
 
+config SERIAL_MMIO
+	bool "MMIO"
+	help
+	  Select this if the serial port shall be accessed via MMIO registers.
+
 endchoice
 
 config SERIAL_PCI_BDF
-	string "BDF of serial PCI device"
+	hex "BDF of serial PCI device"
 	depends on SERIAL_PCI
-	default "0:18.2"
+	default 0x00c2
 	help
-	  BDF: bus, device and function of the serial PCI device; for an example,
+	  BDF: bus, device and function of the serial PCI device. The BDF is packed
+	  into a 16bit WORD with format (B:8, D:5, F:3). For an example,
 	  PCI device ttyS2: 0:18.2.
 
 config SERIAL_PIO_BASE
@@ -146,19 +150,12 @@ config SERIAL_PIO_BASE
 	  The base address of the serial ports. This is logically 16-bit but used
 	  as a 64-bit integer.
 
-config COM_BASE
-	hex "Base address of the vuart port"
-	default 0 if RELEASE
-	default 0x3f8 if !RELEASE
+config SERIAL_MMIO_BASE
+	hex "Base address of MMIO UART"
+	depends on SERIAL_MMIO
+	default 0xfe040000
 	help
-	  Base address of the vuart port.
-
-config COM_IRQ
-	int "IRQ of the vuart port"
-	default 0 if RELEASE
-	default 4 if !RELEASE
-	help
-	  IRQ of the vuart port.
+	  The base address of the MMIO serial port.
 
 config CONSOLE_LOGLEVEL_DEFAULT
 	int "Default loglevel on the serial console"
@@ -191,6 +188,7 @@ config NPK_LOGLEVEL_DEFAULT
 
 config LOW_RAM_SIZE
 	hex "Size of the low RAM region"
+	range 0 0x10000
 	default 0x00010000
 	help
 	  A 32-bit integer indicating the size of RAM region below address
@@ -198,12 +196,14 @@ config LOW_RAM_SIZE
 
 config HV_RAM_START
 	hex "2M-aligned Start physical address of the RAM region used by the hypervisor"
-	default 0x00400000
+	range 0x200000 0x80000000
+	default 0x10000000
 	help
 	  A 64-bit integer indicating the base physical address where the
 	  hypervisor should be loaded. If RELOC is disabled, the bootloader
 	  is required to load the hypervisor to this specific address.
 	  Otherwise the hypervisor will not boot. With RELOC enabled the
+	  address will be referred as the lowest possible address that hypervisor be loaded,
 	  hypervisor may relocate its symbols to where it is placed,
 	  and thus the bootloader might not place the hypervisor at this
 	  specific address.
@@ -212,7 +212,8 @@ config HV_RAM_START
 
 config HV_RAM_SIZE
 	hex "Size of the RAM region used by the hypervisor"
-	default 0x0b800000
+	range 0x800000 0x4000000
+	default 0x800000
 	help
 	  A 64-bit integer indicating the size of RAM used by the hypervisor.
 	  It is ensured at link time that the footprint of the hypervisor
@@ -220,30 +221,53 @@ config HV_RAM_SIZE
 
 config PLATFORM_RAM_SIZE
 	hex "Size of the physical platform RAM"
+	range 0x100000000 0x4000000000
 	default 0x400000000
 	help
 	  A 64-bit integer indicating the size of the physical platform RAM
 	  (MMIO not included).
 
-config SOS_RAM_SIZE
-	hex "Size of the Service OS (SOS) RAM"
-	default 0x400000000
-	help
-	  A 64-bit integer indicating the size of the Service OS RAM (MMIO not
-	  included).
-
- config UOS_RAM_SIZE
-	hex "Size of the User OS (UOS) RAM"
-	default 0x200000000
-	help
-	  A 64-bit integer indicating the size of the User OS RAM (MMIO not
-	  included). Now we assume each UOS uses same amount of RAM size.
-
 config ACPI_PARSE_ENABLED
 	bool "Enable ACPI runtime parsing"
 	default y
 	help
-	  Whether to parse the ACPI tables at runtime.
+	  Platform specific ACPI info may be retrieved thru boot-time parse
+	  of ACPI table, or thru parse of off-line tool. This option enables
+	  the boot-time parse of ACPI table, and overwrite the information
+	  from off-line tool.
+
+config HYPERV_ENABLED
+	bool "Enable Hyper-V enlightenment"
+	default y
+	help
+	  When set, the minimum set of TLFS functionality together with some
+	  performance enlightenments are enabled.
+
+config RDT_ENABLED
+	bool "Enable RDT (Resource Director Technology)"
+	default n
+	help
+	  When set in platforms that support RDT, hypervisor can allocate
+	  various amount of HW resources such as L2 or/and L3 to VMs to achieve
+	  different Class of Service (COS, or CLOS).
+
+config CDP_ENABLED
+	bool "Enable CDP (Code and Data Prioritization)"
+	depends on RDT_ENABLED
+	default n
+	help
+	  CDP is an extension of CAT. It enables isolation and separate
+	  prioritization of code and data fetches to the L2 or L3 cache in a
+	  software configurable manner, depending on hardware support.
+
+config SSRAM_ENABLED
+	bool "Enable Software SRAM support"
+	depends on !CDP_ENABLED
+	default n
+	help
+	  This will enable RTVM to make use of Software SRAM to improve the performance
+	  of Real-Time applications. Software SRAM essentially a block of cache, and is separated via
+	  CAT and protected by some methods.  Software SRAM support and CDP support cannot co-exist.
 
 config GPU_SBDF
 	hex "Segment, Bus, Device, and function of the GPU"
@@ -267,7 +291,7 @@ config RELOC
 
 config MAX_IOAPIC_NUM
 	int "Maximum number of IO-APICs"
-	range 1 8
+	range 1 10
 	default 1
 
 config MAX_IOAPIC_LINES
@@ -277,6 +301,7 @@ config MAX_IOAPIC_LINES
 
 config MAX_IR_ENTRIES
 	int "Maximum number of Interrupt Remapping Entries"
+	range 256 512
 	default 256
 	help
 	  Minimum value is 256. Value must be 2^n.
@@ -296,22 +321,32 @@ config MAX_PCI_DEV_NUM
 config MAX_MSIX_TABLE_NUM
 	int "Maximum number of MSI-X tables per device"
 	range 1 2048
-	default 16
-
-config ENFORCE_VALIDATED_ACPI_INFO
-	bool "Enforce the use of validated ACPI info table"
-	default n
-	help
-	  When set, the use of validated ACPI info tables is enforced and using
-	  an offline tool to generate such data is required. Otherwise a
-	  warning will be printed when validated ACPI info is unavailable, but
-	  a binary can still be built with the ACPI info template.
+	default 64
 
 config L1D_FLUSH_VMENTRY_ENABLED
 	bool "Enable L1 cache flush before VM entry"
 	default n
 
-config MAX_KATA_VM_NUM
-	int "Maximum number of Kata Containers in SOS"
-	range 0 1
-	default 0
+config MCE_ON_PSC_WORKAROUND_DISABLED
+	bool "Force to disable software workaround for Machine Check Error on Page Size Change"
+	default n
+	help
+	  By default, software workaround for Machine Check Error on Page Size Change is
+	  conditionally applied to the models that may be affected by the issue. However,
+	  the software workaround has negative impact on performance. If all the guest OS
+	  kernels are trusted, this option may be set for performance.
+
+config ENFORCE_TURNOFF_AC
+	bool "Force to disable #AC for Split-locked Access"
+	default n
+	help
+	  If CPU has #AC for split-locked access, HV enable it and VMs can't disable.
+	  Set this to enforce turn off that #AC, for community developer only.
+
+config IVSHMEM_ENABLED
+	bool "Enable ivshmem inter-vm communication based on hypervisor shared memory"
+	default n
+	help
+	  Ivshmem shared memory is located in the hypervisor, it can provide multiple
+	  memory regions as communication channels between pre-launched or post-launched
+	  VMs.

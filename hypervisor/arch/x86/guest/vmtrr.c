@@ -4,12 +4,12 @@
  */
 
 #include <types.h>
-#include <vmtrr.h>
-#include <msr.h>
-#include <pgtable.h>
-#include <ept.h>
-#include <vcpu.h>
-#include <vm.h>
+#include <asm/guest/vmtrr.h>
+#include <asm/msr.h>
+#include <asm/pgtable.h>
+#include <asm/guest/ept.h>
+#include <asm/guest/vcpu.h>
+#include <asm/guest/vm.h>
 #include <logmsg.h>
 
 #define MTRR_FIXED_RANGE_ALL_WB (MTRR_MEM_TYPE_WB \
@@ -42,6 +42,11 @@ static struct fixed_range_mtrr_maps fixed_mtrr_map[FIXED_RANGE_MTRR_NUM] = {
 	{ MSR_IA32_MTRR_FIX4K_F0000, 0xF0000U, 0x1000U },
 	{ MSR_IA32_MTRR_FIX4K_F8000, 0xF8000U, 0x1000U },
 };
+
+static inline struct acrn_vcpu *vmtrr2vcpu(const struct acrn_vmtrr *vmtrr)
+{
+	return container_of(container_of(vmtrr, struct acrn_vcpu_arch, vmtrr), struct acrn_vcpu, arch);
+}
 
 static uint32_t get_index_of_fixed_mtrr(uint32_t msr)
 {
@@ -92,8 +97,6 @@ void init_vmtrr(struct acrn_vcpu *vcpu)
 	union mtrr_cap_reg cap = {0};
 	uint32_t i;
 
-	vmtrr->vcpu = vcpu;
-
 	/*
 	 * We emulate fixed range MTRRs only
 	 * And expecting the guests won't write variable MTRRs
@@ -127,7 +130,7 @@ void init_vmtrr(struct acrn_vcpu *vcpu)
 			vmtrr->fixed_range[i].value = MTRR_FIXED_RANGE_ALL_WB;
 		}
 
-		pr_dbg("vm%d vcpu%hu fixed-range MTRR[%u]: %16llx",
+		pr_dbg("vm%d vcpu%hu fixed-range MTRR[%u]: %16lx",
 			vcpu->vm->vm_id, vcpu->vcpu_id, i,
 			vmtrr->fixed_range[i].value);
 	}
@@ -165,6 +168,7 @@ static void update_ept_mem_type(const struct acrn_vmtrr *vmtrr)
 	uint8_t type;
 	uint64_t start, size;
 	uint32_t i, j;
+	struct acrn_vm *vm = vmtrr2vcpu(vmtrr)->vm;
 
 	/*
 	 * Intel SDM, Vol 3, 11.11.2.1 Section "IA32_MTRR_DEF_TYPE MSR":
@@ -172,7 +176,7 @@ static void update_ept_mem_type(const struct acrn_vmtrr *vmtrr)
 	 * - when def_type.FE is clear, MTRRdefType.type is applied
 	 */
 	if (!is_mtrr_enabled(vmtrr) || !is_fixed_range_mtrr_enabled(vmtrr)) {
-		update_ept(vmtrr->vcpu->vm, 0U, MAX_FIXED_RANGE_ADDR, get_default_memory_type(vmtrr));
+		update_ept(vm, 0U, MAX_FIXED_RANGE_ADDR, get_default_memory_type(vmtrr));
 	} else {
 		/* Deal with fixed-range MTRRs only */
 		for (i = 0U; i < FIXED_RANGE_MTRR_NUM; i++) {
@@ -185,14 +189,14 @@ static void update_ept_mem_type(const struct acrn_vmtrr *vmtrr)
 				if (type == vmtrr->fixed_range[i].type[j]) {
 					size += get_subrange_size_of_fixed_mtrr(i);
 				} else {
-					update_ept(vmtrr->vcpu->vm, start, size, type);
+					update_ept(vm, start, size, type);
 					type = vmtrr->fixed_range[i].type[j];
 					start = get_subrange_start_of_fixed_mtrr(i, j);
 					size = get_subrange_size_of_fixed_mtrr(i);
 				}
 			}
 
-			update_ept(vmtrr->vcpu->vm, start, size, type);
+			update_ept(vm, start, size, type);
 		}
 	}
 }

@@ -20,6 +20,7 @@ SECTIONS
     .entry :
     {
         KEEP(*(entry)) ;
+	ld_entry_end = . ;
 
     } > ram
 
@@ -68,6 +69,14 @@ SECTIONS
         *(.sdata)
         *(.gnu.linkonce.d*)
 
+    } > ram
+
+    .boot_stack :
+    {
+    /* 4K for the boot stack */
+        . += 4096;
+        stack_for_boot = .;
+        . = ALIGN(4);
     } > ram
 
     .bss_noinit (NOLOAD):

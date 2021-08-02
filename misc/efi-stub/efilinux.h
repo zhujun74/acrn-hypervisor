@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Intel Corporation
+ * Copyright (c) 2011 - 2021, Intel Corporation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -51,9 +51,11 @@
 
 extern EFI_SYSTEM_TABLE *sys_table;
 extern EFI_BOOT_SERVICES *boot;
+extern EFI_RUNTIME_SERVICES *runtime;
 
 extern EFI_STATUS
-emalloc_reserved_aligned(EFI_PHYSICAL_ADDRESS *addr, UINTN size, UINTN align, EFI_PHYSICAL_ADDRESS maxaddr);
+emalloc_reserved_aligned(EFI_PHYSICAL_ADDRESS *addr, UINTN size, UINTN align,
+		EFI_PHYSICAL_ADDRESS minaddr, EFI_PHYSICAL_ADDRESS maxaddr);
 
 /**
  * allocate_pages - Allocate memory pages from the system
@@ -220,6 +222,16 @@ static inline EFI_STATUS emalloc_fixed_addr(EFI_PHYSICAL_ADDRESS *addr,
 	*addr = fixed_addr;
 	return allocate_pages(AllocateAddress, EfiReservedMemoryType,
 		EFI_SIZE_TO_PAGES(size), addr);
+}
+
+static inline EFI_STATUS get_variable(const CHAR16 *name, EFI_GUID *guid, UINT32 *attrs, UINTN *size, void *data)
+{
+	return uefi_call_wrapper(runtime->GetVariable, 5, name, guid, attrs, size, data);
+}
+
+static inline EFI_STATUS set_variable(const CHAR16 *name, EFI_GUID *guid, UINT32 attrs, UINTN size, void *data)
+{
+	return uefi_call_wrapper(runtime->SetVariable, 5, name, guid, attrs, size, data);
 }
 
 /**

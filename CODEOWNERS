@@ -12,9 +12,19 @@
 # Default/global reviewers (if not overridden later)
 *                                        @anthonyzxu @dongyaozu
 
+Makefile                                 @terryzouhao @NanlinXie
 /hypervisor/                             @anthonyzxu @dongyaozu
-/devicemodel/                            @anthonyzxu @dongyaozu
-/doc/                                    @dbkinder @deb-intel
-/tools/acrn-crashlog/                    @dizhang417 @chengangc
+/devicemodel/                            @anthonyzxu @ywan170
+/doc/                                    @dbkinder @fitchbe @NanlinXie
+/misc/debug_tools/acrn_crashlog/         @chengangc @dizhang417
+/misc/debug_tools/acrn_log/              @ywan170 @shuox
+/misc/debug_tools/acrn_trace/            @ywan170 @shuox
+/misc/services/acrn_manager/             @ywan170 @shuox
+/misc/services/acrn_bridge/              @ywan170 @shuox
+/misc/services/life_mngr/                @ywan170 @shuox
+/misc/config_tools/                      @terryzouhao @NanlinXie
+/misc/Makefile                           @terryzouhao @NanlinXie
+/misc/packaging/                         @terryzouhao @NanlinXie
+/misc/hv_prebuild/                       @terryzouhao @NanlinXie
 
-*.rst                                    @dbkinder @deb-intel
+*.rst                                    @dbkinder @fitchbe @NanlinXie

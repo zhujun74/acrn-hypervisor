@@ -1,5 +1,3 @@
-:orphan:
-
 .. _glossary:
 
 Glossary of Terms
@@ -86,6 +84,11 @@ Glossary of Terms
    High GM
       See :term:`Hidden GM`
 
+   Hybrid Mode
+      One of three operation modes (hybrid, partition, sharing) that ACRN supports.
+      In this mixed mode, physical hardware resources can be both partitioned to
+      individual user VMs and shared across user VMs.
+
    I2C
       Inter-Integrated Circuit
 
@@ -119,10 +122,14 @@ Glossary of Terms
    OSPM
       Operating System Power Management
 
-   Pass-Through Device
+   Passthrough Device
       Physical devices (typically PCI) exclusively assigned to a guest.  In
-      the Project ACRN architecture, pass-through devices are owned by the
+      the Project ACRN architecture, passthrough devices are owned by the
       foreground OS.
+
+   Partition Mode
+      One of three operation modes (partition, sharing, hybrid) that ACRN supports.
+      Physical hardware resources are partitioned to individual user VMs.
 
    PCI
       Peripheral Component Interface.
@@ -137,7 +144,7 @@ Glossary of Terms
       Pre-launched VMs are started by the ACRN hypervisor before the
       Service VM is launched. (See :term:`Post-launched VM`)
 
-   Post-Launched VM
+   Post-launched VM
       Post-Launched VMs are launched and configured by the Service VM.
       (See :term:`Pre-launched VM`)
 
@@ -158,14 +165,20 @@ Glossary of Terms
    RSE
       Rear Seat Entertainment
 
+   RDT
+      Intel Resource Director Technology (Intel RDT) provides a set of
+      monitoring and allocation capabilities to control resources such as
+      Cache and Memory. ACRN supports Cache Allocation Technology (CAT) and
+      Memory Bandwidth Allocation (MBA).
+
    RTVM
-      Real-time VM.  A specially designed VM to run hard real-time or
-      soft real-time workloads (or application) much more efficiently
-      than the typical User VM through the use of pass-through interrupt
-      controller, polling-mode Virtio, Intel Cache Allocation Technology (CAT)
-      and I/O prioritization.  RTVMs are typically a :term:`pre-launched VM`.
-      A non-:term:`safety VM` with real-time requirements can a
-      :term:`post-launched VM`.
+      Real-time VM. A specially-designed VM that can run hard real-time or
+      soft real-time workloads (or applications) much more efficiently
+      than the typical User VM through the use of a passthrough interrupt
+      controller, polling-mode Virtio, Intel RDT allocation features (CAT,
+      MBA), and I/O prioritization.  RTVMs are typically a :term:`Pre-launched VM`.
+      A non-:term:`Safety VM` with real-time requirements is a
+      :term:`Post-launched VM`.
 
    Safety VM
       A special VM with dedicated hardware resources, running in
@@ -179,6 +192,10 @@ Glossary of Terms
       The Service VM is generally the first VM launched by ACRN and can
       access hardware resources directly by running native drivers and
       provides device sharing services to User VMs via the Device Model.
+
+   Sharing Mode
+      One of three operation modes (sharing, hybrid, partition) that ACRN supports.
+      Most of the physical hardware resources are shared across user VMs.
 
    SOS
       Obsolete, see :term:`Service VM`
@@ -205,8 +222,8 @@ Glossary of Terms
    vGPU
       Virtual GPU Instance, created by GVT-g and used by a VM
 
-   VHM
-      Virtio and Hypervisor Service Module
+   HSM
+      Hypervisor Service Module
 
    Virtio-BE
       Back-End, VirtIO framework provides front-end driver and back-end driver

@@ -6,18 +6,17 @@
 
 #include <types.h>
 #include <errno.h>
-#include <spinlock.h>
-#include <cpu.h>
-#include <msr.h>
-#include <cpuid.h>
-#include <ucode.h>
-#include <guest_memory.h>
-#include <irq.h>
+#include <asm/lib/spinlock.h>
+#include <asm/cpu.h>
+#include <asm/msr.h>
+#include <asm/cpuid.h>
+#include <asm/guest/ucode.h>
+#include <asm/guest/guest_memory.h>
+#include <asm/guest/virq.h>
 #include <logmsg.h>
 
 #define MICRO_CODE_SIZE_MAX    0x40000U
 static uint8_t micro_code[MICRO_CODE_SIZE_MAX];
-static spinlock_t micro_code_lock = { .head = 0U, .tail = 0U };
 
 uint64_t get_microcode_version(void)
 {
@@ -25,7 +24,7 @@ uint64_t get_microcode_version(void)
 	uint32_t eax, ebx, ecx, edx;
 
 	msr_write(MSR_IA32_BIOS_SIGN_ID, 0U);
-	cpuid(CPUID_FEATURES, &eax, &ebx, &ecx, &edx);
+	cpuid_subleaf(CPUID_FEATURES, 0x0U, &eax, &ebx, &ecx, &edx);
 	val = msr_read(MSR_IA32_BIOS_SIGN_ID);
 
 	return val;
@@ -40,6 +39,9 @@ static inline size_t get_ucode_data_size(const struct ucode_header *uhdr)
 	return ((uhdr->data_size != 0U) ? uhdr->data_size : 2000U);
 }
 
+/* the guest operating system should guarantee it won't issue 2nd micro code update
+ * when the 1st micro code update is on-going.
+ */
 void acrn_update_ucode(struct acrn_vcpu *vcpu, uint64_t v)
 {
 	uint64_t gva, fault_addr = 0UL;
@@ -48,7 +50,6 @@ void acrn_update_ucode(struct acrn_vcpu *vcpu, uint64_t v)
 	int32_t err;
 	uint32_t err_code;
 
-	spinlock_obtain(&micro_code_lock);
 	gva = v - sizeof(struct ucode_header);
 
 	err_code = 0U;
@@ -78,5 +79,4 @@ void acrn_update_ucode(struct acrn_vcpu *vcpu, uint64_t v)
 			}
 		}
 	}
-	spinlock_release(&micro_code_lock);
 }

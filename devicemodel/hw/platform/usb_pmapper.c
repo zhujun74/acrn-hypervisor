@@ -18,7 +18,6 @@
 #define LOG_TAG "USBPM: "
 
 static struct usb_dev_sys_ctx_info g_ctx;
-static uint8_t usb_dev_get_ep_type(struct usb_dev *udev, int pid, int epnum);
 static uint16_t usb_dev_get_ep_maxp(struct usb_dev *udev, int pid, int epnum);
 
 static bool
@@ -168,12 +167,11 @@ static void
 usb_dev_comp_cb(struct libusb_transfer *trn)
 {
 	struct usb_dev_req *r;
-	struct usb_data_xfer *xfer;
-	struct usb_data_xfer_block *block;
+	struct usb_xfer *xfer;
+	struct usb_block *block;
 	struct usb_native_devinfo *info;
 	int do_intr = 0;
-	int i, j, idx, buf_idx, done;
-	int bstart, bcount;
+	int i, idx, buf_idx, done;
 	int is_stalled = 0;
 	int framelen = 0;
 	uint16_t maxp;
@@ -196,16 +194,12 @@ usb_dev_comp_cb(struct libusb_transfer *trn)
 		framelen = USB_EP_MAXP_SZ(maxp) * (1 + USB_EP_MAXP_MT(maxp));
 		UPRINTF(LDBG, "iso maxp %u framelen %d\r\n", maxp, framelen);
 	}
-	bstart = r->blk_start;
-	bcount = r->blk_count;
 	UPRINTF(LDBG, "%s: %d-%s: actlen %d ep%d-xfr [%d-%d %d] rq-%d "
 			"[%d-%d %d] st %d\r\n", __func__, info->path.bus,
 			usb_dev_path(&info->path), trn->actual_length,
-			xfer->epid, xfer->head,
-			(xfer->tail - 1) % USB_MAX_XFER_BLOCKS,
-			xfer->ndata, r->seq, bstart,
-			(bstart + bcount - 1) % USB_MAX_XFER_BLOCKS,
-			r->buf_length, trn->status);
+			xfer->epid, xfer->head, xfer->tail, xfer->ndata,
+			r->seq, r->blk_head, r->blk_tail, r->buf_size,
+			trn->status);
 
 	/* lock for protecting the transfer */
 	xfer->status = USB_ERR_NORMAL_COMPLETION;
@@ -220,6 +214,14 @@ usb_dev_comp_cb(struct libusb_transfer *trn)
 		xfer->status = USB_ERR_SHORT_XFER;
 		goto out;
 	case LIBUSB_TRANSFER_ERROR:
+		/*
+		 * If this error happened due to device disconnecting, there is
+		 * nothing should do and just wait usb_dev_native_sys_disconn_cb
+		 * to do the 'unplugging process'.
+		 */
+		if (usb_native_is_device_existed(&info->path) == 0)
+			goto cancel_out;
+
 		is_stalled = 1;
 		xfer->status = USB_ERR_STALLED;
 		goto stall_out;
@@ -246,35 +248,33 @@ usb_dev_comp_cb(struct libusb_transfer *trn)
 				trn->iso_packet_desc[i].actual_length);
 
 	/* handle the blocks belong to this request */
-	i = j = 0;
-	buf_idx = 0;
-	idx = r->blk_start;
+	i = 0;
 	buf = r->buffer;
+	idx = r->blk_head;
+	buf_idx = 0;
 	done = trn->actual_length;
 
-	while (i < r->blk_count) {
-
+	while (index_valid(r->blk_head, r->blk_tail, xfer->max_blk_cnt, idx)) {
 		if (trn->type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
 			buf_idx = 0;
-			buf = libusb_get_iso_packet_buffer_simple(trn, j);
-			done = trn->iso_packet_desc[j].actual_length;
-			j++;
+			buf = libusb_get_iso_packet_buffer_simple(trn, i);
+			done = trn->iso_packet_desc[i].actual_length;
+			i++;
 		}
 		do {
 			int d;
 
-			if (i >= r->blk_count)
-				break;
-
-			block = &xfer->data[idx % USB_MAX_XFER_BLOCKS];
-			if (block->processed == USB_XFER_BLK_FREE)
+			block = &xfer->data[idx];
+			if (block->stat == USB_BLOCK_FREE &&
+					block->type != USB_DATA_NONE)
 				UPRINTF(LFTL, "error: found free block\r\n");
 
 			d = done;
 			if (d > block->blen)
 				d = block->blen;
 
-			if (block->buf) {
+			if (block->type == USB_DATA_PART ||
+					block->type == USB_DATA_FULL) {
 				if (r->in == TOKEN_IN) {
 					memcpy(block->buf, buf + buf_idx, d);
 					buf_idx += d;
@@ -282,24 +282,25 @@ usb_dev_comp_cb(struct libusb_transfer *trn)
 			} else {
 				/* Link TRB */
 				i--;
-				j--;
 			}
 
 			done -= d;
 			block->blen -= d;
 			block->bdone = d;
-			block->processed = USB_XFER_BLK_HANDLED;
-			idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-			i++;
+			block->stat = USB_BLOCK_HANDLED;
+			idx = index_inc(idx, xfer->max_blk_cnt);
 
-		} while (block->chained == 1);
+		} while (block->type == USB_DATA_PART);
 	}
 
 stall_out:
 	if (is_stalled) {
-		for (i = 0, idx = r->blk_start; i < r->blk_count; ++i) {
-			block = &xfer->data[idx % USB_MAX_XFER_BLOCKS];
-			block->processed = USB_XFER_BLK_HANDLED;
+		idx = r->blk_head;
+		while (index_valid(r->blk_head, r->blk_tail,
+					xfer->max_blk_cnt, idx)) {
+			block = &xfer->data[idx];
+			block->stat = USB_BLOCK_HANDLED;
+			idx = index_inc(idx, xfer->max_blk_cnt);
 		}
 	}
 
@@ -319,14 +320,14 @@ cancel_out:
 	if (r && r->buffer)
 		free(r->buffer);
 
-	xfer->requests[r->blk_start] = NULL;
+	xfer->reqs[r->blk_head] = NULL;
 	free(r);
 free_transfer:
 	libusb_free_transfer(trn);
 }
 
 static struct usb_dev_req *
-usb_dev_alloc_req(struct usb_dev *udev, struct usb_data_xfer *xfer, int in,
+usb_dev_alloc_req(struct usb_dev *udev, struct usb_xfer *xfer, int in,
 		size_t size, size_t count)
 {
 	struct usb_dev_req *req;
@@ -366,52 +367,44 @@ errout:
 }
 
 static int
-usb_dev_prepare_xfer(struct usb_data_xfer *xfer, int *count, int *size)
+usb_dev_prepare_xfer(struct usb_xfer *xfer, int *head, int *tail)
 {
-	int found, i, idx, c, s, first;
-	struct usb_data_xfer_block *block = NULL;
+	int i, idx, size, first;
+	struct usb_block *block = NULL;
 
 	idx = xfer->head;
-	found = 0;
 	first = -1;
-	c = s = 0;
-	if (!count || !size || idx < 0 || idx >= USB_MAX_XFER_BLOCKS)
+	size = 0;
+	if (idx < 0 || idx >= xfer->max_blk_cnt)
 		return -1;
 
-	for (i = 0; i < xfer->ndata; i++) {
+	for (i = 0; i < xfer->ndata;
+		i++, idx = index_inc(idx, xfer->max_blk_cnt)) {
 		block = &xfer->data[idx];
+		if (block->stat == USB_BLOCK_HANDLED ||
+				block->stat == USB_BLOCK_HANDLING)
+			continue;
 
-		if (block->processed == USB_XFER_BLK_HANDLED ||
-				block->processed == USB_XFER_BLK_HANDLING) {
-			idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
+		first = (first < 0) ? idx : first;
+
+		switch (block->type) {
+		case USB_DATA_PART:
+		case USB_DATA_FULL:
+			size += block->blen;
+			block->stat = USB_BLOCK_HANDLING;
+			break;
+		case USB_DATA_NONE:
+			block->stat = USB_BLOCK_HANDLED;
 			continue;
+		default:
+			UPRINTF(LFTL, "%s error stat %d\r\n",
+					__func__, block->type);
 		}
-		if (block->buf && block->blen > 0) {
-			if (!found) {
-				found = 1;
-				first = idx;
-			}
-			c++;
-			s += block->blen;
-		} else if (!block->buf || !block->blen) {
-			/* there are two cases:
-			 * 1. LINK trb is in the middle of trbs.
-			 * 2. LINK trb is a single trb.
-			 */
-			block->processed = USB_XFER_BLK_HANDLED;
-			idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-			continue;
-		} else if (found) {
-			UPRINTF(LWRN, "find a NULL data. %d total %d\n",
-				i, xfer->ndata);
-		}
-		block->processed = USB_XFER_BLK_HANDLING;
-		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
 	}
 
-	*count = c;
-	*size = s;
-	return first;
+	*head = first;
+	*tail = xfer->tail;
+	return size;
 }
 
 static inline int
@@ -626,7 +619,7 @@ usb_dev_native_toggle_if_drivers(struct usb_dev *udev, int attach)
 }
 
 static void
-usb_dev_set_config(struct usb_dev *udev, struct usb_data_xfer *xfer, int config)
+usb_dev_set_config(struct usb_dev *udev, struct usb_xfer *xfer, int config)
 {
 	int rc = 0;
 	struct libusb_config_descriptor *cfg;
@@ -676,7 +669,7 @@ err2:
 }
 
 static void
-usb_dev_set_if(struct usb_dev *udev, int iface, int alt, struct usb_data_xfer
+usb_dev_set_if(struct usb_dev *udev, int iface, int alt, struct usb_xfer
 		*xfer)
 {
 	if (iface >= USB_NUM_INTERFACE)
@@ -706,29 +699,29 @@ errout:
 			alt);
 }
 
-static struct usb_data_xfer_block *
-usb_dev_prepare_ctrl_xfer(struct usb_data_xfer *xfer)
+static struct usb_block *
+usb_dev_prepare_ctrl_xfer(struct usb_xfer *xfer)
 {
 	int i, idx;
-	struct usb_data_xfer_block *ret = NULL;
-	struct usb_data_xfer_block *blk = NULL;
+	struct usb_block *ret = NULL;
+	struct usb_block *blk = NULL;
 
 	idx = xfer->head;
 
-	if (idx < 0 || idx >= USB_MAX_XFER_BLOCKS)
+	if (idx < 0 || idx >= xfer->max_blk_cnt)
 		return NULL;
 
 	for (i = 0; i < xfer->ndata; i++) {
 		/*
 		 * find out the data block and set every
-		 * block to be processed
+		 * block to be USB_BLOCK_HANDLED
 		 */
 		blk = &xfer->data[idx];
 		if (blk->blen > 0 && !ret)
 			ret = blk;
 
-		blk->processed = USB_XFER_BLK_HANDLED;
-		idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
+		blk->stat = USB_BLOCK_HANDLED;
+		idx = index_inc(idx, xfer->max_blk_cnt);
 	}
 	return ret;
 }
@@ -737,6 +730,7 @@ int
 usb_dev_reset(void *pdata)
 {
 	struct usb_dev *udev;
+	int rc = 0;
 
 	udev = pdata;
 
@@ -744,20 +738,24 @@ usb_dev_reset(void *pdata)
 	libusb_reset_device(udev->handle);
 	usb_dev_reset_ep(udev);
 	usb_dev_update_ep(udev);
-	return 0;
+	rc = libusb_reset_device(udev->handle);
+	if (!rc) {
+		usb_dev_reset_ep(udev);
+		usb_dev_update_ep(udev);
+	}
+	return rc;
 }
 
 int
-usb_dev_data(void *pdata, struct usb_data_xfer *xfer, int dir, int epctx)
+usb_dev_data(void *pdata, struct usb_xfer *xfer, int dir, int epctx)
 {
 	struct usb_dev *udev;
 	struct usb_dev_req *r;
 	struct usb_native_devinfo *info;
 	int rc = 0, epid;
 	uint8_t type;
-	int blk_start, data_size, blk_count;
-	int i, j, idx, buf_idx;
-	struct usb_data_xfer_block *b;
+	int i, idx, buf_idx, head, tail, size;
+	struct usb_block *b;
 	static const char * const type_str[] = {"CTRL", "ISO", "BULK", "INT"};
 	static const char * const dir_str[] = {"OUT", "IN"};
 	int framelen = 0, framecnt = 0;
@@ -766,9 +764,8 @@ usb_dev_data(void *pdata, struct usb_data_xfer *xfer, int dir, int epctx)
 	udev = pdata;
 	info = &udev->info;
 	xfer->status = USB_ERR_NORMAL_COMPLETION;
-
-	blk_start = usb_dev_prepare_xfer(xfer, &blk_count, &data_size);
-	if (blk_start < 0)
+	size = usb_dev_prepare_xfer(xfer, &head, &tail);
+	if (size <= 0)
 		goto done;
 
 	type = usb_dev_get_ep_type(udev, dir ? TOKEN_IN : TOKEN_OUT, epctx);
@@ -791,96 +788,91 @@ usb_dev_data(void *pdata, struct usb_data_xfer *xfer, int dir, int epctx)
 		framelen = USB_EP_MAXP_SZ(maxp) * (1 + USB_EP_MAXP_MT(maxp));
 		UPRINTF(LDBG, "iso maxp %u framelen %d\r\n", maxp, framelen);
 
-		for (i = 0, idx = blk_start; i < blk_count; i++) {
+		for (idx = head;
+			index_valid(head, tail, xfer->max_blk_cnt, idx);
+			idx = index_inc(idx, xfer->max_blk_cnt)) {
+
 			if (xfer->data[idx].blen > framelen)
 				UPRINTF(LFTL, "err framelen %d\r\n", framelen);
 
-			if (xfer->data[idx].blen <= 0) {
-				idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-				i--;
+			if (xfer->data[idx].type == USB_DATA_NONE ||
+					xfer->data[idx].type == USB_DATA_PART)
 				continue;
-			}
-
-			if (xfer->data[idx].chained == 1) {
-				idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-				continue;
-			}
-
-			idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-			framecnt++;
+			else if (xfer->data[idx].type == USB_DATA_FULL)
+				framecnt++;
+			else
+				UPRINTF(LFTL, "%s:%d error\r\n", __func__, __LINE__);
 		}
 		UPRINTF(LDBG, "iso maxp %u framelen %d, framecnt %d\r\n", maxp,
 				framelen, framecnt);
 	}
 
-	if (data_size <= 0)
-		goto done;
-
-	r = usb_dev_alloc_req(udev, xfer, dir, data_size, type ==
+	r = usb_dev_alloc_req(udev, xfer, dir, size, type ==
 			USB_ENDPOINT_ISOC ? framecnt : 0);
 	if (!r) {
 		xfer->status = USB_ERR_IOERROR;
 		goto done;
 	}
 
-	r->buf_length = data_size;
-	r->blk_start = blk_start;
-	r->blk_count = blk_count;
-	xfer->requests[blk_start] = r;
+	r->buf_size = size;
+	r->blk_head = head;
+	r->blk_tail = tail;
+	xfer->reqs[head] = r;
 	UPRINTF(LDBG, "%s: %d-%s: explen %d ep%d-xfr [%d-%d %d] rq-%d "
 			"[%d-%d %d] dir %s type %s\r\n", __func__,
-			info->path.bus, usb_dev_path(&info->path),
-			data_size, epctx, xfer->head, (xfer->tail - 1) %
-			USB_MAX_XFER_BLOCKS, xfer->ndata, r->seq, blk_start,
-			(blk_start + blk_count - 1) % USB_MAX_XFER_BLOCKS,
-			data_size, dir_str[dir], type_str[type]);
+			info->path.bus, usb_dev_path(&info->path), size, epctx,
+			xfer->head, xfer->tail, xfer->ndata, r->seq,
+			r->blk_head, r->blk_tail, r->buf_size, dir_str[dir],
+			type_str[type]);
 
 	if (!dir) {
-		for (i = 0, j = 0, buf_idx = 0; j < blk_count; ++i) {
-			b = &xfer->data[(blk_start + i) % USB_MAX_XFER_BLOCKS];
-			if (b->buf) {
+		for (idx = head, buf_idx = 0;
+				index_valid(head, tail, xfer->max_blk_cnt, idx);
+				idx = index_inc(idx, xfer->max_blk_cnt)) {
+			b = &xfer->data[idx];
+			if (b->type == USB_DATA_PART ||
+					b->type == USB_DATA_FULL) {
 				memcpy(&r->buffer[buf_idx], b->buf, b->blen);
 				buf_idx += b->blen;
-				j++;
 			}
 		}
 	}
 
 	if (type == USB_ENDPOINT_ISOC) {
-		for (i = 0, j = 0, idx = blk_start; i < blk_count; ++i) {
+		for (i = 0, idx = head;
+				index_valid(head, tail, xfer->max_blk_cnt, idx);
+				idx = index_inc(idx, xfer->max_blk_cnt)) {
 			int len = xfer->data[idx].blen;
 
-			if (len <= 0) {
-				idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-				i--;
+			if (xfer->data[idx].type == USB_DATA_NONE) {
 				continue;
+			} else if (xfer->data[idx].type == USB_DATA_PART) {
+				r->trn->iso_packet_desc[i].length += len;
+				continue;
+			} else if (xfer->data[idx].type == USB_DATA_FULL) {
+				r->trn->iso_packet_desc[i].length += len;
+			} else {
+				UPRINTF(LFTL, "%s:%d error\r\n",
+						__func__, __LINE__);
 			}
 
-			if (xfer->data[idx].chained == 1) {
-				r->trn->iso_packet_desc[j].length += len;
-				idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-				continue;
-			}
-
-			r->trn->iso_packet_desc[j].length += len;
-			idx = (idx + 1) % USB_MAX_XFER_BLOCKS;
-			UPRINTF(LDBG, "desc[%d].length %d\r\n", j,
-					r->trn->iso_packet_desc[j].length);
-			j++;
+			UPRINTF(LDBG, "desc[%d].length %d\r\n", i,
+					r->trn->iso_packet_desc[i].length);
+			i++;
 		}
 	}
 
 	if (type == USB_ENDPOINT_BULK) {
 		libusb_fill_bulk_transfer(r->trn, udev->handle, epid,
-				r->buffer, data_size, usb_dev_comp_cb, r, 0);
+				r->buffer, size, usb_dev_comp_cb, r, 0);
 
 	} else if (type == USB_ENDPOINT_INT) {
 		libusb_fill_interrupt_transfer(r->trn, udev->handle, epid,
-				r->buffer, data_size, usb_dev_comp_cb, r, 0);
+				r->buffer, size, usb_dev_comp_cb, r, 0);
 
 	} else if (type == USB_ENDPOINT_ISOC) {
 		libusb_fill_iso_transfer(r->trn, udev->handle, epid,
-				r->buffer, data_size, framecnt,
+				r->buffer, size, framecnt,
 				usb_dev_comp_cb, r, 0);
 
 	} else {
@@ -903,7 +895,7 @@ done:
 }
 
 static void
-clear_uas_desc(struct usb_dev *udev, uint8_t *data, uint32_t len)
+clear_uas_desc(struct usb_dev *udev, uint8_t *data, int len)
 {
 	struct usb_devpath *path;
 	int32_t i;
@@ -933,7 +925,7 @@ clear_uas_desc(struct usb_dev *udev, uint8_t *data, uint32_t len)
 }
 
 int
-usb_dev_request(void *pdata, struct usb_data_xfer *xfer)
+usb_dev_request(void *pdata, struct usb_xfer *xfer)
 {
 	struct usb_dev *udev;
 	uint8_t  request_type;
@@ -941,7 +933,7 @@ usb_dev_request(void *pdata, struct usb_data_xfer *xfer)
 	uint16_t value;
 	uint16_t index;
 	uint16_t len;
-	struct usb_data_xfer_block *blk;
+	struct usb_block *blk;
 	uint8_t *data;
 	int rc;
 	bool need_chk_uas = false;
@@ -1011,6 +1003,13 @@ usb_dev_request(void *pdata, struct usb_data_xfer *xfer)
 
 	}
 
+	/* (data == NULL && len == 0) is okey to libusb_control_transfer */
+	if (data == NULL && len) {
+		xfer->status = USB_ERR_IOERROR;
+		UPRINTF(LFTL, "%s unexpected NULL data\r\n", __func__);
+		goto out;
+	}
+
 	/* send it to physical device */
 	/* FIXME: In the process of implementation of USB isochronouse transfer,
 	 * the timeout time is not enough for Plantronics headset. So this
@@ -1020,22 +1019,25 @@ usb_dev_request(void *pdata, struct usb_data_xfer *xfer)
 	rc = libusb_control_transfer(udev->handle, request_type, request,
 			value, index, data, len, 300);
 
+	if (rc < 0) {
+		xfer->status = usb_dev_err_convert(rc);
+		goto out;
+	}
 	/* TODO: Currently, the USB Attached SCSI (UAS) protocol is not
 	 * supported and the following code is used as a workaround now.
 	 * UAS will be implemented in future.
 	 */
-	if (need_chk_uas)
+	if (need_chk_uas && data)
 		clear_uas_desc(udev, data, rc);
 
-	if (rc >= 0 && blk) {
+	if (blk) {
 		blk->blen = len - rc;
 		blk->bdone += rc;
 		xfer->status = blk->blen > 0 ? USB_ERR_SHORT_XFER :
 			USB_ERR_NORMAL_COMPLETION;
-	} else if (rc >= 0)
+	} else
 		xfer->status = USB_ERR_NORMAL_COMPLETION;
-	else
-		xfer->status = usb_dev_err_convert(rc);
+
 
 	UPRINTF(LDBG, "%d-%s: usb rc %d, blk %p, blen %u bdon %u\n",
 			udev->info.path.bus, usb_dev_path(&udev->info.path),
@@ -1071,6 +1073,7 @@ usb_dev_init(void *pdata, char *opt)
 		goto errout;
 
 	switch (desc.bcdUSB) {
+	case 0x320:
 	case 0x310:
 	case 0x300:
 		ver = 3; break;

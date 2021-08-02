@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, Intel Corporation
+ * Copyright (c) 2011 - 2021, Intel Corporation
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,94 +36,33 @@
 #include "efilinux.h"
 #include "stdlib.h"
 #include "boot.h"
-#include "acrn_common.h"
-#include "deprivilege_boot.h"
-#include "MpService.h"
+#include "container.h"
 
 EFI_SYSTEM_TABLE *sys_table;
 EFI_BOOT_SERVICES *boot;
-char *cmdline = NULL;
-extern const uint64_t guest_entry;
-static UINT64 hv_hpa;
+EFI_RUNTIME_SERVICES *runtime;
+HV_LOADER hvld;
 
-static void
-enable_disable_all_ap(BOOLEAN enable)
-{
-	EFI_MP_SERVICES_PROTOCOL *mp = NULL;
-	EFI_STATUS err;
-	EFI_GUID mp_guid = EFI_MP_SERVICES_PROTOCOL_GUID;
-	UINTN n_proc, n_enabled_proc, bsp, i;
-
-	err = uefi_call_wrapper(boot->LocateProtocol, 3, &mp_guid, NULL, (void **)&mp);
-	if (err != EFI_SUCCESS) {
-		Print(L"Unable to locate MP service protocol: %r, skip %s all AP\n",
-				err, enable ? "enable" : "disable");
-		return;
-	}
-
-	err = uefi_call_wrapper(mp->GetNumberOfProcessors, 3, mp, &n_proc, &n_enabled_proc);
-	if (err != EFI_SUCCESS) {
-		Print(L"failed to GetNumberOfProcessors: %r\n", err);
-		return;
-	}
-	Print(L"detected %d processes, %d enabled\n", n_proc, n_enabled_proc);
-
-	err = uefi_call_wrapper(mp->WhoAmI, 2, mp, &bsp);
-	if (err != EFI_SUCCESS) {
-		Print(L"failed to WhoAmI: %r\n", err);
-		return;
-	}
-	Print(L"current on process %d\n", bsp);
-
-	for (i = 0; i < n_proc; i++) {
-		if (i == bsp) {
-			continue;
-		}
-
-		err = uefi_call_wrapper(mp->EnableDisableAP, 4, mp, i, enable, NULL);
-		if (err != EFI_SUCCESS) {
-			Print(L"failed to %s AP%d: %r\n", enable ? "enable" : "disable", i, err);
-		}
-	}
-}
-
-static inline void hv_jump(EFI_PHYSICAL_ADDRESS hv_start,
-			struct multiboot_info *mbi, struct depri_boot_context *efi_ctx)
-{
-	hv_func hf;
-
-	efi_ctx->vcpu_regs.rip = (uint64_t)&guest_entry;
-
-	/* The 64-bit entry of acrn hypervisor is 0x200 from the start
-	 * address of hv image. But due to there is multiboot header,
-	 * so it has to be added with 0x10.
-	 *
-	 * FIXME: The hardcode value 0x210 should be worked out
-	 * from the link address of cpu_primary_start_64 in acrn.out
-	 */
-	hf = (hv_func)(hv_start + 0x210);
-
-	asm volatile ("cli");
-
-	/* jump to acrn hypervisor */
-	hf(MULTIBOOT_INFO_MAGIC, mbi);
-}
-
-EFI_STATUS construct_mbi(EFI_PHYSICAL_ADDRESS hv_hpa, struct multiboot_info *mbi,
-		struct multiboot_mmap *mmap)
+EFI_STATUS
+get_efi_memmap(struct efi_memmap_info *mi, int size_only)
 {
 	UINTN map_size, map_key;
 	UINT32 desc_version;
 	UINTN desc_size;
 	EFI_MEMORY_DESCRIPTOR *map_buf;
 	EFI_STATUS err = EFI_SUCCESS;
-	int32_t i, j, mmap_entry_count;
 
 	/* We're just interested in the map's size for now */
 	map_size = 0;
-	err = get_memory_map(&map_size, NULL, NULL, NULL, NULL);
+	err = get_memory_map(&map_size, NULL, NULL, &desc_size, NULL);
 	if (err != EFI_SUCCESS && err != EFI_BUFFER_TOO_SMALL)
 		goto out;
+
+	if (size_only) {
+		mi->map_size = map_size;
+		mi->desc_size = desc_size;
+		return err;
+	}
 
 again:
 	err = allocate_pool(EfiLoaderData, map_size, (void **) &map_buf);
@@ -137,7 +76,7 @@ again:
 	 * space for the memory map.
 	 */
 	err = get_memory_map(&map_size, map_buf, &map_key,
-			     &desc_size, &desc_version);
+				 &desc_size, &desc_version);
 	if (err != EFI_SUCCESS) {
 		if (err == EFI_BUFFER_TOO_SMALL) {
 			/*
@@ -153,7 +92,142 @@ again:
 		goto out;
 	}
 
-	mmap_entry_count = map_size / desc_size;
+	mi->map_size = map_size;
+	mi->map_key = map_key;
+	mi->desc_version = desc_version;
+	mi->desc_size = desc_size;
+	mi->mmap = map_buf;
+
+out:
+	return err;
+}
+
+static EFI_STATUS
+set_mor_bit()
+{
+	EFI_STATUS err;
+	UINT32 attrs;
+	UINTN size = 1;
+	uint8_t data = 0;
+	EFI_GUID efi_var_morctl_guid = EFI_VAR_MORCTL_GUID;
+#ifdef MORCTRL_LOCK_ENABLED
+	EFI_GUID efi_var_morctllock_guid = EFI_VAR_MORCTLLOCK_GUID;
+#endif
+
+	/*
+	 * Per TCG Platform Reset Attack Mitigation Spec 1.10 rev 17, Chp 4.1
+	 * MORCtrl is a 1-byte unsigned number and should be created by the firmware.
+	 */
+	err = get_variable(EFI_VAR_MORCTL_NAME, &efi_var_morctl_guid, &attrs, &size, (void *)&data);
+	if (err != EFI_SUCCESS) {
+		if (err == EFI_BUFFER_TOO_SMALL) {
+			Print(L"Wrong MORCtrl variable size: 0x%x byte, should be 1 byte\n", size);
+		} else if (err == EFI_NOT_FOUND) {
+			Print(L"Warning: MORCtrl variable not found\n");
+		}
+
+		goto out;
+	}
+
+	if (attrs != (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)) {
+		Print(L"Wrong MORCtrl attributes: 0x%x\n", attrs);
+		goto out;
+	}
+
+	/* Bit 0 set: Firmware MUST set the MOR bit */
+	/* Bit 4 cleared: Firmware MAY autodetect a clean shutdown of the Static RTM OS. */
+	data = 0x1;
+
+	err = set_variable(EFI_VAR_MORCTL_NAME, &efi_var_morctl_guid, attrs, size, &data);
+	if (err != EFI_SUCCESS)
+		goto out;
+
+#ifdef MORCTRL_LOCK_ENABLED
+	/*
+	 * MORCTRL_LOCK_ENABLED is NOT part of the board configuration.
+	 * To activate MORCTRL_LOCK_ENABLED, manually add -DMORCTRL_LOCK_ENABLED to the CFLAGS.
+	 */
+
+	/* Lock MORCtrl with MORCtrlLock */
+	size = 1;
+	err = get_variable(EFI_VAR_MORCTLLOCK_NAME, &efi_var_morctllock_guid, &attrs, &size, (void *)&data);
+	if (err != EFI_SUCCESS)
+		goto out;
+
+	if (attrs != (EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS)) {
+		Print(L"Wrong MORCtrlLock attributes: 0x%x\n", attrs);
+		goto out;
+	}
+
+	if (data == 0x1 || data == 0x2) {
+		Print(L"Warning: MORCtrl already locked. No locking operation performed.\n");
+		goto out;
+	}
+
+	/*
+	 * Input value 1, size 1: Lock without key
+	 * Try to lock MemoryOverwriteRequestControlLock and MemoryOverwriteRequestControl
+	 * If success, MORCtrl and MORCtrlLock will be read-only until next boot, and reboot
+	 * is the only way to unlock these variables.
+	 */
+	data = 0x1;
+	size = 0x1;
+	err = set_variable(EFI_VAR_MORCTLLOCK_NAME, &efi_var_morctllock_guid, attrs, size, (void *)&data);
+	if (err != EFI_SUCCESS)
+		goto out;
+#endif
+out:
+	return err;
+}
+
+static EFI_STATUS
+terminate_boot_services(EFI_HANDLE image, struct efi_memmap_info *mmap_info)
+{
+	EFI_STATUS err = EFI_SUCCESS;
+
+	err = exit_boot_services(image, mmap_info->map_key);
+	if (err != EFI_SUCCESS) {
+		if (err == EFI_INVALID_PARAMETER) {
+			/*
+			 * Incorrect map key: memory map changed during the call of get_memory_map
+			 * and exit_boot_services.
+			 * We must call get_memory_map and exit_boot_services one more time.
+			 * We can't allocate nor free pool since exit_boot_services has already been called.
+			 * Original memory pool should be sufficient and this call is expected to succeed.
+			 */
+			err = get_memory_map(&mmap_info->map_size, mmap_info->mmap,
+				&mmap_info->map_key, &mmap_info->desc_size, &mmap_info->desc_version);
+			if (err != EFI_SUCCESS)
+				goto out;
+
+			err = exit_boot_services(image, mmap_info->map_key);
+			if (err != EFI_SUCCESS)
+				goto out;
+		}
+	}
+
+out:
+	return err;
+}
+
+static inline void hv_jump(EFI_PHYSICAL_ADDRESS hv_entry, uint32_t mbi, int32_t magic)
+{
+	asm volatile (
+		"cli\n\t"
+		"jmp *%2\n\t"
+		:
+		: "a"(magic), "b"(mbi), "r"(hv_entry)
+		);
+}
+
+static EFI_STATUS
+fill_e820(HV_LOADER hvld, struct efi_memmap_info *mmap_info,
+	struct multiboot_mmap *mmap, int32_t *e820_count)
+{
+	EFI_STATUS err = EFI_SUCCESS;
+	uint32_t mmap_entry_count = mmap_info->map_size / mmap_info->desc_size;
+	int32_t i, j;
+
 	/*
 	 * Convert the EFI memory map to E820.
 	 */
@@ -161,7 +235,8 @@ again:
 		EFI_MEMORY_DESCRIPTOR *d;
 		uint32_t e820_type = 0;
 
-		d = (EFI_MEMORY_DESCRIPTOR *)((uint64_t)map_buf + (i * desc_size));
+		d = (EFI_MEMORY_DESCRIPTOR *)((uint64_t)mmap_info->mmap + \
+			(i * mmap_info->desc_size));
 		switch(d->Type) {
 		case EfiReservedMemoryType:
 		case EfiRuntimeServicesCode:
@@ -223,32 +298,31 @@ again:
 	/* switch hv memory region(0x20000000 ~ 0x22000000) to
 	 * available RAM in e820 table
 	 */
-	mmap[j].mm_base_addr = hv_hpa;
-	mmap[j].mm_length = CONFIG_HV_RAM_SIZE;
+	mmap[j].mm_base_addr = hvld->get_hv_hpa(hvld);
+	mmap[j].mm_length = hvld->get_hv_ram_size(hvld);
 	mmap[j].mm_type = E820_RAM;
 	j++;
 
-	mbi->mi_cmdline = (UINTN)cmdline;
-	mbi->mi_mmap_addr = (UINTN)mmap;
-	mbi->mi_mmap_length = j*sizeof(struct multiboot_mmap);
-	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MMAP | MULTIBOOT_INFO_HAS_CMDLINE;
+	mmap[j].mm_base_addr = hvld->get_mod_hpa(hvld);
+	mmap[j].mm_length = hvld->get_total_modsize(hvld);
+	mmap[j].mm_type = E820_RAM;
+	j++;
+
+	*e820_count = j;
 out:
 	return err;
 }
 
-static EFI_STATUS
-switch_to_guest_mode(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa)
+
+EFI_STATUS construct_mbi(HV_LOADER hvld, struct multiboot_info **mbinfo, struct efi_memmap_info *mmap_info)
 {
+	EFI_STATUS err = EFI_SUCCESS;
+	int32_t e820_count = 0;
 	EFI_PHYSICAL_ADDRESS addr;
-	EFI_STATUS err;
 	struct multiboot_mmap *mmap;
 	struct multiboot_info *mbi;
-	struct depri_boot_context *efi_ctx;
-	struct acpi_table_rsdp *rsdp = NULL;
-	int32_t i;
-	EFI_CONFIGURATION_TABLE *config_table;
 	char *uefi_boot_loader_name;
-	const char loader_name[BOOT_LOADER_NAME_SIZE] = UEFI_BOOT_LOADER_NAME;
+	static const char loader_name[BOOT_LOADER_NAME_SIZE] = UEFI_BOOT_LOADER_NAME;
 
 	err = allocate_pool(EfiLoaderData, EFI_BOOT_MEM_SIZE, (VOID *)&addr);
 	if (err != EFI_SUCCESS) {
@@ -259,21 +333,44 @@ switch_to_guest_mode(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa)
 
 	mmap = MBOOT_MMAP_PTR(addr);
 	mbi = MBOOT_INFO_PTR(addr);
-	efi_ctx = BOOT_CTX_PTR(addr);
 
 	uefi_boot_loader_name = BOOT_LOADER_NAME_PTR(addr);
 	memcpy(uefi_boot_loader_name, loader_name, BOOT_LOADER_NAME_SIZE);
 
-	/* reserve secondary memory region for CPU trampoline code */
-	err = emalloc_reserved_mem(&addr, CONFIG_LOW_RAM_SIZE, MEM_ADDR_1MB);
+	err = get_efi_memmap(mmap_info, 0);
 	if (err != EFI_SUCCESS)
 		goto out;
-	if (addr < 4096)
-		Print(L"Warning: CPU trampoline code buf occupied zero-page\n");
 
-	efi_ctx->ap_trampoline_buf = addr;
+	err = fill_e820(hvld, mmap_info, mmap, &e820_count);
+	if (err != EFI_SUCCESS)
+		goto out;
 
-	config_table = sys_table->ConfigurationTable;
+	mbi->mi_cmdline = (UINTN)hvld->get_boot_cmd(hvld);
+	mbi->mi_mmap_addr = (UINTN)mmap;
+	mbi->mi_mmap_length = e820_count*sizeof(struct multiboot_mmap);
+	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MMAP | MULTIBOOT_INFO_HAS_CMDLINE;
+
+	/* Set boot loader name in the multiboot header of UEFI, this name is used by hypervisor;
+	 * The host physical start address of boot loader name is stored in multiboot header.
+	 */
+	mbi->mi_flags |= MULTIBOOT_INFO_HAS_LOADER_NAME;
+	mbi->mi_loader_name = (UINT32)(uint64_t)uefi_boot_loader_name;
+
+	mbi->mi_mods_addr  = hvld->get_mod_hpa(hvld);
+	mbi->mi_mods_count = hvld->get_mod_count(hvld);
+	mbi->mi_flags |= MULTIBOOT_INFO_HAS_MODS;
+
+	*mbinfo = mbi;
+out:
+	return err;
+}
+
+static struct acpi_table_rsdp *
+search_rsdp()
+{
+	unsigned i;
+	struct acpi_table_rsdp *rsdp = NULL;
+	EFI_CONFIGURATION_TABLE *config_table = sys_table->ConfigurationTable;
 
 	for (i = 0; i < sys_table->NumberOfTableEntries; i++) {
 		EFI_GUID acpi_20_table_guid = ACPI_20_TABLE_GUID;
@@ -292,62 +389,239 @@ switch_to_guest_mode(EFI_HANDLE image, EFI_PHYSICAL_ADDRESS hv_hpa)
 		config_table++;
 	}
 
-	if (rsdp == NULL) {
-		Print(L"unable to find RSDP\n");
-		goto out;
-	}
+	return rsdp;
+}
 
-	efi_ctx->rsdp = rsdp;
+static uint32_t
+get_mbi2_size(HV_LOADER hvld, struct efi_memmap_info *mmap_info, uint32_t rsdp_length)
+{
+	uint32_t mmap_entry_count = mmap_info->map_size / mmap_info->desc_size;
 
-	/* construct multiboot info and deliver it to hypervisor */
-	err = construct_mbi(hv_hpa, mbi, mmap);
+	return 2 * sizeof(uint32_t) \
+		/* Boot command line */
+		+ (sizeof(struct multiboot2_tag_string) + \
+			ALIGN_UP(hvld->get_boot_cmdsize(hvld), MULTIBOOT2_TAG_ALIGN)) \
+
+		/* Boot loader name */
+		+ (sizeof(struct multiboot2_tag_string) + \
+			ALIGN_UP(BOOT_LOADER_NAME_SIZE, MULTIBOOT2_TAG_ALIGN)) \
+
+		/* Modules */
+		+ (hvld->get_mod_count(hvld) * sizeof(struct multiboot2_tag_module) + \
+			hvld->get_total_modcmdsize(hvld)) \
+
+		/* Memory Map */
+		+ ALIGN_UP((sizeof(struct multiboot2_tag_mmap) + \
+			mmap_entry_count * sizeof(struct multiboot2_mmap_entry)), MULTIBOOT2_TAG_ALIGN) \
+
+		/* ACPI new */
+		+ ALIGN_UP(sizeof(struct multiboot2_tag_new_acpi) + \
+			rsdp_length, MULTIBOOT2_TAG_ALIGN) \
+
+		/* EFI64 system table */
+		+ ALIGN_UP(sizeof(struct multiboot2_tag_efi64), MULTIBOOT2_TAG_ALIGN) \
+
+		/* EFI memmap: Add an extra page since UEFI can alter the memory map */
+		+ ALIGN_UP(sizeof(struct multiboot2_tag_efi_mmap) + \
+			ALIGN_UP(mmap_info->map_size + 0x1000, 0x1000), MULTIBOOT2_TAG_ALIGN) \
+
+		/* END */
+		+ sizeof(struct multiboot2_tag);
+}
+
+EFI_STATUS
+construct_mbi2(struct hv_loader *hvld, void **mbi_addr, struct efi_memmap_info *mmap_info)
+{
+	uint64_t *mbistart;
+	uint64_t *p;
+	uint32_t mbi2_size;
+	struct multiboot_mmap *mmap;
+	struct acpi_table_rsdp *rsdp;
+	EFI_STATUS err;
+
+	rsdp = search_rsdp();
+	if (!rsdp)
+		return EFI_NOT_FOUND;
+
+	/* Get size only for mbi size calculation */
+	err = get_efi_memmap(mmap_info, 1);
+	if (err != EFI_SUCCESS && err != EFI_BUFFER_TOO_SMALL)
+		return err;
+
+	mbi2_size = get_mbi2_size(hvld, mmap_info, rsdp->length);
+
+	/* per UEFI spec v2.9: This allocation is guaranteed to be 8-bytes aligned */
+	err = allocate_pool(EfiLoaderData, mbi2_size, (void **)&mbistart);
 	if (err != EFI_SUCCESS)
 		goto out;
 
-	mbi->mi_flags |= MULTIBOOT_INFO_HAS_DRIVES;
-	mbi->mi_drives_addr = (UINT32)(UINTN)efi_ctx;
+	memset(mbistart, 0x0, mbi2_size);
 
-	/* Set boot loader name in the multiboot header of UEFI, this name is used by hypervisor;
-	 * The host physical start address of boot loader name is stored in multiboot header.
+	/* Allocate temp buffer to hold memory map */
+	err = allocate_pool(EfiLoaderData,
+		(mmap_info->map_size / mmap_info->desc_size) * sizeof(struct multiboot_mmap),
+		(void **)&mmap);
+	if (err != EFI_SUCCESS)
+		goto out;
+
+	/*
+	 * Get full memory map again.
+	 * We have just allocated memory and the mmap_info will be different.
 	 */
-	mbi->mi_flags |= MULTIBOOT_INFO_HAS_LOADER_NAME;
-	mbi->mi_loader_name = (UINT32)uefi_boot_loader_name;
+	err = get_efi_memmap(mmap_info, 0);
+	if (err != EFI_SUCCESS)
+		goto out;
 
-	asm volatile ("pushf\n\t"
-		      "pop %0\n\t"
-		      : "=r"(efi_ctx->vcpu_regs.rflags)
-		      : );
-	asm volatile ("movq %%rax, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rax));
-	asm volatile ("movq %%rbx, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rbx));
-	asm volatile ("movq %%rcx, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rcx));
-	asm volatile ("movq %%rdx, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rdx));
-	asm volatile ("movq %%rdi, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rdi));
-	asm volatile ("movq %%rsi, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rsi));
-	asm volatile ("movq %%rsp, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rsp));
-	asm volatile ("movq %%rbp, %0" : "=r"(efi_ctx->vcpu_regs.gprs.rbp));
-	asm volatile ("movq %%r8,  %0" : "=r"(efi_ctx->vcpu_regs.gprs.r8));
-	asm volatile ("movq %%r9,  %0" : "=r"(efi_ctx->vcpu_regs.gprs.r9));
-	asm volatile ("movq %%r10, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r10));
-	asm volatile ("movq %%r11, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r11));
-	asm volatile ("movq %%r12, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r12));
-	asm volatile ("movq %%r13, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r13));
-	asm volatile ("movq %%r14, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r14));
-	asm volatile ("movq %%r15, %0" : "=r"(efi_ctx->vcpu_regs.gprs.r15));
+	/* total_size and reserved */
+	p = mbistart;
+	p += (2 * sizeof(uint32_t)) / sizeof(uint64_t);
 
-	hv_jump(hv_hpa, mbi, efi_ctx);
-	asm volatile (".global guest_entry\n\t"
-				  "guest_entry:\n\t");
+	/* Boot command line */
+	{
+		struct multiboot2_tag_string *tag = (struct multiboot2_tag_string *)p;
+		UINTN cmdline_size = hvld->get_boot_cmdsize(hvld);
+		tag->type = MULTIBOOT2_TAG_TYPE_CMDLINE;
+		tag->size = sizeof(struct multiboot2_tag_string) + cmdline_size;
+		memcpy(tag->string, hvld->get_boot_cmd(hvld), cmdline_size);
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
 
+	/* Boot loader name */
+	{
+		struct multiboot2_tag_string *tag = (struct multiboot2_tag_string *)p;
+		tag->type = MULTIBOOT2_TAG_TYPE_BOOT_LOADER_NAME;
+		tag->size = sizeof(struct multiboot2_tag_string) + BOOT_LOADER_NAME_SIZE;
+		memcpy(tag->string, UEFI_BOOT_LOADER_NAME, BOOT_LOADER_NAME_SIZE);
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	/* Modules */
+	{
+		unsigned i;
+		uint32_t mod_count = hvld->get_mod_count(hvld);
+		for (i = 0; i < mod_count; i++) {
+			struct multiboot2_tag_module *tag = (struct multiboot2_tag_module *)p;
+			MB_MODULE_INFO *modinfo = hvld->get_mods_info(hvld, i);
+			tag->type = MULTIBOOT2_TAG_TYPE_MODULE;
+			tag->size = sizeof(struct multiboot2_tag_module) + modinfo->cmdsize;
+			tag->mod_start = modinfo->mod_start;
+			tag->mod_end = modinfo->mod_end;
+			memcpy(tag->cmdline, modinfo->cmd, modinfo->cmdsize);
+			p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+		}
+	}
+
+	/* Memory map */
+	{
+		unsigned i;
+		struct multiboot2_tag_mmap *tag = (struct multiboot2_tag_mmap *)p;
+		struct multiboot2_mmap_entry *e;
+		int32_t e820_count = 0;
+
+		err = fill_e820(hvld, mmap_info, mmap, &e820_count);
+		if (err != EFI_SUCCESS)
+			goto out;
+
+		tag->type = MULTIBOOT2_TAG_TYPE_MMAP;
+		tag->size = sizeof(struct multiboot2_tag_mmap) + sizeof(struct multiboot2_mmap_entry) * e820_count;
+		tag->entry_size = sizeof(struct multiboot2_mmap_entry);
+		tag->entry_version = 0;
+
+		for (i = 0, e = (struct multiboot2_mmap_entry *)tag->entries; i < e820_count; i++) {
+			e->addr = mmap[i].mm_base_addr;
+			e->len = mmap[i].mm_length;
+			e->type = mmap[i].mm_type;
+			e->zero = 0;
+			e = (struct multiboot2_mmap_entry *)((char *)e + sizeof(struct multiboot2_mmap_entry));
+		}
+
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	/* ACPI new */
+	{
+		struct multiboot2_tag_new_acpi *tag = (struct multiboot2_tag_new_acpi *)p;
+		tag->type = MULTIBOOT2_TAG_TYPE_ACPI_NEW;
+		tag->size = sizeof(struct multiboot2_tag_new_acpi) + rsdp->length;
+		memcpy((char *)tag->rsdp, (char *)rsdp, rsdp->length);
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	/* EFI64 system table */
+	{
+		struct multiboot2_tag_efi64 *tag = (struct multiboot2_tag_efi64 *)p;
+		tag->type = MULTIBOOT2_TAG_TYPE_EFI64;
+		tag->size = sizeof(struct multiboot2_tag_efi64);
+		tag->pointer = (uint64_t)sys_table;
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	/* EFI memory map */
+	{
+		struct multiboot2_tag_efi_mmap *tag = (struct multiboot2_tag_efi_mmap *)p;
+		tag->type = MULTIBOOT2_TAG_TYPE_EFI_MMAP;
+		tag->size = sizeof(struct multiboot2_tag_efi_mmap) + mmap_info->map_size;
+		tag->descr_size = mmap_info->desc_size;
+		tag->descr_vers = mmap_info->desc_version;
+		memcpy((char *)tag->efi_mmap, (char *)mmap_info->mmap, mmap_info->map_size);
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	/* END */
+	{
+		struct multiboot2_tag *tag = (struct multiboot2_tag *)p;
+		tag->type = MULTIBOOT2_TAG_TYPE_END;
+		tag->size = sizeof(struct multiboot2_tag);
+		p += ALIGN_UP(tag->size, MULTIBOOT2_TAG_ALIGN) / sizeof(uint64_t);
+	}
+
+	((uint32_t *)mbistart)[0] = (uint64_t)((char *)p - (char *)mbistart);
+	((uint32_t *)mbistart)[1] = 0;
+
+	*mbi_addr = (void *)mbistart;
+
+	return EFI_SUCCESS;
+
+out:
+	free_pool(mbistart);
+	return err;
+}
+
+static EFI_STATUS
+run_acrn(EFI_HANDLE image, HV_LOADER hvld)
+{
+	EFI_STATUS err;
+	struct efi_memmap_info memmapinfo;
+	void *mbi;
+	int32_t mb_version = hvld->get_multiboot_version(hvld);
+
+	err = set_mor_bit();
+	/* If MOR not supported, emit a warning and proceed */
+	if (err != EFI_SUCCESS && err != EFI_NOT_FOUND)
+		goto out;
+
+	if (mb_version == 2) {
+		err = construct_mbi2(hvld, &mbi, &memmapinfo);
+	}
+	else {
+		err = construct_mbi(hvld, (struct multiboot_info **)&mbi, &memmapinfo);
+	}
+
+	if (err != EFI_SUCCESS)
+		goto out;
+
+	err = terminate_boot_services(image, &memmapinfo);
+	if (err != EFI_SUCCESS)
+		goto out;
+
+	hv_jump(hvld->get_hv_entry(hvld), (uint32_t)(uint64_t)mbi,
+		mb_version == 2 ? MULTIBOOT2_INFO_MAGIC : MULTIBOOT_INFO_MAGIC);
+
+	/* Not reached on success */
 out:
 	return err;
 }
 
-static inline EFI_STATUS isspace(CHAR8 ch)
-{
-    return ((uint8_t)ch <= ' ');
-}
-
-#define DEFAULT_UEFI_OS_LOADER_NAME L"\\EFI\\org.clearlinux\\bootloaderx64.efi"
 /**
  * efi_main - The entry point for the OS loader image.
  * @image: firmware-allocated handle that identifies the image
@@ -359,125 +633,59 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *_table)
 	WCHAR *error_buf;
 	EFI_STATUS err;
 	EFI_LOADED_IMAGE *info;
-	UINTN sec_addr;
-	UINTN sec_size;
-	char *section;
-	EFI_DEVICE_PATH *path;
+	EFI_STATUS (*hvld_init)(EFI_LOADED_IMAGE *, HV_LOADER *);
 
-	INTN i, index;
-	CHAR16 *bootloader_name = NULL;
-	CHAR16 bootloader_param[] = L"bootloader=";
-	EFI_HANDLE bootloader_image;
-	CHAR16 *options = NULL;
-	UINT32 options_size = 0;
-	CHAR16 *cmdline16, *n;
+	INTN index;
 
 	InitializeLib(image, _table);
 	sys_table = _table;
 	boot = sys_table->BootServices;
+	runtime = sys_table->RuntimeServices;
 
 	if (CheckCrc(sys_table->Hdr.HeaderSize, &sys_table->Hdr) != TRUE)
 		return EFI_LOAD_ERROR;
-
-	/* make sure only bsp is enable before entering hv */
-	enable_disable_all_ap(FALSE);
 
 	err = handle_protocol(image, &LoadedImageProtocol, (void **)&info);
 	if (err != EFI_SUCCESS)
 		goto failed;
 
-	/* get the options */
-	options = info->LoadOptions;
-	options_size = info->LoadOptionsSize;
-
-	/* convert the options to cmdline */
-	if (options_size > 0)
-		cmdline = ch16_2_ch8(options, StrnLen(options, options_size));
-
-	/* First check if we were given a bootloader name
-	 * E.g.: "bootloader=\EFI\org.clearlinux\bootloaderx64.efi"
-	 */
-	cmdline16 = StrDuplicate(options);
-	bootloader_name = strstr_16(cmdline16, bootloader_param, StrLen(bootloader_param));
-	if (bootloader_name) {
-		bootloader_name = bootloader_name + StrLen(bootloader_param);
-		n = bootloader_name;
-		i = 0;
-		while (*n && !isspace((CHAR8)*n) && (*n < 0xff)) {
-			n++; i++;
-		}
-		*n++ = '\0';
-	} else {
-		/*
-		 * If we reach this point, it means we did not receive a specific
-		 * bootloader name to be used. Fall back to the default bootloader
-		 * as specified in config.h
-		 */
-		bootloader_name = DEFAULT_UEFI_OS_LOADER_NAME;
-	}
-
-	section = ".hv";
-	err = get_pe_section(info->ImageBase, section, strlen(section), &sec_addr, &sec_size);
-	if (EFI_ERROR(err)) {
-		Print(L"Unable to locate section of ACRNHV %r ", err);
-		goto failed;
-	}
-
-	/* without relocateion enabled, hypervisor binary need to reside in
-	 * fixed memory address starting from CONFIG_HV_RAM_START, make a call
-	 * to emalloc_fixed_addr for that case. With CONFIG_RELOC enabled,
-	 * hypervisor is able to do relocation, the only requirement is that
-	 * it need to reside in memory below 4GB, call emalloc_reserved_mem()
-	 * instead.
-	 */
-#ifdef CONFIG_RELOC
-	err = emalloc_reserved_aligned(&hv_hpa, CONFIG_HV_RAM_SIZE, 1 << 21, MEM_ADDR_4GB);
-#else
-	err = emalloc_fixed_addr(&hv_hpa, CONFIG_HV_RAM_SIZE, CONFIG_HV_RAM_START);
-#endif
-	if (err != EFI_SUCCESS)
-		goto failed;
-
-	memcpy((char *)hv_hpa, info->ImageBase + sec_addr, sec_size);
-
-	/* load hypervisor and begin to run on it */
-	err = switch_to_guest_mode(image, hv_hpa);
-	if (err != EFI_SUCCESS)
-		goto failed;
+	/* We may support other containers in the future */
+	hvld_init = container_init;
 
 	/*
-	 * enable all AP here will reset all APs,
-	 * so acrn can handle their ctx from now on.
+	 * Load hypervisor boot image handler. Currently Slim Bootloader
+	 * compatible embedded container format is supported. File system
+	 * mode to come future.
 	 */
-	enable_disable_all_ap(TRUE);
-
-	/* load and start the default bootloader */
-	path = FileDevicePath(info->DeviceHandle, bootloader_name);
-	if (!path)
-		goto free_args;
-
-	FreePool(bootloader_name);
-
-	err = uefi_call_wrapper(boot->LoadImage, 6, FALSE, image,
-		path, NULL, 0, &bootloader_image);
-	if (EFI_ERROR(err)) {
-		uefi_call_wrapper(boot->Stall, 1, 3 * 1000 * 1000);
+	err = hvld_init(info, &hvld);
+	if (err != EFI_SUCCESS) {
+		Print(L"Unable to init container library %r ", err);
 		goto failed;
 	}
 
-	err = uefi_call_wrapper(boot->StartImage, 3, bootloader_image,
-		NULL, NULL);
-	if (EFI_ERROR(err)) {
-		uefi_call_wrapper(boot->Stall, 1, 3 * 1000 * 1000);
+	err = hvld->load_boot_image(hvld);
+	if (err != EFI_SUCCESS) {
+		Print(L"Unable to load ACRNHV Image %r ", err);
 		goto failed;
 	}
-	uefi_call_wrapper(boot->UnloadImage, 1, bootloader_image);
+
+	err = hvld->load_modules(hvld);
+	if (err != EFI_SUCCESS) {
+		Print(L"Unable to load VM modules %r ", err);
+		goto failed;
+	}
+
+	err = run_acrn(image, hvld);
+	if (err != EFI_SUCCESS)
+		goto failed;
 
 	return EFI_SUCCESS;
 
-free_args:
-	FreePool(bootloader_name);
 failed:
+	if (hvld) {
+		hvld->deinit(hvld);
+	}
+
 	/*
 	 * We need to be careful not to trash 'err' here. If we fail
 	 * to allocate enough memory to hold the error string fallback
@@ -493,10 +701,10 @@ failed:
 	Print(L": %s\n", error_buf);
 
 	/* If we don't wait for user input, (s)he will not see the error message */
-        uefi_call_wrapper(sys_table->ConOut->OutputString, 2, sys_table->ConOut, \
-                        L"\r\n\r\n\r\nHit any key to exit\r\n");
-        uefi_call_wrapper(sys_table->BootServices->WaitForEvent, 3, 1, \
-                        &sys_table->ConIn->WaitForKey, &index);
+	uefi_call_wrapper(sys_table->ConOut->OutputString, 2, sys_table->ConOut, \
+					L"\r\n\r\n\r\nHit any key to exit\r\n");
+	uefi_call_wrapper(sys_table->BootServices->WaitForEvent, 3, 1, \
+					&sys_table->ConIn->WaitForKey, &index);
 
 	return exit(image, err, ERROR_STRING_LENGTH, error_buf);
 }

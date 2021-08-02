@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2011, Intel Corporation
+# Copyright (c) 2011 - 2021, Intel Corporation
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -31,22 +31,20 @@
 #
 
 HV_OBJDIR:=build
-HV_FILE:=acrn
-C_SRCS = boot.c pe.c malloc.c
+HV_SRC:=../../hypervisor
+C_SRCS = boot.c pe.c malloc.c container.c multiboot.c elf32.c
 ACRN_OBJS := $(patsubst %.c,$(EFI_OBJDIR)/%.o,$(C_SRCS))
-INCLUDE_PATH += $(HV_OBJDIR)/include
+INCLUDE_PATH += $(INCDIR)/efi
+INCLUDE_PATH += $(HV_SRC)/include/public
+INCLUDE_PATH += $(HV_SRC)/include/lib
+
+BOARD ?= tgl-rvp
+SCENARIO ?= hybrid_rt
 
 OBJCOPY=objcopy
 
-HOST  = $(shell $(CC) -dumpmachine | sed "s/\(-\).*$$//")
-ARCH := $(shell $(CC) -dumpmachine | sed "s/\(-\).*$$//")
-
-ifeq ($(ARCH),x86_64)
-	FORMAT=efi-app-x86-64
-else
-	ARCH=ia32
-	FORMAT=efi-app-ia32
-endif
+ARCH := x86_64
+FORMAT := efi-app-x86-64
 
 # Different Linux distributions have the 'gnu-efi' package install
 # its tools and libraries in different folders. The next couple of
@@ -59,60 +57,37 @@ LDSCRIPT := $(GNUEFI_DIR)/elf_$(ARCH)_efi.lds
 
 INCDIR := $(SYSROOT)/usr/include
 
-CFLAGS=-I. -I.. -I../../hypervisor/include/arch/x86/guest -I$(INCDIR)/efi -I$(INCDIR)/efi/$(ARCH) \
-		-I../../hypervisor/include/public -I../../hypervisor/include/lib -I../../hypervisor/boot/include/guest \
+CFLAGS=-I. -I.. -I$(INCDIR)/efi -I$(INCDIR)/efi/$(ARCH) \
 		-DEFI_FUNCTION_WRAPPER -fPIC -fshort-wchar -ffreestanding \
-		-Wall -I../fs/ -D$(ARCH) -O2 -I../../hypervisor/include/arch/x86 \
-		-include config.h
+		-Wall -I../fs/ -D$(ARCH) -O2	\
 
 CFLAGS += -mno-mmx -mno-sse -mno-sse2 -mno-80387 -mno-fp-ret-in-387
 
-ifeq ($(ARCH),ia32)
-	ifeq ($(HOST),x86_64)
-		CFLAGS += -m32
-	endif
-endif
-ifeq ($(ARCH),x86_64)
-	CFLAGS += -mno-red-zone
-endif
+CFLAGS += -fno-delete-null-pointer-checks -fwrapv -mno-red-zone
 
 LDFLAGS=-T $(LDSCRIPT) -Bsymbolic -shared -nostdlib -znocombreloc \
 		-L$(LIBDIR) $(CRT0)
-EFIBIN=$(HV_OBJDIR)/$(HV_FILE).efi
 BOOT=$(EFI_OBJDIR)/boot.efi
 
-CONF_FILE=$(CURDIR)/clearlinux/acrn.conf
+all: $(BOOT)
 
-all: $(EFIBIN)
-	$(OBJCOPY)  --add-section .hv="$(HV_OBJDIR)/$(HV_FILE).bin"  --change-section-vma .hv=0x6e000 --set-section-flags .hv=alloc,data,contents,load  --section-alignment 0x1000 $(EFI_OBJDIR)/boot.efi  $(EFIBIN)
+$(BOOT): $(EFI_OBJDIR)/boot.so
 
-install: $(EFIBIN) install-conf
-	install -D $(EFIBIN) $(DESTDIR)/usr/lib/acrn/$(HV_FILE).efi
-
-install-debug: $(HV_OBJDIR)/$(HV_FILE).map $(HV_OBJDIR)/$(HV_FILE).out
-	install -D $(HV_OBJDIR)/$(HV_FILE).out $(DESTDIR)/usr/lib/acrn/$(HV_FILE).efi.out
-	install -D $(HV_OBJDIR)/$(HV_FILE).map $(DESTDIR)/usr/lib/acrn/$(HV_FILE).efi.map
-
-$(EFIBIN): $(BOOT)
-
-$(EFI_OBJDIR)/boot.efi: $(EFI_OBJDIR)/boot.so
-
-$(EFI_OBJDIR)/boot.so: $(ACRN_OBJS) $(FS)
+$(EFI_OBJDIR)/boot.so: $(ACRN_OBJS)
 	$(LD) $(LDFLAGS) -o $@ $^  -lgnuefi -lefi $(shell $(CC) $(CFLAGS) -print-libgcc-file-name)
 
-install-conf: $(CONF_FILE)
-	install -D --mode=0644 $^ $(DESTDIR)/usr/share/acrn/samples/nuc/acrn.conf
-
 clean:
-	rm -f $(BOOT) $(HV_OBJDIR)/$(HV_FILE).efi $(EFI_OBJDIR)/boot.so $(ACRN_OBJS) $(FS)
+	rm -f $(BOOT) $(EFI_OBJDIR)/boot.so $(ACRN_OBJS)
 
-$(EFI_OBJDIR)/%.o:%.S $(HV_OBJDIR)/$(HV_CONFIG_H)
-	[ ! -e $@ ] && mkdir -p $(dir $@); \
-	$(CC) $(CFLAGS)   -c -o $@ $<
+-include $(ACRN_OBJS:.o=.d)
 
-$(EFI_OBJDIR)/%.o: %.c $(HV_OBJDIR)/$(HV_CONFIG_H)
+$(EFI_OBJDIR)/%.o:%.S
 	[ ! -e $@ ] && mkdir -p $(dir $@); \
-	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@
+	$(CC) $(CFLAGS)   -c -o $@ $< -MMD -MT $@
+
+$(EFI_OBJDIR)/%.o: %.c
+	[ ! -e $@ ] && mkdir -p $(dir $@); \
+	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@ -MMD -MT $@
 
 %.efi: %.so
 	$(OBJCOPY) -j .text -j .sdata -j .data -j .dynamic -j .dynsym -j .rel \

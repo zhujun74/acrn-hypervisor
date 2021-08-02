@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright (C) 2019 Intel Corporation.
+# SPDX-License-Identifier: BSD-3-Clause
 
 # run the filter-known-issues.py script to remove "expected" warning
 # messages from the output of the document build process and write
@@ -10,6 +12,7 @@ KI_SCRIPT=scripts/filter-known-issues.py
 CONFIG_DIR=.known-issues/doc
 
 LOG_FILE=$1
+BUILDDIR=$(dirname $LOG_FILE)
 
 if [ -z "${LOG_FILE}" ]; then
         echo "Error in $0: missing input parameter <logfile>"
@@ -29,14 +32,14 @@ else
 fi
 
 if [ -s "${LOG_FILE}" ]; then
-   $KI_SCRIPT --config-dir ${CONFIG_DIR} ${LOG_FILE} > doc.warnings 2>&1
-   if [ -s doc.warnings ]; then
+   $KI_SCRIPT --config-dir ${CONFIG_DIR} ${LOG_FILE} > ${BUILDDIR}/doc.warnings 2>&1
+   if [ -s ${BUILDDIR}/doc.warnings ]; then
 	   echo
 	   echo -e "${red}New errors/warnings found, please fix them:"
 	   echo -e "=============================================="
 	   $TPUT sgr0
 	   echo
-	   cat doc.warnings
+	   cat ${BUILDDIR}/doc.warnings
 	   echo
 	   exit 1
    else

@@ -6,15 +6,14 @@
 
 #include <types.h>
 #include <errno.h>
-#include <guest_memory.h>
-#include <vcpu.h>
-#include <vm.h>
-#include <vmcs.h>
-#include <mmu.h>
-#include <ept.h>
+#include <asm/vmx.h>
+#include <asm/guest/guest_memory.h>
+#include <asm/guest/vcpu.h>
+#include <asm/guest/vm.h>
+#include <asm/guest/vmcs.h>
+#include <asm/mmu.h>
+#include <asm/guest/ept.h>
 #include <logmsg.h>
-
-#define ACRN_DBG_GUEST	6U
 
 struct page_walk_info {
 	uint64_t top_entry;	/* Top level paging structure entry */
@@ -34,24 +33,18 @@ struct page_walk_info {
 
 enum vm_paging_mode get_vcpu_paging_mode(struct acrn_vcpu *vcpu)
 {
-	enum vm_cpu_mode cpu_mode;
-	enum vm_paging_mode ret;
+	enum vm_paging_mode ret = PAGING_MODE_0_LEVEL;	/* non-paging */
 
-	cpu_mode = get_vcpu_mode(vcpu);
-
-	if (cpu_mode == CPU_MODE_REAL) {
-		ret = PAGING_MODE_0_LEVEL;
-
-	} else if (cpu_mode == CPU_MODE_PROTECTED) {
+	if (is_paging_enabled(vcpu)) {
 		if (is_pae(vcpu)) {
-			ret = PAGING_MODE_3_LEVEL;
-		} else if (is_paging_enabled(vcpu)) {
-			ret = PAGING_MODE_2_LEVEL;
+			if (is_long_mode(vcpu)) {
+				ret = PAGING_MODE_4_LEVEL;	/* 4-level paging */
+			} else {
+				ret = PAGING_MODE_3_LEVEL;	/* PAE paging */
+			}
 		} else {
-			ret = PAGING_MODE_0_LEVEL;
+			ret = PAGING_MODE_2_LEVEL;	/* 32-bit paging */
 		}
-	} else {	/* compatibility or 64bit mode */
-		ret = PAGING_MODE_4_LEVEL;
 	}
 
 	return ret;
@@ -314,7 +307,7 @@ static inline uint32_t local_copy_gpa(struct acrn_vm *vm, void *h_ptr, uint64_t 
 
 	hpa = local_gpa2hpa(vm, gpa, &pg_size);
 	if (hpa == INVALID_HPA) {
-		pr_err("%s,vm[%hu] gpa 0x%llx,GPA is unmapping",
+		pr_err("%s,vm[%hu] gpa 0x%lx,GPA is unmapping",
 			__func__, vm->vm_id, gpa);
 		len = 0U;
 	} else {
@@ -406,8 +399,16 @@ static inline int32_t copy_gva(struct acrn_vcpu *vcpu, void *h_ptr_arg, uint64_t
  */
 int32_t copy_from_gpa(struct acrn_vm *vm, void *h_ptr, uint64_t gpa, uint32_t size)
 {
-	return copy_gpa(vm, h_ptr, gpa, size, 1);
+	int32_t ret = 0;
+
+	ret = copy_gpa(vm, h_ptr, gpa, size, 1);
+	if (ret != 0) {
+		pr_err("Unable to copy GPA 0x%llx from VM%d to HPA 0x%llx\n", gpa, vm->vm_id, (uint64_t)h_ptr);
+	}
+
+	return ret;
 }
+
 /* @pre Caller(Guest) should make sure gpa is continuous.
  * - gpa from hypercall input which from kernel stack is gpa continuous, not
  *   support kernel stack from vmap
@@ -417,7 +418,14 @@ int32_t copy_from_gpa(struct acrn_vm *vm, void *h_ptr, uint64_t gpa, uint32_t si
  */
 int32_t copy_to_gpa(struct acrn_vm *vm, void *h_ptr, uint64_t gpa, uint32_t size)
 {
-	return copy_gpa(vm, h_ptr, gpa, size, 0);
+	int32_t ret = 0;
+
+	ret = copy_gpa(vm, h_ptr, gpa, size, 0);
+	if (ret != 0) {
+		pr_err("Unable to copy HPA 0x%llx to GPA 0x%llx in VM%d\n", (uint64_t)h_ptr, gpa, vm->vm_id);
+	}
+
+	return ret;
 }
 
 int32_t copy_from_gva(struct acrn_vcpu *vcpu, void *h_ptr, uint64_t gva,
@@ -426,8 +434,15 @@ int32_t copy_from_gva(struct acrn_vcpu *vcpu, void *h_ptr, uint64_t gva,
 	return copy_gva(vcpu, h_ptr, gva, size, err_code, fault_addr, 1);
 }
 
+int32_t copy_to_gva(struct acrn_vcpu *vcpu, void *h_ptr, uint64_t gva,
+	uint32_t size, uint32_t *err_code, uint64_t *fault_addr)
+{
+	return copy_gva(vcpu, h_ptr, gva, size, err_code, fault_addr, false);
+}
+
 /* gpa --> hpa -->hva */
 void *gpa2hva(struct acrn_vm *vm, uint64_t x)
 {
-	return hpa2hva(gpa2hpa(vm, x));
+	uint64_t hpa = gpa2hpa(vm, x);
+	return (hpa == INVALID_HPA) ? NULL : hpa2hva(hpa);
 }

@@ -9,8 +9,8 @@
 
 #ifdef PROFILING_ON
 
-#include <vcpu.h>
-#include <vm_configurations.h>
+#include <asm/guest/vcpu.h>
+#include <asm/vm_config.h>
 
 #define MAX_MSR_LIST_NUM		15U
 #define MAX_PROFILING_MSR_STORE_NUM	1
@@ -114,7 +114,7 @@ struct profiling_vm_info {
 	uint8_t uuid[16];
 	char vm_name[16];
 	uint16_t num_vcpus;
-	struct profiling_vcpu_pcpu_map cpu_map[CONFIG_MAX_VCPUS_PER_VM];
+	struct profiling_vcpu_pcpu_map cpu_map[MAX_VCPUS_PER_VM];
 };
 
 struct profiling_vm_info_list {
@@ -290,13 +290,13 @@ struct vm_switch_trace {
  */
 struct profiling_info_wrapper {
 	struct profiling_msr_ops_list *msr_node;
-	struct sep_state sep_state;
+	struct sep_state s_state;
 	struct guest_vm_info vm_info;
 	ipi_commands ipi_cmd;
-	struct pmu_sample pmu_sample;
-	struct vm_switch_trace vm_switch_trace;
+	struct pmu_sample p_sample;
+	struct vm_switch_trace vm_trace;
 	socwatch_state soc_state;
-	struct sw_msr_op_info sw_msr_op_info;
+	struct sw_msr_op_info sw_msr_info;
 	spinlock_t sw_lock;
 } __aligned(8);
 

@@ -70,11 +70,11 @@
 	VIRTIO_CONSOLE_F_EMERG_WRITE)
 
 static int virtio_console_debug;
-#define DPRINTF(params) do {		\
-	if (virtio_console_debug)	\
-		printf params;		\
+#define DPRINTF(params) do {           \
+       if (virtio_console_debug)       \
+               pr_dbg params;          \
 } while (0)
-#define WPRINTF(params) (printf params)
+#define WPRINTF(params) (pr_err params)
 
 struct virtio_console;
 struct virtio_console_port;
@@ -412,7 +412,9 @@ virtio_console_notify_rx(void *vdev, struct virtio_vq_info *vq)
 
 	if (!port->rx_ready) {
 		port->rx_ready = 1;
-		vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+		if (vq_has_descs(vq)) {
+			vq->used->flags |= VRING_USED_F_NO_NOTIFY;
+		}
 	}
 }
 
@@ -459,7 +461,7 @@ virtio_console_backend_read(int fd __attribute__((unused)),
 	port = be->port;
 	vq = virtio_console_port_to_vq(port, true);
 
-	if (!be->open || !port->rx_ready) {
+	if (!be->open || !port->rx_ready || !vq_ring_ready(vq)) {
 		len = read(be->fd, dummybuf, sizeof(dummybuf));
 		if (len == 0)
 			goto close;
@@ -692,7 +694,7 @@ virtio_console_config_backend(struct virtio_console_backend *be)
 {
 	int fd, flags;
 	char *pts_name = NULL;
-	int slave_fd = -1;
+	int client_fd = -1;
 	struct termios tio, saved_tio;
 	struct sockaddr_un addr;
 
@@ -709,17 +711,17 @@ virtio_console_config_backend(struct virtio_console_backend *be)
 			return -1;
 		}
 
-		slave_fd = open(pts_name, O_RDWR);
-		if (slave_fd == -1) {
-			WPRINTF(("vtcon: slave_fd open failed, errno = %d\n",
+		client_fd = open(pts_name, O_RDWR);
+		if (client_fd == -1) {
+			WPRINTF(("vtcon: client_fd open failed, errno = %d\n",
 				errno));
 			return -1;
 		}
 
-		tcgetattr(slave_fd, &tio);
+		tcgetattr(client_fd, &tio);
 		cfmakeraw(&tio);
-		tcsetattr(slave_fd, TCSAFLUSH, &tio);
-		be->pts_fd = slave_fd;
+		tcsetattr(client_fd, TCSAFLUSH, &tio);
+		be->pts_fd = client_fd;
 
 		WPRINTF(("***********************************************\n"));
 		WPRINTF(("virt-console backend redirected to %s\n", pts_name));
@@ -1007,6 +1009,7 @@ static void
 virtio_console_destroy(struct virtio_console *console)
 {
 	if (console) {
+		virtio_console_reset(console);
 		if (console->config)
 			free(console->config);
 		free(console);
@@ -1136,6 +1139,7 @@ virtio_console_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	pci_set_cfgdata16(dev, PCIR_DEVICE, VIRTIO_DEV_CONSOLE);
 	pci_set_cfgdata16(dev, PCIR_VENDOR, VIRTIO_VENDOR);
 	pci_set_cfgdata8(dev, PCIR_CLASS, PCIC_SIMPLECOMM);
+	pci_set_cfgdata8(dev, PCIR_SUBCLASS, PCIS_SIMPLECOMM_OTHER);
 	pci_set_cfgdata16(dev, PCIR_SUBDEV_0, VIRTIO_TYPE_CONSOLE);
 	pci_set_cfgdata16(dev, PCIR_SUBVEND_0, VIRTIO_VENDOR);
 

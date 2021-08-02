@@ -38,7 +38,6 @@
 #include <string.h>
 #include <pthread.h>
 
-#include "vmm.h"
 #include "mem.h"
 #include "tree.h"
 
@@ -100,7 +99,7 @@ mmio_rb_add(struct mmio_rb_tree *rbt, struct mmio_rb_range *new)
 
 	if (overlap != NULL) {
 #ifdef RB_DEBUG
-		printf("overlap detected: new %lx:%lx, tree %lx:%lx\n",
+		pr_dbg("overlap detected: new %lx:%lx, tree %lx:%lx\n",
 		       new->mr_base, new->mr_end,
 		       overlap->mr_base, overlap->mr_end);
 #endif
@@ -119,7 +118,7 @@ mmio_rb_dump(struct mmio_rb_tree *rbt)
 
 	pthread_rwlock_rdlock(&mmio_rwlock);
 	RB_FOREACH(np, mmio_rb_tree, rbt) {
-		printf(" %lx:%lx, %s\n", np->mr_base, np->mr_end,
+		pr_dbg(" %lx:%lx, %s\n", np->mr_base, np->mr_end,
 		       np->mr_param.name);
 	}
 	pthread_rwlock_unlock(&mmio_rwlock);
@@ -151,7 +150,7 @@ mem_write(void *ctx, int vcpu, uint64_t gpa, uint64_t wval, int size, void *arg)
 }
 
 int
-emulate_mem(struct vmctx *ctx, struct mmio_request *mmio_req)
+emulate_mem(struct vmctx *ctx, struct acrn_mmio_request *mmio_req)
 {
 	uint64_t paddr = mmio_req->address;
 	int size = mmio_req->size;
@@ -180,7 +179,7 @@ emulate_mem(struct vmctx *ctx, struct mmio_request *mmio_req)
 	if (entry == NULL)
 		return -EINVAL;
 
-	if (mmio_req->direction == REQUEST_READ)
+	if (mmio_req->direction == ACRN_IOREQ_DIR_READ)
 		err = mem_read(ctx, 0, paddr, (uint64_t *)&mmio_req->value,
 				size, &entry->mr_param);
 	else
@@ -248,12 +247,11 @@ unregister_mem_int(struct mmio_rb_tree *rbt, struct mem_range *memp)
 			/* flush Per-VM cache */
 			if (mmio_hint == entry)
 				mmio_hint = NULL;
+
+			free(entry);
 		}
 	}
 	pthread_rwlock_unlock(&mmio_rwlock);
-
-	if (entry)
-		free(entry);
 
 	return err;
 }

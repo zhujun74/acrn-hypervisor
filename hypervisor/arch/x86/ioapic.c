@@ -6,52 +6,49 @@
 
 #include <types.h>
 #include <errno.h>
-#include <spinlock.h>
-#include <ioapic.h>
 #include <irq.h>
-#include <pgtable.h>
-#include <io.h>
-#include <mmu.h>
+#include <asm/lib/spinlock.h>
+#include <asm/ioapic.h>
+#include <asm/irq.h>
+#include <asm/pgtable.h>
+#include <asm/io.h>
+#include <asm/mmu.h>
 #include <acpi.h>
 #include <logmsg.h>
 
-#define IOAPIC_INVALID_ID	0xFFU
-
 #define NR_MAX_GSI		(CONFIG_MAX_IOAPIC_NUM * CONFIG_MAX_IOAPIC_LINES)
 
+#define DEFAULT_DEST_MODE	IOAPIC_RTE_DESTMODE_LOGICAL
+#define DEFAULT_DELIVERY_MODE	IOAPIC_RTE_DELMODE_LOPRI
+
+/*
+ * is_valid is by default false when all the
+ * static variables, part of .bss, are initialized to 0s
+ * It is set to true, if the corresponding
+ * gsi falls in ranges identified by IOAPIC data
+ * in ACPI MADT in ioapic_setup_irqs.
+ */
+
+struct gsi_table {
+	bool is_valid;
+	struct {
+		uint8_t acpi_id;
+		uint8_t index;
+		uint32_t pin;
+		void  *base_addr;
+	} ioapic_info;
+};
+
 static struct gsi_table gsi_table_data[NR_MAX_GSI];
-static uint32_t ioapic_nr_gsi;
-static spinlock_t ioapic_lock;
+static uint32_t ioapic_max_nr_gsi;
+static spinlock_t ioapic_lock = { .head = 0U, .tail = 0U, };
 
 static union ioapic_rte saved_rte[CONFIG_MAX_IOAPIC_NUM][CONFIG_MAX_IOAPIC_LINES];
 
-/*
- * the irq to ioapic pin mapping should extract from ACPI MADT table
- * hardcoded here
- */
-static const uint32_t legacy_irq_to_pin[NR_LEGACY_IRQ] = {
-	2U, /* IRQ0*/
-	1U, /* IRQ1*/
-	0U, /* IRQ2 connected to Pin0 (ExtInt source of PIC) if existing */
-	3U, /* IRQ3*/
-	4U, /* IRQ4*/
-	5U, /* IRQ5*/
-	6U, /* IRQ6*/
-	7U, /* IRQ7*/
-	8U, /* IRQ8*/
-	9U, /* IRQ9*/
-	10U, /* IRQ10*/
-	11U, /* IRQ11*/
-	12U, /* IRQ12*/
-	13U, /* IRQ13*/
-	14U, /* IRQ14*/
-	15U, /* IRQ15*/
-};
-
-static const uint32_t legacy_irq_trigger_mode[NR_LEGACY_IRQ] = {
-	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ0*/
-	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ1*/
+static const uint32_t legacy_irq_trigger_mode[NR_LEGACY_PIN] = {
 	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ2*/
+	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ1*/
+	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ0*/
 	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ3*/
 	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ4*/
 	IOAPIC_RTE_TRGRMODE_EDGE, /* IRQ5*/
@@ -87,7 +84,7 @@ static const uint32_t pic_ioapic_pin_map[NR_LEGACY_PIN] = {
 };
 
 static struct ioapic_info ioapic_array[CONFIG_MAX_IOAPIC_NUM];
-static uint16_t ioapic_num;
+static uint8_t ioapic_num;
 
 uint32_t get_pic_pin_from_ioapic_pin(uint32_t pin_index)
 {
@@ -98,18 +95,29 @@ uint32_t get_pic_pin_from_ioapic_pin(uint32_t pin_index)
 	return pin_id;
 }
 
-/*
- * @pre irq_num < NR_MAX_GSI
- */
-void *ioapic_get_gsi_irq_addr(uint32_t irq_num)
+uint8_t get_platform_ioapic_info (struct ioapic_info **plat_ioapic_info)
 {
-
-	return gsi_table_data[irq_num].addr;
+	*plat_ioapic_info = ioapic_array;
+	return ioapic_num;
 }
 
-uint32_t ioapic_get_nr_gsi(void)
+uint8_t get_gsi_to_ioapic_index(uint32_t gsi)
 {
-	return ioapic_nr_gsi;
+	return gsi_table_data[gsi].ioapic_info.index;
+}
+
+/*
+ * @pre gsi < NR_MAX_GSI
+ */
+void *gsi_to_ioapic_base(uint32_t gsi)
+{
+
+	return gsi_table_data[gsi].ioapic_info.base_addr;
+}
+
+uint32_t get_max_nr_gsi(void)
+{
+	return ioapic_max_nr_gsi;
 }
 
 static void *map_ioapic(uint64_t ioapic_paddr)
@@ -162,20 +170,20 @@ get_ioapic_base(uint8_t apic_id)
 	return ioapic_array[apic_id].addr;
 }
 
-void ioapic_get_rte_entry(void *ioapic_addr, uint32_t pin, union ioapic_rte *rte)
+void ioapic_get_rte_entry(void *ioapic_base, uint32_t pin, union ioapic_rte *rte)
 {
 	uint32_t rte_addr = (pin * 2U) + 0x10U;
-	rte->u.lo_32 = ioapic_read_reg32(ioapic_addr, rte_addr);
-	rte->u.hi_32 = ioapic_read_reg32(ioapic_addr, rte_addr + 1U);
+	rte->u.lo_32 = ioapic_read_reg32(ioapic_base, rte_addr);
+	rte->u.hi_32 = ioapic_read_reg32(ioapic_base, rte_addr + 1U);
 }
 
 static inline void
-ioapic_set_rte_entry(void *ioapic_addr,
+ioapic_set_rte_entry(void *ioapic_base,
 		uint32_t pin, union ioapic_rte rte)
 {
 	uint32_t rte_addr = (pin * 2U) + 0x10U;
-	ioapic_write_reg32(ioapic_addr, rte_addr, rte.u.lo_32);
-	ioapic_write_reg32(ioapic_addr, rte_addr + 1U, rte.u.hi_32);
+	ioapic_write_reg32(ioapic_base, rte_addr, rte.u.lo_32);
+	ioapic_write_reg32(ioapic_base, rte_addr + 1U, rte.u.hi_32);
 }
 
 static inline union ioapic_rte
@@ -211,7 +219,7 @@ create_rte_for_gsi_irq(uint32_t irq, uint32_t vr)
 
 	rte.full = 0UL;
 
-	if (irq < NR_LEGACY_IRQ) {
+	if (irq < NR_LEGACY_PIN) {
 		rte = create_rte_for_legacy_irq(irq, vr);
 	} else {
 		/* irq default masked, level trig */
@@ -233,12 +241,12 @@ create_rte_for_gsi_irq(uint32_t irq, uint32_t vr)
 
 static void ioapic_set_routing(uint32_t gsi, uint32_t vr)
 {
-	void *addr;
+	void *ioapic_base;
 	union ioapic_rte rte;
 
-	addr = gsi_table_data[gsi].addr;
+	ioapic_base = gsi_to_ioapic_base(gsi);
 	rte = create_rte_for_gsi_irq(gsi, vr);
-	ioapic_set_rte_entry(addr, gsi_table_data[gsi].pin, rte);
+	ioapic_set_rte_entry(ioapic_base, gsi_table_data[gsi].ioapic_info.pin, rte);
 
 	if (rte.bits.trigger_mode == IOAPIC_RTE_TRGRMODE_LEVEL) {
 		set_irq_trigger_mode(gsi, true);
@@ -246,73 +254,76 @@ static void ioapic_set_routing(uint32_t gsi, uint32_t vr)
 		set_irq_trigger_mode(gsi, false);
 	}
 
-	dev_dbg(ACRN_DBG_IRQ, "GSI: irq:%d pin:%hhu rte:%lx",
-		gsi, gsi_table_data[gsi].pin,
+	dev_dbg(DBG_LEVEL_IRQ, "GSI: irq:%d pin:%hhu rte:%lx",
+		gsi, gsi_table_data[gsi].ioapic_info.pin,
 		rte.full);
 }
 
-/**
+/*
  * @pre rte != NULL
+ * @pre is_ioapic_irq(irq) == true
  */
 void ioapic_get_rte(uint32_t irq, union ioapic_rte *rte)
 {
 	void *addr;
 
-	if (ioapic_irq_is_gsi(irq)) {
-		addr = gsi_table_data[irq].addr;
-		ioapic_get_rte_entry(addr, gsi_table_data[irq].pin, rte);
-	}
+	addr = gsi_to_ioapic_base(irq);
+	ioapic_get_rte_entry(addr, gsi_table_data[irq].ioapic_info.pin, rte);
 }
 
+/*
+ * @pre is_ioapic_irq(irq) == true
+ */
 void ioapic_set_rte(uint32_t irq, union ioapic_rte rte)
 {
 	void *addr;
 
-	if (ioapic_irq_is_gsi(irq)) {
-		addr = gsi_table_data[irq].addr;
-		ioapic_set_rte_entry(addr, gsi_table_data[irq].pin, rte);
+	addr = gsi_to_ioapic_base(irq);
+	ioapic_set_rte_entry(addr, gsi_table_data[irq].ioapic_info.pin, rte);
 
-		dev_dbg(ACRN_DBG_IRQ, "GSI: irq:%d pin:%hhu rte:%lx",
-			irq, gsi_table_data[irq].pin,
-			rte.full);
-	}
+	dev_dbg(DBG_LEVEL_IRQ, "GSI: irq:%d pin:%hhu rte:%lx",
+		irq, gsi_table_data[irq].ioapic_info.pin,
+		rte.full);
 }
 
-bool ioapic_irq_is_gsi(uint32_t irq)
+/*
+ * Checks if the gsi is valid
+ * 1) gsi < NR_MAX_GSI
+ * 2) gsi is valid on the platform according to ACPI MADT info
+ */
+bool is_gsi_valid(uint32_t gsi)
 {
-	return irq < ioapic_nr_gsi;
+
+	return (gsi < NR_MAX_GSI) && (gsi_table_data[gsi].is_valid);
 }
 
-uint32_t ioapic_irq_to_pin(uint32_t irq)
+/*
+ * IO-APIC gsi and irq are identity mapped in ioapic_setup_irqs
+ * So #gsi = #irq for ACRN
+ */
+
+bool is_ioapic_irq(uint32_t irq)
 {
-	uint32_t ret;
 
-	if (ioapic_irq_is_gsi(irq)) {
-		ret = gsi_table_data[irq].pin;
-	} else {
-		ret = INVALID_INTERRUPT_PIN;
-	}
-
-	return ret;
+	return is_gsi_valid(irq);
 }
 
-bool ioapic_is_pin_valid(uint32_t pin)
+/*
+ *@pre gsi < NR_MAX_GSI
+ *@pre is_gsi_valid(gsi) == true 
+ */
+
+uint32_t gsi_to_ioapic_pin(uint32_t gsi)
 {
-	return (pin != INVALID_INTERRUPT_PIN);
+	return gsi_table_data[gsi].ioapic_info.pin;
 }
 
-uint32_t ioapic_pin_to_irq(uint32_t pin)
+/*
+ *@pre is_gsi_valid(gsi) == true
+ */
+uint32_t ioapic_gsi_to_irq(uint32_t gsi)
 {
-	uint32_t i;
-	uint32_t irq = IRQ_INVALID;
-
-	for (i = 0U; i < ioapic_nr_gsi; i++) {
-		if (gsi_table_data[i].pin == pin) {
-			irq = i;
-			break;
-		}
-	}
-	return irq;
+	return gsi;
 }
 
 static void
@@ -322,23 +333,21 @@ ioapic_irq_gsi_mask_unmask(uint32_t irq, bool mask)
 	uint32_t pin;
 	union ioapic_rte rte;
 
-	if (ioapic_irq_is_gsi(irq)) {
-		addr = gsi_table_data[irq].addr;
-		pin = gsi_table_data[irq].pin;
+	addr = gsi_to_ioapic_base(irq);
+	pin = gsi_table_data[irq].ioapic_info.pin;
 
-		if (addr != NULL) {
-			ioapic_get_rte_entry(addr, pin, &rte);
-			if (mask) {
-				rte.bits.intr_mask = IOAPIC_RTE_MASK_SET;
-			} else {
-				rte.bits.intr_mask = IOAPIC_RTE_MASK_CLR;
-			}
-			ioapic_set_rte_entry(addr, pin, rte);
-			dev_dbg(ACRN_DBG_PTIRQ, "update: irq:%d pin:%hhu rte:%lx",
-				irq, pin, rte.full);
+	if (addr != NULL) {
+		ioapic_get_rte_entry(addr, pin, &rte);
+		if (mask) {
+			rte.bits.intr_mask = IOAPIC_RTE_MASK_SET;
 		} else {
-			dev_dbg(ACRN_DBG_PTIRQ, "NULL Address returned from gsi_table_data");
+			rte.bits.intr_mask = IOAPIC_RTE_MASK_CLR;
 		}
+		ioapic_set_rte_entry(addr, pin, rte);
+		dev_dbg(DBG_LEVEL_PTIRQ, "update: irq:%d pin:%hhu rte:%lx",
+			irq, pin, rte.full);
+	} else {
+		dev_dbg(DBG_LEVEL_PTIRQ, "NULL Address returned from gsi_table_data");
 	}
 }
 
@@ -359,7 +368,7 @@ ioapic_nr_pins(void *ioapic_base)
 	uint32_t nr_pins;
 
 	version = ioapic_read_reg32(ioapic_base, IOAPIC_VER);
-	dev_dbg(ACRN_DBG_IRQ, "IOAPIC version: %x", version);
+	dev_dbg(DBG_LEVEL_IRQ, "IOAPIC version: %x", version);
 
 	/* The 23:16 bits in the version register is the highest entry in the
 	 * I/O redirection table, which is 1 smaller than the number of
@@ -370,17 +379,13 @@ ioapic_nr_pins(void *ioapic_base)
 	return nr_pins;
 }
 
+/*
+ * @pre is_ioapic_irq(irq) == true
+ */
 uint8_t ioapic_irq_to_ioapic_id(uint32_t irq)
 {
-	uint8_t ret;
 
-	if (ioapic_irq_is_gsi(irq)) {
-		ret = gsi_table_data[irq].ioapic_id;
-	} else {
-		ret = IOAPIC_INVALID_ID;
-	}
-
-	return ret;
+	return gsi_table_data[irq].ioapic_info.acpi_id;
 }
 
 int32_t init_ioapic_id_info(void)
@@ -391,7 +396,7 @@ int32_t init_ioapic_id_info(void)
 	uint32_t nr_pins, gsi;
 
 	ioapic_num = parse_madt_ioapic(&ioapic_array[0]);
-	if (ioapic_num <= (uint16_t)CONFIG_MAX_IOAPIC_NUM) {
+	if (ioapic_num <= (uint8_t)CONFIG_MAX_IOAPIC_NUM) {
 		/*
 		 * Iterate thru all the IO-APICs on the platform
 		 * Check the number of pins available on each IOAPIC is less
@@ -401,7 +406,7 @@ int32_t init_ioapic_id_info(void)
 		gsi = 0U;
 		for (ioapic_id = 0U; ioapic_id < ioapic_num; ioapic_id++) {
 			addr = map_ioapic(ioapic_array[ioapic_id].addr);
-			hv_access_memory_region_update((uint64_t)addr, PAGE_SIZE);
+			set_paging_supervisor((uint64_t)addr, PAGE_SIZE);
 
 			nr_pins = ioapic_nr_pins(addr);
 			if (nr_pins <= (uint32_t) CONFIG_MAX_IOAPIC_LINES) {
@@ -421,7 +426,7 @@ int32_t init_ioapic_id_info(void)
 		 */
 
 		if (ret == 0) {
-			if (gsi < (uint32_t) NR_LEGACY_IRQ) {
+			if (gsi < (uint32_t) NR_LEGACY_PIN) {
 				pr_err ("Total pin count (%x) is less than NR_LEGACY_IRQ!", gsi);
 				ret = -EINVAL;
 			}
@@ -442,8 +447,6 @@ void ioapic_setup_irqs(void)
 	uint32_t gsi = 0U;
 	uint32_t vr;
 
-	spinlock_init(&ioapic_lock);
-
 	for (ioapic_id = 0U;
 	     ioapic_id < ioapic_num; ioapic_id++) {
 		void *addr;
@@ -452,19 +455,16 @@ void ioapic_setup_irqs(void)
 		addr = map_ioapic(ioapic_array[ioapic_id].addr);
 
 		nr_pins = ioapic_array[ioapic_id].nr_pins;
+		gsi = ioapic_array[ioapic_id].gsi_base;
 		for (pin = 0U; pin < nr_pins; pin++) {
-			gsi_table_data[gsi].ioapic_id = ioapic_array[ioapic_id].id;
-			gsi_table_data[gsi].addr = addr;
-
-			if (gsi < NR_LEGACY_IRQ) {
-				gsi_table_data[gsi].pin =
-					legacy_irq_to_pin[gsi] & 0xffU;
-			} else {
-				gsi_table_data[gsi].pin = pin;
-			}
+			gsi_table_data[gsi].is_valid = true;
+			gsi_table_data[gsi].ioapic_info.acpi_id = ioapic_array[ioapic_id].id;
+			gsi_table_data[gsi].ioapic_info.base_addr = addr;
+			gsi_table_data[gsi].ioapic_info.pin = pin;
+			gsi_table_data[gsi].ioapic_info.index = ioapic_id;
 
 			/* pinned irq before use it */
-			if (alloc_irq_num(gsi) == IRQ_INVALID) {
+			if (reserve_irq_num(gsi) == IRQ_INVALID) {
 				pr_err("failed to alloc IRQ[%d]", gsi);
 				gsi++;
 				continue;
@@ -473,7 +473,7 @@ void ioapic_setup_irqs(void)
 			/* assign vector for this GSI
 			 * for legacy irq, reserved vector and never free
 			 */
-			if (gsi < NR_LEGACY_IRQ) {
+			if (gsi < NR_LEGACY_PIN) {
 				vr = alloc_irq_vector(gsi);
 				if (vr == VECTOR_INVALID) {
 					pr_err("failed to alloc VR");
@@ -490,7 +490,7 @@ void ioapic_setup_irqs(void)
 	}
 
 	/* system max gsi numbers */
-	ioapic_nr_gsi = gsi;
+	ioapic_max_nr_gsi = gsi;
 }
 
 void suspend_ioapic(void)
