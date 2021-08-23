@@ -5,7 +5,6 @@
 
 import sys
 import enum
-import subprocess
 import board_cfg_lib
 import common
 
@@ -38,7 +37,7 @@ def gen_dmar_structure(config):
 
     if not dmar_info_lines:
         print("\n#ifndef CONFIG_ACPI_PARSE_ENABLED", file=config)
-        print("#error \"DMAR info is not available, please set ACPI_PARSE_ENABLED to y in Kconfig. \\", file=config)
+        print("#error \"DMAR info is not available, please set ACPI_PARSE_ENABLED to y. \\", file=config)
         print("\tOr use acrn-config tool to generate platform DMAR info.\"", file=config)
         print("#endif\n", file=config)
 

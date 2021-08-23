@@ -2,9 +2,6 @@
 # acrn-hypervisor/hypervisor/Makefile
 #
 
-include ../VERSION
-FULL_VERSION=$(MAJOR_VERSION).$(MINOR_VERSION)$(EXTRA_VERSION)
-
 API_MAJOR_VERSION=1
 API_MINOR_VERSION=0
 
@@ -286,10 +283,22 @@ VP_BASE_C_SRCS += arch/x86/guest/nested.c
 VP_BASE_C_SRCS += arch/x86/guest/vept.c
 endif
 VP_BASE_C_SRCS += boot/guest/vboot_info.c
+ifeq ($(CONFIG_GUEST_KERNEL_BZIMAGE),y)
+VP_BASE_C_SRCS += boot/guest/bzimage_loader.c
+endif
+ifeq ($(CONFIG_GUEST_KERNEL_RAWIMAGE),y)
+VP_BASE_C_SRCS += boot/guest/rawimage_loader.c
+endif
+ifeq ($(CONFIG_GUEST_KERNEL_ELF),y)
+VP_BASE_C_SRCS += boot/guest/elf_loader.c
+endif
 VP_BASE_C_SRCS += common/hv_main.c
 VP_BASE_C_SRCS += common/vm_load.c
 VP_BASE_C_SRCS += arch/x86/configs/pci_dev.c
 VP_BASE_C_SRCS += arch/x86/configs/vacpi.c
+ifeq ($(CONFIG_SECURITY_VM_FIXUP),y)
+VP_BASE_C_SRCS += quirks/security_vm_fixup.c
+endif
 
 # virtual platform device model
 VP_DM_C_SRCS += dm/vpic.c
@@ -395,7 +404,7 @@ pre_build: $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
 	$(MAKE) -C $(PRE_BUILD_DIR) BOARD=$(BOARD) SCENARIO=$(SCENARIO) TARGET_DIR=$(HV_CONFIG_DIR)
 	@$(HV_OBJDIR)/hv_prebuild_check.out
 	@echo "generate the binary of ACPI tables for pre-launched VMs ..."
-	python3 ../misc/config_tools/acpi_gen/bin_gen.py --board $(BOARD) --scenario $(SCENARIO) --asl $(HV_CONFIG_DIR) --out $(HV_OBJDIR)/acpi
+	python3 ../misc/config_tools/acpi_gen/bin_gen.py --board $(HV_OBJDIR)/.board.xml --scenario $(HV_OBJDIR)/.scenario.xml --asl $(HV_CONFIG_DIR) --out $(HV_OBJDIR)
 
 .PHONY: header
 header: $(VERSION) $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)

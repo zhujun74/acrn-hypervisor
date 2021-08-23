@@ -15,16 +15,16 @@ TEMPLATE_ACPI_PATH = os.path.join(VM_CONFIGS_PATH, 'acpi_template', 'template')
 
 ACPI_TABLE_LIST = [('rsdp.asl', 'rsdp.aml'), ('xsdt.asl', 'xsdt.aml'), ('facp.asl', 'facp.aml'),
                    ('mcfg.asl', 'mcfg.aml'), ('apic.asl', 'apic.aml'), ('tpm2.asl', 'tpm2.aml'),
-                   ('dsdt.asl', 'dsdt.aml'), ('PTCT', 'ptct.aml'), ('RTCT', 'rtct.aml')]
+                   ('dsdt.aml', 'dsdt.aml'), ('PTCT', 'ptct.aml'), ('RTCT', 'rtct.aml')]
 
-ACPI_BASE = 0x7ff00000
+ACPI_BASE = 0x7fe00000
 
 ACPI_RSDP_ADDR_OFFSET = 0x0         # (36 bytes fixed)
 ACPI_XSDT_ADDR_OFFSET = 0x80        # (36 bytes + 8*7 table addrs)
 ACPI_FADT_ADDR_OFFSET = 0x100       # (268 bytes)
 ACPI_DSDT_ADDR_OFFSET = 0x240       # (variable)
-ACPI_MCFG_ADDR_OFFSET = 0x440       # (60 bytes)
-ACPI_MADT_ADDR_OFFSET = 0x480       # (depends on #CPUs)
+ACPI_MCFG_ADDR_OFFSET = 0xBC0       # (60 bytes)
+ACPI_MADT_ADDR_OFFSET = 0xC00       # (62 + 8*n bytes, where n is the number of vCPUs)
 ACPI_RTCT_ADDR_OFFSET = 0xF00
 ACPI_TPM2_ADDR_OFFSET = 0x1300      # (52 bytes)
 

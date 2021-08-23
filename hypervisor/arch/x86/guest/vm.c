@@ -25,7 +25,7 @@
 #include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <logmsg.h>
-#include <vboot_info.h>
+#include <vboot.h>
 #include <asm/board.h>
 #include <asm/sgx.h>
 #include <sbuf.h>
@@ -39,6 +39,9 @@
 #include <asm/rtcm.h>
 #include <asm/irq.h>
 #include <uart16550.h>
+#ifdef CONFIG_SECURITY_VM_FIXUP
+#include <quirks/security_vm_fixup.h>
+#endif
 
 /* Local variables */
 
@@ -291,11 +294,16 @@ static void prepare_prelaunched_vm_memmap(struct acrn_vm *vm, const struct acrn_
 	}
 
 	for (i = 0U; i < MAX_MMIO_DEV_NUM; i++) {
+		/* Now we include the TPM2 event log region in ACPI NVS, so we need to
+		 * delete this potential mapping first.
+		 */
+		(void)deassign_mmio_dev(vm, &vm_config->mmiodevs[i]);
+
 		(void)assign_mmio_dev(vm, &vm_config->mmiodevs[i]);
 
 #ifdef P2SB_VGPIO_DM_ENABLED
-		if ((vm_config->pt_p2sb_bar) && (vm_config->mmiodevs[i].base_hpa == P2SB_BAR_ADDR)) {
-			register_vgpio_handler(vm, &vm_config->mmiodevs[i]);
+		if ((vm_config->pt_p2sb_bar) && (vm_config->mmiodevs[i].res[0].host_pa == P2SB_BAR_ADDR)) {
+			register_vgpio_handler(vm, &vm_config->mmiodevs[i].res[0]);
 		}
 #endif
 	}
@@ -808,7 +816,7 @@ int32_t reset_vm(struct acrn_vm *vm)
 	vm->arch_vm.vlapic_mode = VM_VLAPIC_XAPIC;
 
 	if (is_sos_vm(vm)) {
-		(void)vm_sw_loader(vm);
+		(void)prepare_os_image(vm);
 	}
 
 	reset_vm_ioreqs(vm);
@@ -893,6 +901,9 @@ void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 	int32_t err = 0;
 	struct acrn_vm *vm = NULL;
 
+#ifdef CONFIG_SECURITY_VM_FIXUP
+	security_vm_fixup(vm_id);
+#endif
 	/* SOS and pre-launched VMs launch on all pCPUs defined in vm_config->cpu_affinity */
 	err = create_vm(vm_id, vm_config->cpu_affinity, vm_config, &vm);
 
@@ -921,7 +932,7 @@ void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 			}
 		}
 
-		err = vm_sw_loader(vm);
+		err = prepare_os_image(vm);
 
 		if (is_prelaunched_vm(vm)) {
 			loaded_pre_vm_nr++;

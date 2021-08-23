@@ -9,6 +9,8 @@
     xmlns:dyn="http://exslt.org/dynamic"
     xmlns:math="http://exslt.org/math"
     xmlns:func="http://exslt.org/functions"
+    xmlns:str="http://exslt.org/strings"
+    xmlns:set="http://exslt.org/sets"
     xmlns:acrn="http://projectacrn.org"
     extension-element-prefixes="func">
 
@@ -18,6 +20,8 @@
 
   <!-- C code common variables -->
   <xsl:variable name="newline" select="'&#xa;'" />
+  <xsl:variable name="tab" select="'&#x9;'" />
+  <xsl:variable name="whitespaces" select="concat(' ', '&#xd;', $tab, $newline)" />
   <xsl:variable name="quot" select="'&#x22;'" />
   <xsl:variable name="end_of_initializer" select="concat(',', $newline)" />
   <xsl:variable name="end_of_array_initializer" select="concat('};', $newline)" />
@@ -120,6 +124,19 @@
     <xsl:param name="b" />
     <xsl:choose>
       <xsl:when test="$a &lt; $b">
+        <func:result select="$a" />
+      </xsl:when>
+      <xsl:otherwise>
+        <func:result select="$b" />
+      </xsl:otherwise>
+    </xsl:choose>
+  </func:function>
+
+  <func:function name="acrn:max">
+    <xsl:param name="a" />
+    <xsl:param name="b" />
+    <xsl:choose>
+      <xsl:when test="$a &gt; $b">
         <func:result select="$a" />
       </xsl:when>
       <xsl:otherwise>
@@ -586,6 +603,13 @@
     </xsl:choose>
   </func:function>
 
+  <func:function name="acrn:get-intx-mapping">
+    <xsl:param name="pt_intx_nodes" />
+    <xsl:variable name="joined" select="translate(acrn:string-join($pt_intx_nodes/text(), '', '', ''), $whitespaces, '')" />
+    <xsl:variable name="unique_mapping" select="set:distinct(str:split(str:replace($joined, ')(', ').('), '.'))" />
+    <func:result select="$unique_mapping" />
+  </func:function>
+
   <func:function name="acrn:get-vbdf">
     <xsl:param name="vmid" />
     <xsl:param name="name" />
@@ -605,10 +629,10 @@
 
   <func:function name="acrn:ptdev-name-suffix">
     <xsl:param name="pci_dev" />
-    <xsl:variable name="bus" select="translate(substring-before($pci_dev, ':'), $lowercase, $uppercase)" />
-    <xsl:variable name="dev" select="translate(substring-before(substring-after($pci_dev, ':'), '.'), $lowercase, $uppercase)" />
-    <xsl:variable name="func" select="translate(substring-after(substring-before($pci_dev, ' '), '.'), $lowercase, $uppercase)" />
-    <func:result select="concat('0X', $bus, '_0X', $dev, '000', $func)" />
+    <xsl:variable name="bus" select="translate(substring-before($pci_dev, ':'), $uppercase, $lowercase)" />
+    <xsl:variable name="dev" select="translate(substring-before(substring-after($pci_dev, ':'), '.'), $uppercase, $lowercase)" />
+    <xsl:variable name="func" select="translate(substring-after(substring-before($pci_dev, ' '), '.'), $uppercase, $lowercase)" />
+    <func:result select="concat($bus, ':', $dev, '.', $func)" />
   </func:function>
   <!-- End of scenario-specific functions-->
 

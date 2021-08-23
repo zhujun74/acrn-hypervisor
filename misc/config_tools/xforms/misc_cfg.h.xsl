@@ -39,7 +39,6 @@
     <xsl:call-template name="vm0_passthrough_tpm" />
     <xsl:call-template name="vm_config_pci_dev_num" />
     <xsl:call-template name="vm_boot_args" />
-    <xsl:call-template name="vm_pt_intx_num" />
   </xsl:template>
 
   <xsl:template match="allocation-data//ssram">
@@ -191,6 +190,11 @@
         <xsl:value-of select="acrn:define('VM0_TPM_BUFFER_BASE_ADDR', '0xFED40000', 'UL')" />
         <xsl:value-of select="acrn:define('VM0_TPM_BUFFER_BASE_ADDR_GPA', '0xFED40000', 'UL')" />
         <xsl:value-of select="acrn:define('VM0_TPM_BUFFER_SIZE', '0x5000', 'UL')" />
+        <xsl:if test="//capability[@id='log_area']">
+          <xsl:value-of select="acrn:define('VM0_TPM_EVENTLOG_BASE_ADDR', //allocation-data/acrn-config/vm[@id = '0']/log_area_start_address, 'UL')" />
+          <xsl:value-of select="acrn:define('VM0_TPM_EVENTLOG_BASE_ADDR_HPA', //capability[@id='log_area']/log_area_start_address, 'UL')" />
+          <xsl:value-of select="acrn:define('VM0_TPM_EVENTLOG_SIZE', //allocation-data/acrn-config/vm[@id = '0']/log_area_minimum_length, 'UL')" />
+        </xsl:if>
       </xsl:if>
     </xsl:if>
   </xsl:if>
@@ -214,19 +218,6 @@
       </xsl:if>
     </xsl:if>
   </xsl:for-each>
-</xsl:template>
-
-<xsl:template name="vm_pt_intx_num">
-  <xsl:variable name="pt_intx" select="normalize-space(vm/pt_intx)" />
-  <xsl:variable name="length" select="string-length($pt_intx) - string-length(translate($pt_intx, ',', ''))" />
-  <xsl:choose>
-    <xsl:when test="$length">
-      <xsl:value-of select="acrn:define('VM0_PT_INTX_NUM', $length, 'U')" />
-    </xsl:when>
-    <xsl:otherwise>
-      <xsl:value-of select="acrn:define('VM0_PT_INTX_NUM', 0, 'U')" />
-    </xsl:otherwise>
-  </xsl:choose>
 </xsl:template>
 
 </xsl:stylesheet>

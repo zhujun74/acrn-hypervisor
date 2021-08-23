@@ -11,6 +11,10 @@ from .exception import *
 from .stream import Stream
 
 class NamedDecl:
+    @staticmethod
+    def object_type():
+        return 0
+
     def __init__(self, name, tree):
         self.tree = tree
         self.name = name
@@ -26,36 +30,59 @@ class FieldDecl(NamedDecl):
     def dump(self):
         print(f"{self.name}: {self.__class__.__name__}, {self.length} bits")
 
+class OperationRegionDecl(NamedDecl):
+    @staticmethod
+    def object_type():
+        return 10
+
+    def __init__(self, name, tree):
+        super().__init__(name, tree)
+
 class OperationFieldDecl(NamedDecl):
     def __init__(self, name, length, tree):
         super().__init__(name, tree)
         self.region = None
         self.offset = None
         self.length = length
+        self.access_width = None
+        self.parent_tree = None
 
-    def set_location(self, region, offset):
+    def set_location(self, region, offset, access_width):
         self.region = region
         self.offset = offset
+        self.access_width = access_width
+
+    def set_indexed_location(self, index_register, data_register, index, access_width):
+        self.region = (index_register, data_register)
+        self.offset = index
+        self.access_width = access_width
 
     def dump(self):
         if self.region and self.offset:
             bit_index = self.offset
             byte_index = floor(bit_index / 8)
             offset_in_byte = bit_index % 8
-            print(f"{self.name}: {self.__class__.__name__}, {self.region}: bit {hex(bit_index)} (byte {hex(byte_index)}.{offset_in_byte}), {self.length} bits")
+            if isinstance(self.region, str):
+                print(f"{self.name}: {self.__class__.__name__}, {self.region}: bit {hex(bit_index)} (byte {hex(byte_index)}.{offset_in_byte}), {self.length} bits")
+            else:
+                print(f"{self.name}: {self.__class__.__name__}, ({self.region[0]}, {self.region[1]}): bit {hex(bit_index)} (byte {hex(byte_index)}.{offset_in_byte}), {self.length} bits")
         else:
             print(f"{self.name}: {self.__class__.__name__}, {self.length} bits")
 
 class AliasDecl(NamedDecl):
-    def __init__(self, name, target, tree):
+    def __init__(self, name, source, tree):
         super().__init__(name, tree)
         self.name = name
-        self.target = target
+        self.source = source
 
     def dump(self):
-        print(f"{self.name}: {self.__class__.__name__}, aliasing {self.target}")
+        print(f"{self.name}: {self.__class__.__name__}, aliasing {self.source}")
 
 class MethodDecl(NamedDecl):
+    @staticmethod
+    def object_type():
+        return 8
+
     def __init__(self, name, nargs, tree):
         super().__init__(name, tree)
         self.nargs = nargs
@@ -64,6 +91,10 @@ class MethodDecl(NamedDecl):
         print(f"{self.name}: {self.__class__.__name__}, {self.nargs} args")
 
 class PredefinedMethodDecl(NamedDecl):
+    @staticmethod
+    def object_type():
+        return 8
+
     def __init__(self, name, nargs, fn):
         super().__init__(name, None)
         self.nargs = nargs
@@ -73,6 +104,10 @@ class PredefinedMethodDecl(NamedDecl):
         print(f"{self.name}: {self.__class__.__name__}, {self.nargs} args")
 
 class DeviceDecl(NamedDecl):
+    @staticmethod
+    def object_type():
+        return 6
+
     def __init__(self, name, tree):
         super().__init__(name, tree)
 
@@ -129,9 +164,17 @@ class Context:
             else:
                 return parent
 
+    @staticmethod
+    def normalize_namepath(namepath):
+        path = namepath.lstrip("\\^")
+        prefix = namepath[:(len(namepath) - len(path))]
+        parts = '.'.join(map(lambda x: x[:4].ljust(4, '_'), path.split(".")))
+        return prefix + parts
+
     def __init__(self):
         self.streams = {}
         self.current_stream = None
+        self.trees = {}
 
         # Loaded namespace
         self.__symbol_table = {}
@@ -156,15 +199,20 @@ class Context:
         # Mode switches
         self.__skip_external_on_lookup = False
 
-    def switch_stream(self, filepath):
-        if not filepath in self.streams.keys():
-            with open(filepath, "rb") as f:
-                stream = Stream(f.read())
-                self.streams[filepath] = stream
-                self.current_stream = stream
+    def switch_stream(self, val):
+        if isinstance(val, str):
+            if not val in self.streams.keys():
+                with open(val, "rb") as f:
+                    stream = Stream(f.read())
+                    self.streams[val] = stream
+                    self.current_stream = stream
+            else:
+                self.current_stream = self.streams[val]
+                self.current_stream.reset()
+        elif isinstance(val, (bytes, bytearray)):
+            self.current_stream = Stream(val)
         else:
-            self.current_stream = self.streams[filepath]
-            self.current_stream.reset()
+            raise NotImplementedError(f"Cannot use {val} as a stream.")
 
     def get_scope(self):
         return self.realpath(self.__current_scope, "")
@@ -184,10 +232,6 @@ class Context:
                 self.__current_scope.extend(new_scope.split("."))
         else:
             raise InvalidPath(new_scope)
-
-    def enter_scope(self, name):
-        self.__scope_history.append(copy(self.__current_scope))
-        self.__current_scope.append(name)
 
     def pop_scope(self):
         assert(self.__scope_history)
@@ -234,18 +278,25 @@ class Context:
             prefix_len -= 1
         raise KeyError(name)
 
-    def lookup_symbol(self, name):
+    def lookup_symbol(self, name, scope=None):
+        if scope:
+            self.change_scope(scope)
         try:
             if name.startswith("\\"):
-                return self.__symbol_table[name]
+                ret = self.__symbol_table[name]
             elif name.startswith("^") or name.find(".") >= 0:
                 realpath = self.realpath(self.__current_scope, name)
-                return self.__symbol_table[realpath]
+                ret = self.__symbol_table[realpath]
             else:
-                return self.__lookup_symbol_in_parents(self.__symbol_table, name)
+                ret = self.__lookup_symbol_in_parents(self.__symbol_table, name)
         except KeyError:
-            logging.debug(f"Cannot find definition of {name}")
-            raise UndefinedSymbol(name, self.get_scope())
+            ret = None
+
+        if scope:
+            self.pop_scope()
+        if not ret:
+            raise UndefinedSymbol(name, scope if scope else self.get_scope())
+        return ret
 
     def has_symbol(self, name):
         try:

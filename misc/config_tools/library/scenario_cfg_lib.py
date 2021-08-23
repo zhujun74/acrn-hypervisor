@@ -13,7 +13,7 @@ NATIVE_TTYS_DIC = {}
 
 START_HPA_LIST = ['0', '0x100000000', '0x120000000']
 
-KERN_TYPE_LIST = ['KERNEL_BZIMAGE', 'KERNEL_ZEPHYR']
+KERN_TYPE_LIST = ['KERNEL_BZIMAGE', 'KERNEL_RAWIMAGE', 'KERNEL_ELF']
 KERN_BOOT_ADDR_LIST = ['0x100000']
 
 VUART_TYPE = ['VUART_LEGACY_PIO', 'VUART_PCI']
@@ -350,7 +350,7 @@ def vm_cpu_affinity_check(config_file, id_cpus_per_vm_dic, item):
     cpu_affinity = common.get_leaf_tag_map(config_file, "cpu_affinity", "pcpu_id")
     for vm_i in id_cpus_per_vm_dic.keys():
         for cpu in id_cpus_per_vm_dic[vm_i]:
-            if cpu in use_cpus and not cpu_sharing_enabled:
+            if cpu is not None and cpu in use_cpus and not cpu_sharing_enabled:
                 key = "vm:id={},{}".format(vm_i, item)
                 err_dic[key] = "The same pcpu was configurated in <pcpu_id>/<cpu_affinity>, but CPU sharing is disabled by 'SCHED_NOOP'. Please re-configurate them!"
                 return err_dic
@@ -515,7 +515,7 @@ def os_kern_load_addr_check(kern_type, id_kern_load_addr_dic, prime_item, item):
     """
 
     for id_key, kern_load_addr in id_kern_load_addr_dic.items():
-        if kern_type[id_key] != 'KERNEL_ZEPHYR':
+        if kern_type[id_key] != 'KERNEL_RAWIMAGE':
             continue
 
         if not kern_load_addr:
@@ -537,7 +537,7 @@ def os_kern_entry_addr_check(kern_type, id_kern_entry_addr_dic, prime_item, item
     """
 
     for id_key, kern_entry_addr in id_kern_entry_addr_dic.items():
-        if kern_type[id_key] != 'KERNEL_ZEPHYR':
+        if kern_type[id_key] != 'KERNEL_RAWIMAGE':
             continue
 
         if not kern_entry_addr:

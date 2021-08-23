@@ -56,6 +56,7 @@
 #define GUEST_FLAG_HIDE_MTRR			(1UL << 3U)  	/* Whether hide MTRR from VM */
 #define GUEST_FLAG_RT				(1UL << 4U)     /* Whether the vm is RT-VM */
 #define GUEST_FLAG_NVMX_ENABLED			(1UL << 5U)	/* Whether this VM supports nested virtualization */
+#define GUEST_FLAG_TPM2_FIXUP			(1UL << 6U)	/* Whether this VM needs to do TPM2 fixup */
 
 /* TODO: We may need to get this addr from guest ACPI instead of hardcode here */
 #define VIRTUAL_SLEEP_CTL_ADDR		0x400U /* Pre-launched VM uses ACPI reduced HW mode and sleep control register */
@@ -654,19 +655,25 @@ struct acrn_pcidev {
 	uint32_t bar[ACRN_PCI_NUM_BARS];
 };
 
+#define MMIODEV_RES_NUM        3
 
 /**
  * @brief Info to assign or deassign a MMIO device for a VM
  */
 struct acrn_mmiodev {
-	/** the gpa of the MMIO region for the MMIO device */
-	uint64_t user_vm_pa;
-
-	/** the hpa of the MMIO region for the MMIO device */
-	uint64_t service_vm_pa;
-
-	/** the size of the MMIO region for the MMIO device */
-	uint64_t size;
+	char name[8];
+	struct acrn_mmiores {
+		/** the gpa of the MMIO region for the MMIO device */
+		uint64_t user_vm_pa;
+		/** the hpa of the MMIO region for the MMIO device: for post-launched VM
+		  * it's pa in service vm; for pre-launched VM it's pa in HV.
+		  */
+		uint64_t host_pa;
+		/** the size of the MMIO region for the MMIO resource */
+		uint64_t size;
+		/** the memory type of the MMIO region for the MMIO resource */
+		uint64_t mem_type;
+	} res[MMIODEV_RES_NUM];
 };
 
 /**

@@ -55,7 +55,6 @@ struct sw_module_info {
 
 struct sw_kernel_info {
 	void *kernel_src_addr;		/* HVA */
-	void *kernel_load_addr;		/* GPA */
 	void *kernel_entry_addr;	/* GPA */
 	uint32_t kernel_size;
 };
@@ -250,7 +249,7 @@ void create_sos_vm_e820(struct acrn_vm *vm);
 void create_prelaunched_vm_e820(struct acrn_vm *vm);
 uint64_t find_space_from_ve820(struct acrn_vm *vm, uint32_t size, uint64_t min_addr, uint64_t max_addr);
 
-int32_t vm_sw_loader(struct acrn_vm *vm);
+int32_t prepare_os_image(struct acrn_vm *vm);
 
 void vrtc_init(struct acrn_vm *vm);
 

@@ -29,6 +29,7 @@
     <xsl:apply-templates select="hv/MEMORY" />
     <xsl:apply-templates select="hv/CAPACITIES" />
     <xsl:apply-templates select="hv/MISC_CFG" />
+    <xsl:apply-templates select="vm/os_config/kern_type" />
   </xsl:template>
 
   <xsl:template match="DEBUG_OPTIONS">
@@ -82,6 +83,10 @@
 
     <xsl:call-template name="boolean-by-key">
       <xsl:with-param name="key" select="'ENFORCE_TURNOFF_GP'" />
+    </xsl:call-template>
+
+    <xsl:call-template name="boolean-by-key">
+      <xsl:with-param name="key" select="'SECURITY_VM_FIXUP'" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key-value">
@@ -160,6 +165,10 @@
 
     <xsl:call-template name="integer-by-key">
       <xsl:with-param name="key" select="'MAX_IOAPIC_NUM'" />
+    </xsl:call-template>
+
+    <xsl:call-template name="integer-by-key">
+      <xsl:with-param name="key" select="'MAX_EFI_MMAP_ENTRIES'" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
@@ -262,10 +271,26 @@
         <xsl:if test="position() = 1"><xsl:value-of select="."/></xsl:if>
       </xsl:for-each>
     </xsl:variable>
-    <xsl:call-template name="integer-by-key-value">
-      <xsl:with-param name="key" select="'MAX_MSIX_TABLE_NUM'" />
-      <xsl:with-param name="value" select="$max" />
-      <xsl:with-param name="default" select="'64'" />
+    <xsl:choose>
+      <xsl:when test="//CAPACITIES/MAX_MSIX_TABLE_NUM/text()">
+        <xsl:call-template name="integer-by-key-value">
+          <xsl:with-param name="key" select="'MAX_MSIX_TABLE_NUM'" />
+          <xsl:with-param name="value" select="acrn:max($max, //CAPACITIES/MAX_MSIX_TABLE_NUM)" />
+        </xsl:call-template>
+      </xsl:when>
+      <xsl:otherwise>
+        <xsl:call-template name="integer-by-key-value">
+          <xsl:with-param name="key" select="'MAX_MSIX_TABLE_NUM'" />
+          <xsl:with-param name="value" select="$max" />
+        </xsl:call-template>
+      </xsl:otherwise>
+    </xsl:choose>
+  </xsl:template>
+
+  <xsl:template match="kern_type">
+    <xsl:call-template name="boolean-by-key-value">
+      <xsl:with-param name="key" select="concat('GUEST_', current())" />
+      <xsl:with-param name="value" select="'y'" />
     </xsl:call-template>
   </xsl:template>
 

@@ -37,7 +37,8 @@
   IO polling to completion
 - ``GUEST_FLAG_HIDE_MTRR`` specify that MTRR is hidden from the VM
 - ``GUEST_FLAG_RT`` specify that the VM is an RT-VM (real-time)
-- ``GUEST_FLAG_NVMX_ENABLED`` specify that the VM supports nested virtualization</xs:documentation>
+- ``GUEST_FLAG_NVMX_ENABLED`` specify that the VM supports nested virtualization
+- ``GUEST_FLAG_TPM2_FIXUP`` specify that the VM needs to do fixup for TPM2 passthrough</xs:documentation>
   </xs:annotation>
   <xs:restriction base="xs:string">
     <xs:enumeration value="" />
@@ -49,6 +50,7 @@
     <xs:enumeration value="GUEST_FLAG_HIDE_MTRR" />
     <xs:enumeration value="GUEST_FLAG_RT" />
     <xs:enumeration value="GUEST_FLAG_NVMX_ENABLED" />
+    <xs:enumeration value="GUEST_FLAG_TPM2_FIXUP" />
   </xs:restriction>
 </xs:simpleType>
 
@@ -84,8 +86,7 @@ to.</xs:documentation>
       <xs:annotation>
         <xs:documentation>Configure each CPU in VMs to a desired CLOS ID in the ``VM`` section of the
 scenario file. Follow :ref:`rdt_detection_capabilities`
-to identify the maximum supported CLOS ID that can be used. Default
-value ``0``.</xs:documentation>
+to identify the maximum supported CLOS ID that can be used.</xs:documentation>
       </xs:annotation>
     </xs:element>
   </xs:sequence>
@@ -193,12 +194,13 @@ must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentati
 
 <xs:simpleType name="VMKernelType">
   <xs:annotation>
-    <xs:documentation>A string with either ``KERNEL_BZIMAGE`` or
-``KERNEL_ZEPHYR``.</xs:documentation>
+    <xs:documentation>A string with either ``KERNEL_BZIMAGE``, ``KERNEL_ELF`` or
+``KERNEL_RAWIMAGE``.</xs:documentation>
   </xs:annotation>
   <xs:restriction base="xs:string">
     <xs:enumeration value="KERNEL_BZIMAGE" />
-    <xs:enumeration value="KERNEL_ZEPHYR" />
+    <xs:enumeration value="KERNEL_RAWIMAGE" />
+    <xs:enumeration value="KERNEL_ELF" />
   </xs:restriction>
 </xs:simpleType>
 

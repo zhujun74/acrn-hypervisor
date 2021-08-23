@@ -12,14 +12,22 @@ from pcieparser import parse_config_space
 from pcieparser.header import IOBar, MemoryBar32, MemoryBar64
 from extractors.helpers import add_child, get_node
 
+SYS_DEVICES_PATH = "/sys/devices"
 PCI_ROOT_PATH = "/sys/devices/pci0000:00"
 bdf_regex = re.compile(r"^([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2}).([0-7]{1})$")
 
-def collect_hostbridge_resources(bus_node):
+interrupt_pin_names = {
+    1: "INTA#",
+    2: "INTB#",
+    3: "INTC#",
+    4: "INTD#",
+}
+
+def collect_hostbridge_resources(bus_node, bus_number):
     with open("/proc/iomem", "r") as f:
         for line in f.readlines():
             fields = line.strip().split(" : ")
-            if fields[1] == "PCI Bus 0000:00":
+            if fields[1] == f"PCI Bus 0000:{bus_number:02x}":
                 begin, end = tuple(map(lambda x: int(f"0x{x}", base=16), fields[0].split("-")))
                 add_child(bus_node, "resource", type="memory", min=hex(begin), max=hex(end), len=hex(end - begin + 1))
 
@@ -59,6 +67,16 @@ def parse_device(bus_node, device_path):
             device_node = add_child(bus_node, "device", None, address=adr)
 
     cfg = parse_config_space(device_path)
+    for cap in cfg.caps:
+        # If the device is not in D0, power it on and reparse its configuration space.
+        if cap.name == "Power Management" and cap.power_state != 0:
+            logging.info(f"Try resuming {device_path}")
+            try:
+                with open(os.path.join(device_path, "power", "control"), "w") as f:
+                    f.write("on")
+                cfg = parse_config_space(device_path)
+            except Exception as e:
+                logging.info(f"Resuming {device_path} failed: {str(e)}")
 
     # Device identifiers
     vendor_id = "0x{:04x}".format(cfg.header.vendor_id)
@@ -82,19 +100,22 @@ def parse_device(bus_node, device_path):
         resource_type = bar.resource_type
         base = bar.base
         if os.path.exists(resource_path):
-            resource_node = get_node(device_node, f"./resource[@type = '{resource_type}' and @min = '{hex(base)}']")
-            if resource_node is None:
-                size = os.path.getsize(resource_path)
-                resource_node = add_child(device_node, "resource", None, type=resource_type, min=hex(base), max=hex(base + size - 1), len=hex(size))
-            resource_node.set("id", f"bar{idx}")
-            if isinstance(bar, MemoryBar32):
-                resource_node.set("width", "32")
-                resource_node.set("prefetchable", str(bar.prefetchable))
-            elif isinstance(bar, MemoryBar64):
-                resource_node.set("width", "64")
-                resource_node.set("prefetchable", str(bar.prefetchable))
+            if bar.base == 0:
+                logging.warning(f"PCI {device_name}: BAR {idx} exists but is programmed with all 0. This device cannot be passed through to any VM.")
+            else:
+                resource_node = get_node(device_node, f"./resource[@type = '{resource_type}' and @min = '{hex(base)}']")
+                if resource_node is None:
+                    size = os.path.getsize(resource_path)
+                    resource_node = add_child(device_node, "resource", None, type=resource_type, min=hex(base), max=hex(base + size - 1), len=hex(size))
+                resource_node.set("id", f"bar{idx}")
+                if isinstance(bar, MemoryBar32):
+                    resource_node.set("width", "32")
+                    resource_node.set("prefetchable", str(bar.prefetchable))
+                elif isinstance(bar, MemoryBar64):
+                    resource_node.set("width", "64")
+                    resource_node.set("prefetchable", str(bar.prefetchable))
         elif bar.base != 0:
-            logging.error(f"Cannot detect the size of BAR {idx}")
+            logging.warning(f"PCI {device_name}: Cannot detect the size of BAR {idx}")
         if isinstance(bar, MemoryBar64):
             idx += 2
         else:
@@ -110,6 +131,17 @@ def parse_device(bus_node, device_path):
         cap_node = add_child(device_node, "capability", id=cap.name)
         if cap.name in cap_parsers:
             cap_parsers[cap.name](cap_node, cap)
+
+    # Interrupt pin
+    pin = cfg.header.interrupt_pin
+    if pin > 0 and pin <= 4:
+        pin_name = interrupt_pin_names[pin]
+        res_node = add_child(device_node, "resource", type="interrupt_pin", pin=pin_name)
+
+        prt_address = hex(int(device_node.get("address"), 16) | 0xffff)
+        mapping = device_node.xpath(f"../interrupt_pin_routing/routing[@address='{prt_address}']/mapping[@pin='{pin_name}']")
+        if len(mapping) > 0:
+            res_node.set("source", mapping[0].get("source"))
 
     # Secondary bus
     if cfg.header.header_type == 1:
@@ -131,6 +163,14 @@ def parse_device(bus_node, device_path):
                       min=hex(memory_base), max=hex(memory_end), len=hex(memory_end - memory_base + 1))
 
         secondary_bus_node = add_child(device_node, "bus", type="pci", address=hex(cfg.header.secondary_bus_number))
+
+        # If a PCI routing table is provided for the root port / switch, move the routing table down to the bus node, in
+        # order to align the relative position of devices and routing tables.
+        prt = device_node.find("interrupt_pin_routing")
+        if prt is not None:
+            device_node.remove(prt)
+            secondary_bus_node.append(prt)
+
         return secondary_bus_node
 
     return device_node
@@ -142,17 +182,17 @@ def enum_devices(bus_node, root_path):
         device_node = parse_device(bus_node, p)
         enum_devices(device_node, p)
 
-def extract(board_etree):
-    bus_node = get_node(board_etree, "//bus[@type='pci']")
-    if bus_node is None:
-        devices_node = get_node(board_etree, "//devices")
-        bus_node = add_child(devices_node, "bus", type="pci", address="0x0")
-        collect_hostbridge_resources(bus_node)
-    else:
-        # Assume there is only one device object in the ACPI DSDT that represents a PCI bridge (which should be the host
-        # bridge in this case). If the ACPI table does not provide an _ADR object, add the default address of the host
-        # bridge (i.e. bus 0).
-        if bus_node.get("address") is None:
-            bus_node.set("address", "0x0")
-
-    enum_devices(bus_node, PCI_ROOT_PATH)
+def extract(args, board_etree):
+    # Assume we only care about PCI devices under domain 0, as the hypervisor only uses BDF (without domain) for device
+    # identification.
+    root_regex = re.compile("pci0000:([0-9a-f]{2})")
+    for root in filter(lambda x: x.startswith("pci"), os.listdir(SYS_DEVICES_PATH)):
+        m = root_regex.match(root)
+        if m:
+            bus_number = int(m.group(1), 16)
+            bus_node = get_node(board_etree, f"//bus[@type='pci' and @address='{hex(bus_number)}']")
+            if bus_node is None:
+                devices_node = get_node(board_etree, "//devices")
+                bus_node = add_child(devices_node, "bus", type="pci", address=hex(bus_number))
+                collect_hostbridge_resources(bus_node, bus_number)
+            enum_devices(bus_node, os.path.join(SYS_DEVICES_PATH, root))

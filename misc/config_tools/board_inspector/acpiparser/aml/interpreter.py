@@ -6,6 +6,12 @@
 from .context import *
 from .datatypes import *
 from .tree import Tree, Interpreter
+from . import builder
+
+class MethodReturn(Exception):
+    """ A pseudo exception to return from a method"""
+    def __init__(self):
+        pass
 
 class ConcreteInterpreter(Interpreter):
     class Argument(Object):
@@ -81,9 +87,18 @@ class ConcreteInterpreter(Interpreter):
 
     def interpret_method_call(self, name, *args):
         stack_depth_before = len(self.stack)
-        name_string = Tree("NameString", name)
+        name_string = builder.NameString(name)
         name_string.scope = self.context.parent(name)
-        pseudo_invocation = Tree("MethodInvocation", [name_string])
+
+        arg_trees = []
+        for arg in args:
+            v = builder.build_value(arg)
+            if v != None:
+                arg_trees.append(v)
+            else:
+                raise NotImplementedError(f"Unsupported type of method argument: {arg}")
+
+        pseudo_invocation = builder.MethodInvocation(name_string, *arg_trees)
         try:
             val = self.interpret(pseudo_invocation)
         except:
@@ -113,7 +128,7 @@ class ConcreteInterpreter(Interpreter):
         return None
 
     def NameString(self, tree):
-        name = tree.children
+        name = tree.value
         obj = self.context.lookup_binding(name)
         if not obj:
             sym = self.context.lookup_symbol(name)
@@ -128,7 +143,7 @@ class ConcreteInterpreter(Interpreter):
 
     # 20.2.3 Data Objects Encoding
     def ByteList(self, tree):
-        return RawDataBuffer(tree.children)
+        return RawDataBuffer(tree.value)
 
     def ByteConst(self, tree):
         return self.interpret(tree.children[0])
@@ -143,25 +158,28 @@ class ConcreteInterpreter(Interpreter):
         return self.interpret(tree.children[0])
 
     def String(self, tree):
-        return String(tree.children)
+        return String(tree.value)
 
     def ByteData(self, tree):
-        return Integer(tree.children)
+        return Integer(tree.value)
 
     def WordData(self, tree):
-        return Integer(tree.children)
+        return Integer(tree.value)
 
     def DWordData(self, tree):
-        return Integer(tree.children)
+        return Integer(tree.value)
 
     def QWordData(self, tree):
-        return Integer(tree.children)
+        return Integer(tree.value)
 
     def ZeroOp(self, tree):
         return Integer(0x00)
 
     def OneOp(self, tree):
         return Integer(0x01)
+
+    def OnesOp(self, tree):
+        return Integer(0xffffffffffffffff)
 
     # 20.2.5 Term Objects Encoding
     def TermList(self, tree):
@@ -188,7 +206,10 @@ class ConcreteInterpreter(Interpreter):
             # Evaluate the statements of the callee
             self.stack.append(self.StackFrame(realpath, args))
             logging.debug(f"Calling {realpath} with args {args}")
-            self.interpret(value.body)
+            try:
+                self.interpret(value.body)
+            except MethodReturn:
+                pass
             frame = self.stack.pop()
             self.context.pop_scope()
 
@@ -202,7 +223,7 @@ class ConcreteInterpreter(Interpreter):
             return Integer(value.fn(args))
         else:
             assert value == None or isinstance(value, Object), \
-                f"{tree.children[0].children} evaluates to a non-object value {value}"
+                f"{tree.children[0]} evaluates to a non-object value {value}"
             return value
 
     # 20.2.5.1 Namespace Modifier Objects Encoding
@@ -211,7 +232,7 @@ class ConcreteInterpreter(Interpreter):
 
     def DefName(self, tree):
         self.context.change_scope(tree.children[0].scope)
-        name = tree.children[0].children
+        name = tree.children[0].value
         obj = self.context.lookup_binding(name)
         if not obj:
             obj = self.interpret(tree.children[1])
@@ -221,26 +242,36 @@ class ConcreteInterpreter(Interpreter):
 
     # 20.2.5.2 Named Objects Encoding
     def NamedField(self, tree):
-        name = tree.children[0].children
+        name = tree.children[0].value
         sym = self.context.lookup_symbol(self.context.realpath(tree.scope, name))
         assert isinstance(sym, OperationFieldDecl)
         assert sym.region, f"Field {sym.name} does not belong to any operation region."
-        buf = self.context.lookup_operation_region(sym.region)
-        if not buf:
-            buf = self.interpret(self.context.lookup_symbol(sym.region).tree)
-        buf.create_field(name, sym.offset, sym.length)
-        field = BufferField(buf, name)
+        if isinstance(sym.region, str):
+            buf = self.context.lookup_operation_region(sym.region)
+            if not buf:
+                buf = self.interpret(self.context.lookup_symbol(sym.region).tree)
+            buf.create_field(name, sym.offset, sym.length, sym.access_width)
+            field = BufferField(buf, name)
+        elif isinstance(sym.region, tuple):
+            index_register = self.interpret(sym.region[0].tree)
+            data_register = self.interpret(sym.region[1].tree)
+            buf = OperationRegion.open_indexed_region(index_register, data_register)
+            buf.create_field(name, sym.offset, sym.length, sym.access_width)
+            field = BufferField(buf, name)
+        else:
+            assert False, f"Cannot interpret the operation region: {sym.region}"
         return field
 
     def create_field(self, tree, bitwidth, name_idx):
         buf = self.interpret(tree.children[0])
         assert isinstance(buf, Buffer)
         index = self.interpret(tree.children[1]).get()
-        name = tree.children[name_idx].children
+        name = tree.children[name_idx].value
         if bitwidth == 1 or name_idx == 3:
-            buf.create_field(name, index, bitwidth)
+            buf.create_field(name, index, bitwidth, 8)
         else:
-            buf.create_field(name, index * 8, bitwidth)
+            # bitwidth is 8, 16, 32 or 64 in this case. Reuse it as the access width.
+            buf.create_field(name, index * 8, bitwidth, bitwidth)
         obj = BufferField(buf, name)
         self.context.register_binding(name, obj)
         return obj
@@ -265,13 +296,13 @@ class ConcreteInterpreter(Interpreter):
         return self.create_field(tree, numbits, 3)
 
     def DefDevice(self, tree):
-        name = tree.children[1].children
+        name = tree.children[1].value
         fullpath = self.context.realpath(tree.scope, name)
         sym = self.context.lookup_symbol(fullpath)
         return Device(sym)
 
     def DefExternal(self, tree):
-        logging.info(f"The loaded tables do not have a definition of {tree.children[0].children}")
+        logging.info(f"The loaded tables do not have a definition of {tree.children[0].value}")
         return None
 
     def DefField(self, tree):
@@ -282,7 +313,7 @@ class ConcreteInterpreter(Interpreter):
         return Method(tree)
 
     def DefOpRegion(self, tree):
-        name = tree.children[0].children
+        name = tree.children[0].value
         sym = self.context.lookup_symbol(self.context.realpath(tree.scope, name))
 
         space = self.interpret(tree.children[1]).get()
@@ -290,20 +321,30 @@ class ConcreteInterpreter(Interpreter):
         length = self.interpret(tree.children[3]).get()
         assert isinstance(space, int) and isinstance(offset, int) and (length, int)
 
-        # For PCI configuration space, try to invoke _ADR (if any) of the device containing the region to get the device
-        # identifier
-        bus_id = None
-        device_id = None
-        if space == 0x2:      # PCI_Config
+        if space == 0x00:    # SystemMemory
+            op_region = OperationRegion.open_system_memory(sym.name, offset, length)
+        elif space == 0x01:  # SystemIO
+            op_region = OperationRegion.open_system_io(sym.name, offset, length)
+        elif space == 0x02:  # PCI_Config
             self.context.change_scope(tree.scope)
             device_path = self.context.parent(sym.name)
             bus_id = self.interpret_method_call(f"_BBN").get()
-            device_id = self.interpret_method_call(f"{device_path}._ADR").get()
+            if self.context.has_symbol(f"{device_path}._ADR"):
+                device_id = self.interpret_method_call(f"{device_path}._ADR").get()
+            elif self.context.has_symbol(f"{device_path}._BBN"):
+                # Device objects representing PCI host bridges may not have an _ADR object
+                device_id = 0
             self.context.pop_scope()
+            op_region = OperationRegion.open_pci_configuration_space(bus_id, device_id, offset, length)
+            pass
+        else:
+            raise NotImplementedError(f"Cannot load operation region in space {space}")
 
-        op_region = OperationRegion(bus_id, device_id, sym.name, space, offset, length)
         self.context.register_operation_region(sym.name, op_region)
         return op_region
+
+    def DefPowerRes(self, tree):
+        return PowerResource(tree.NameString.value)
 
     # 20.2.5.3 Statement Opcodes Encoding
     def DefBreak(self, tree):
@@ -332,9 +373,10 @@ class ConcreteInterpreter(Interpreter):
 
     def DefReturn(self, tree):
         obj = self.interpret(tree.children[0])
-        if isinstance(obj, (self.Argument, self.LocalVariable)):
+        while isinstance(obj, (self.Argument, self.LocalVariable)):
             obj = obj.get_obj()
         self.stack[-1].return_value = obj
+        raise MethodReturn()
         return None
 
     def DefSignal(self, tree):
@@ -353,7 +395,23 @@ class ConcreteInterpreter(Interpreter):
     def __eval_binary_op(self, tree, op):
         lhs = self.interpret(tree.children[0])
         rhs = self.interpret(tree.children[1])
-        res = Integer(op(lhs.get(), rhs.get()))
+        # FIXME: The current design of AML parsing, objects are first defined in the namespace and later dropped if they
+        # are in a False branch. This leads to incorrect interpretation of the AML code where:
+        #
+        #   1. A name T is defined in the root scope as an integer.
+        #   2. A method M in an inner scope S references T.
+        #   3. The name T is defined as a device, power resource or other named objects in scope S under conditions
+        #      where M will not be called.
+        #
+        # As a workaround, check if both the left and right hand sides are integers first. If either is not the case,
+        # the condition is evaluated to False.
+        try:
+            res = Integer(op(lhs.to_integer().get(), rhs.to_integer().get()))
+        except NotImplementedError:
+            if isinstance(lhs, String) and isinstance(rhs, String):
+                res = Integer(op(lhs.get(), rhs.get()))
+            else:
+                res = Integer(0)
         if len(tree.children) >= 3:
             target = self.interpret(tree.children[2])
             if target:
@@ -406,7 +464,11 @@ class ConcreteInterpreter(Interpreter):
     def DefConcatRes(self, tree):
         data = bytearray()
         source1 = self.interpret(tree.children[0])
-        data.extend(source1.to_buffer().get())
+        buf = source1.to_buffer().get()
+        if len(buf) >= 2 and buf[-2] == 0x79:
+            data.extend(buf[:-2])
+        else:
+            data.extend(buf)
         source2 = self.interpret(tree.children[1])
         data.extend(source2.to_buffer().get())
         result = Buffer(data)
@@ -443,6 +505,20 @@ class ConcreteInterpreter(Interpreter):
             logging.warn(f"Attempt to dereference an object of type {ref.__class__.__name__}")
             return ref
 
+    def DefDivide(self, tree):
+        dividend = self.interpret(tree.children[0]).get()
+        divisor = self.interpret(tree.children[1]).get()
+        if len(tree.children) >= 3:
+            remainer = self.interpret(tree.children[2])
+            if remainer:
+                remainer.set(Integer(dividend % divisor))
+        res = Integer(dividend // divisor)
+        if len(tree.children) >= 4:
+            target = self.interpret(tree.children[3])
+            if target:
+                target.set(res)
+        return res
+
     def DefIncrement(self, tree):
         obj = self.interpret(tree.children[0])
         obj.set(Integer(obj.get() + 1))
@@ -475,6 +551,41 @@ class ConcreteInterpreter(Interpreter):
 
     def DefLOr(self, tree):
         return self.__eval_binary_op(tree, lambda x,y: 1 if x or y else 0)
+
+    def __match(self, op, obj, match_obj):
+        try:
+            if isinstance(match_obj, String):
+                return op(obj.to_string().get(), match_obj.get())
+            elif isinstance(match_obj, (Integer, BufferField)):
+                return op(obj.to_integer().get(), match_obj.get())
+            else:
+                # Comparison of buffer fields is not implemented yet
+                return False
+        except NotImplementedError:
+            return False
+
+    match_ops = {
+        0: lambda x,y: True,    # TRUE
+        1: lambda x,y: x == y,  # EQ
+        2: lambda x,y: x <= y,  # LE
+        3: lambda x,y: x < y,   # LT
+        4: lambda x,y: x >= y,  # GE
+        5: lambda x,y: x > y,   # GT
+    }
+
+    def DefMatch(self, tree):
+        pkg = self.interpret(tree.SearchPkg)
+        op1 = self.match_ops[tree.MatchOpcode1.value]
+        match_obj1 = self.interpret(tree.Operand1)
+        op2 = self.match_ops[tree.MatchOpcode2.value]
+        match_obj2 = self.interpret(tree.Operand2)
+        start_index = self.interpret(tree.StartIndex).get()
+        if isinstance(pkg, Package) and isinstance(start_index, int):
+            for i in range(start_index, len(pkg.elements)):
+                obj = pkg.elements[i]
+                if self.__match(op1, obj, match_obj1) and self.__match(op2, obj, match_obj2):
+                    return Integer(i)
+        return Integer(0xffffffffffffffff) # Ones is 64-bit in DSDT rev 2 and above
 
     def DefMod(self, tree):
         return self.__eval_binary_op(tree, lambda x,y: x % y)
@@ -512,6 +623,19 @@ class ConcreteInterpreter(Interpreter):
 
     def DefShiftRight(self, tree):
         return self.__eval_binary_op(tree, lambda x,y: x >> y)
+
+    def DefSizeOf(self, tree):
+        obj = self.interpret(tree.SuperName)
+        if isinstance(obj, (self.Argument, self.LocalVariable)):
+            obj = obj.get_obj()
+
+        if isinstance(obj, Buffer):
+            return Integer(len(obj.get()))
+        elif isinstance(obj, String):
+            return Integer(len(obj.get()))
+        elif isinstance(obj, Package):
+            return Integer(len(obj.elements))
+        raise NotImplementedError(f"Cannot calculate the size of object of type {obj.__class__.__name__}")
 
     def DefStore(self, tree):
         obj = self.interpret(tree.children[0])

@@ -7,8 +7,8 @@ import os
 import sys
 import getopt
 import shutil
-import subprocess
-import xml.etree.ElementTree as ET
+import subprocess # nosec
+import defusedxml.ElementTree as ET
 import re
 import lxml
 
@@ -23,7 +23,7 @@ DATACHECK_SCHEMA_FILE = SOURCE_ROOT_DIR + 'misc/config_tools/schema/datachecks.x
 PY_CACHES = ["__pycache__", "../board_config/__pycache__", "../scenario_config/__pycache__"]
 GUEST_FLAG = ["0", "0UL", "GUEST_FLAG_SECURE_WORLD_ENABLED", "GUEST_FLAG_LAPIC_PASSTHROUGH",
               "GUEST_FLAG_IO_COMPLETION_POLLING", "GUEST_FLAG_NVMX_ENABLED", "GUEST_FLAG_HIDE_MTRR",
-              "GUEST_FLAG_RT"]
+              "GUEST_FLAG_RT", "GUEST_FLAG_TPM2_FIXUP"]
 
 MULTI_ITEM = ["guest_flag", "pcpu_id", "vcpu_clos", "input", "block", "network", "pci_dev", "shm_region", "communication_vuart"]
 
