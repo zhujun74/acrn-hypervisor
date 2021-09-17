@@ -155,12 +155,21 @@ void enable_paging(void)
 {
 	uint64_t tmp64 = 0UL;
 
+	/* Initialize IA32_PAT according to ISDM 11.12.4 Programming the PAT */
+	msr_write(MSR_IA32_PAT, PAT_POWER_ON_VALUE);
+
 	/*
 	 * Enable MSR IA32_EFER.NXE bit,to prevent
 	 * instruction fetching from pages with XD bit set.
 	 */
 	tmp64 = msr_read(MSR_IA32_EFER);
-	tmp64 |= MSR_IA32_EFER_NXE_BIT;
+
+	/*
+	 * SCE bit is not used by the host. However we set this bit so that
+	 * it's highly likely that the value of IA32_EFER the host and the guest
+	 * is identical, and we don't need to switch this MSR on VMX transitions
+	 */
+	tmp64 |= MSR_IA32_EFER_NXE_BIT | MSR_IA32_EFER_SCE_BIT;
 	msr_write(MSR_IA32_EFER, tmp64);
 
 	/* Enable Write Protect, inhibiting writing to read-only pages */
