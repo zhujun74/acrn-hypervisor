@@ -142,13 +142,6 @@ ifdef RELEASE
   endif
 endif
 
-# Backward-compatibility for BOARD=apl-nuc or BOARD=kbl-nuc
-ifeq ($(BOARD), apl-nuc)
-  override BOARD := nuc6cayh
-else ifeq ($(BOARD), kbl-nuc-i7)
-  override BOARD := nuc7i7dnb
-endif
-
 ifeq ($(findstring $(MAKECMDGOALS),distclean),)
 -include $(HV_CONFIG_MK)
 endif
@@ -187,8 +180,8 @@ endif
 # file. SCENARIO/SCENARIO_FILE are used in the same way. The following block translates the user-visible BOARD/SCENARIO
 # (which is multiplexed) to the internal representation.
 
-$(eval $(call determine_config,BOARD,nuc7i7dnb))
-$(eval $(call determine_config,SCENARIO,industry))
+$(eval $(call determine_config,BOARD,nuc11tnbi5))
+$(eval $(call determine_config,SCENARIO,shared))
 $(eval $(call determine_build_type,n))
 
 $(HV_BOARD_XML):
@@ -254,7 +247,8 @@ showconfig:
 
 diffconfig:
 	@rm -rf $(HV_CONFIG_A_DIR) $(HV_CONFIG_B_DIR)
-	@sh $(BASEDIR)/scripts/genconf.sh $(BASEDIR) $(BOARD_FILE) $(HV_SCENARIO_XML) $(HV_CONFIG_A_DIR) $(HV_UNIFIED_XML)
+	@sh $(BASEDIR)/scripts/genconf.sh $(BASEDIR) $(HV_BOARD_XML) $(HV_SCENARIO_XML) $(HV_CONFIG_A_DIR) $(HV_UNIFIED_XML)
+	@find $(HV_CONFIG_A_DIR) -name '*.aml' -delete
 	@cd $(HV_CONFIG_DIR) && find . -name '*.c' -or -name '*.h' -or -name '*.config' -or -name '*.asl' | while read f; do \
 	  nf=$(HV_CONFIG_B_DIR)/$${f}; mkdir -p `dirname $${nf}` && cp $${f} $${nf}; \
 	done

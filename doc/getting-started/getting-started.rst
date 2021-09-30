@@ -165,12 +165,14 @@ To set up the ACRN build environment on the development computer:
       cd ~/acrn-work
       git clone https://github.com/projectacrn/acrn-hypervisor
       cd acrn-hypervisor
-      git checkout a7c273996
+      git checkout v2.6
 
       cd ..
       git clone https://github.com/projectacrn/acrn-kernel
       cd acrn-kernel
       git checkout release_2.6
+
+.. _gsg-board-setup:
 
 .. rst-class:: numbered-step
 
@@ -228,7 +230,7 @@ Configure Target BIOS Settings
 
 #. Boot your target and enter the BIOS configuration editor.
 
-   Tip: When you are booting your target, you’ll see an option (quickly) to
+   Tip: When you are booting your target, you'll see an option (quickly) to
    enter the BIOS configuration editor, typically by pressing :kbd:`F2` during
    the boot and before the GRUB menu (or Ubuntu login screen) appears.
 
@@ -284,13 +286,13 @@ Generate a Board Configuration File
 
       .. code-block:: bash
 
-         idle=nomwait intel_idle.max_cstate=0 intel_pstate=disable
+         idle=nomwait iomem=relaxed intel_idle.max_cstate=0 intel_pstate=disable
 
       Example:
 
       .. code-block:: bash
 
-         GRUB_CMDLINE_LINUX_DEFAULT="quiet splash idle=nomwait intel_idle.max_cstate=0 intel_pstate=disable"
+         GRUB_CMDLINE_LINUX_DEFAULT="quiet splash idle=nomwait iomem=relaxed intel_idle.max_cstate=0 intel_pstate=disable"
 
       These settings allow the board inspector tool to
       gather important information about the board.
@@ -381,6 +383,8 @@ Generate a Board Configuration File
          disk="/media/$USER/"$(ls /media/$USER)
          cp $disk/my_board.xml ~/acrn-work
          sudo umount $disk
+
+.. _gsg-dev-setup:
 
 .. rst-class:: numbered-step
 
@@ -637,13 +641,28 @@ In the following steps, you will configure GRUB on the target system.
            insmod gzio
            insmod part_gpt
            insmod ext2
-           search --no-floppy --fs-uuid --set <UUID>
+           search --no-floppy --fs-uuid --set "UUID"
            echo 'loading ACRN...'
-           multiboot2 /boot/acrn/acrn.bin  root=PARTUUID=<PARTUUID>
+           multiboot2 /boot/acrn/acrn.bin  root=PARTUUID="PARTUUID"
            module2 /boot/vmlinuz-5.10.52-acrn-sos Linux_bzImage
          }
 
    #. Save and close the file.
+   
+   #. Correct example image
+
+      .. code-block:: console
+
+         menuentry "ACRN Multiboot Ubuntu Service VM" --id ubuntu-service-vm {
+           load_video
+           insmod gzio
+           insmod part_gpt
+           insmod ext2
+           search --no-floppy --fs-uuid --set "3cac5675-e329-4cal-b346-0a3e65f99016"
+           echo 'loading ACRN...'
+           multiboot2 /boot/acrn/acrn.bin  root=PARTUUID="03db7f45-8a6c-454b-adf7-30343d82c4f4"
+           module2 /boot/vmlinuz-5.10.52-acrn-sos Linux_bzImage
+         }
 
 #. Make the GRUB menu visible when
    booting and make it load the Service VM kernel by default:
@@ -662,7 +681,6 @@ In the following steps, you will configure GRUB on the target system.
          GRUB_DEFAULT=ubuntu-service-vm
          #GRUB_TIMEOUT_STYLE=hidden
          GRUB_TIMEOUT=5
-         GRUB_CMDLINE_LINUX="text"
 
    #. Save and close the file.
 
@@ -752,7 +770,7 @@ Launch the User VM
          -s 8,virtio-net,tap_YaaG3 \
          -s 6,virtio-console,@stdio:stdio_port \
          --ovmf /usr/share/acrn/bios/OVMF.fd \
-         -s 31:0,lpc \
+         -s 1:0,lpc \
          $vm_name
 
 #. Save and close the file.
