@@ -51,7 +51,7 @@ struct mngr_msg {
 
 		/* req of ACRND_TIMER */
 		struct req_acrnd_timer {
-			char name[MAX_VMNAME_LEN];
+			char name[MAX_VM_NAME_LEN];
 			time_t t;
 		} acrnd_timer;
 
@@ -75,7 +75,7 @@ struct mngr_msg {
 
 		/* req of RTC_TIMER */
 		struct req_rtc_timer {
-			char vmname[MAX_VMNAME_LEN];
+			char vmname[MAX_VM_NAME_LEN];
 			time_t t;
 		} rtc_timer;
 
@@ -108,10 +108,10 @@ enum acrnd_msgid {
 	ACRND_REASON,		/* DM ask for updating wakeup reason */
 	DM_NOTIFY,		/* DM notify Acrnd that state is changed */
 
-	/* SOS-LCS ->Acrnd */
-	ACRND_STOP,		/* SOS-LCS request to Stop all UOS */
-	ACRND_RESUME,		/* SOS-LCS request to Resume UOS */
-	ACRND_SUSPEND,		/* SOS-LCS request to Suspend all UOS */
+	/* Service-VM-LCS ->Acrnd */
+	ACRND_STOP,		/* Service-VM-LCS request to Stop all User VM */
+	ACRND_RESUME,		/* Service-VM-LCS request to Resume User VM */
+	ACRND_SUSPEND,		/* Service-VM-LCS request to Suspend all User VM */
 
 	ACRND_MAX,
 };

@@ -52,14 +52,6 @@
       <xsl:with-param name="value" select="CONSOLE_LOGLEVEL" />
     </xsl:call-template>
 
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'LOG_DESTINATION'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'LOG_BUF_SIZE'" />
-    </xsl:call-template>
-
     <xsl:apply-templates select="SERIAL_CONSOLE" />
   </xsl:template>
 
@@ -89,15 +81,24 @@
       <xsl:with-param name="key" select="'SECURITY_VM_FIXUP'" />
     </xsl:call-template>
 
+    <xsl:call-template name="boolean-by-key">
+      <xsl:with-param name="key" select="'KEEP_IRQ_DISABLED'" />
+    </xsl:call-template>
+
     <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="'RDT_ENABLED'" />
       <xsl:with-param name="value" select="RDT/RDT_ENABLED" />
     </xsl:call-template>
 
-    <xsl:if test="RDT/RDT_ENABLED = 'y'">
+    <xsl:if test="acrn:is-rdt-enabled()">
       <xsl:call-template name="boolean-by-key-value">
-	<xsl:with-param name="key" select="'CDP_ENABLED'" />
-	<xsl:with-param name="value" select="RDT/CDP_ENABLED" />
+        <xsl:with-param name="key" select="'CDP_ENABLED'" />
+        <xsl:with-param name="value" select="RDT/CDP_ENABLED" />
+      </xsl:call-template>
+
+      <xsl:call-template name="boolean-by-key-value">
+        <xsl:with-param name="key" select="'VCAT_ENABLED'" />
+        <xsl:with-param name="value" select="RDT/VCAT_ENABLED" />
       </xsl:call-template>
     </xsl:if>
 
@@ -141,16 +142,7 @@
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'HV_RAM_SIZE'" />
-      <xsl:with-param name="default" select="//allocation-data/acrn-config/hv/MEMORY/HV_RAM_SIZE" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
       <xsl:with-param name="key" select="'PLATFORM_RAM_SIZE'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'LOW_RAM_SIZE'" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
@@ -159,20 +151,14 @@
   </xsl:template>
 
   <xsl:template match="CAPACITIES">
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'IOMMU_BUS_NUM'" />
+    <xsl:call-template name="integer-by-key-value">
+      <xsl:with-param name="prefix" select="'ACFG_'" />
+      <xsl:with-param name="key" select="'MAX_PCI_BUS_NUM'" />
+      <xsl:with-param name="value" select="//allocation-data/acrn-config/platform/MAX_PCI_BUS_NUM" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
       <xsl:with-param name="key" select="'MAX_IOAPIC_NUM'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'MAX_EFI_MMAP_ENTRIES'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'MAX_IR_ENTRIES'" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
@@ -259,8 +245,9 @@
   </xsl:template>
 
   <xsl:template match="MISC_CFG">
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'GPU_SBDF'" />
+    <xsl:call-template name="integer-by-key-value">
+      <xsl:with-param name="key" select="'IGD_SBDF'" />
+      <xsl:with-param name="value" select="//allocation-data/acrn-config/hv/MISC_CFG/IGD_SBDF" />
     </xsl:call-template>
   </xsl:template>
 
@@ -329,6 +316,7 @@
   <!-- Common library routines -->
 
   <xsl:template name="integer-by-key-value">
+    <xsl:param name="prefix" />
     <xsl:param name="key" />
     <xsl:param name="value" />
     <xsl:param name="default" />
@@ -336,18 +324,21 @@
     <xsl:choose>
       <xsl:when test="$value != ''">
 	<xsl:call-template name="entry-by-key-value">
+	  <xsl:with-param name="prefix" select="$prefix" />
 	  <xsl:with-param name="key" select="$key" />
 	  <xsl:with-param name="value" select="concat($value, $integer-suffix)" />
 	</xsl:call-template>
       </xsl:when>
       <xsl:when test="($value = '') and ($default != '')">
 	<xsl:call-template name="entry-by-key-value">
+	  <xsl:with-param name="prefix" select="$prefix" />
 	  <xsl:with-param name="key" select="$key" />
 	  <xsl:with-param name="value" select="concat($default, $integer-suffix)" />
 	</xsl:call-template>
       </xsl:when>
       <xsl:otherwise>
 	<xsl:call-template name="entry-by-key-value">
+	  <xsl:with-param name="prefix" select="$prefix" />
 	  <xsl:with-param name="key" select="$key" />
 	</xsl:call-template>
       </xsl:otherwise>

@@ -42,6 +42,13 @@
 #define DMAR_ICS_REG    0x9cU    /* Invalidation complete status register */
 #define DMAR_IRTA_REG   0xb8U    /* Interrupt remapping table addr register */
 
+/* Make sure all PT IRQs work w/ interrupt remapping or post interrupt */
+#if (CONFIG_MAX_PT_IRQ_ENTRIES <= 256)
+#define MAX_IR_ENTRIES 256
+#else
+#define MAX_IR_ENTRIES  powerof2_roundup(CONFIG_MAX_PT_IRQ_ENTRIES)
+#endif
+
 /* Values for entry_type in ACPI_DMAR_DEVICE_SCOPE - device types */
 enum acpi_dmar_scope_type {
 	ACPI_DMAR_SCOPE_TYPE_NOT_USED       = 0,
@@ -481,7 +488,7 @@ static inline uint16_t dma_frcd_up_sid(uint64_t up_sid)
 
 #define DRHD_FLAG_INCLUDE_PCI_ALL_MASK      (1U)
 
-#define DEVFUN(dev, fun)            (((dev & 0x1FU) << 3U) | ((fun & 0x7U)))
+#define DEVFUN(dev, fun)            ((((dev) & 0x1FU) << 3U) | (((fun) & 0x7U)))
 
 struct dmar_dev_scope {
 	enum acpi_dmar_scope_type type;

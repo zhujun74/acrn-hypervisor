@@ -3,17 +3,17 @@ ENTRY(cpu_primary_start_32)
 MEMORY
 {
     /* Low 1MB of memory for secondary processor start-up */
-    lowram  :   ORIGIN = 0, LENGTH = CONFIG_LOW_RAM_SIZE
+    lowram  :   ORIGIN = 0, LENGTH = 0x100000
 
     /* 32 MBytes of RAM for HV */
-    ram     :   ORIGIN = CONFIG_HV_RAM_START, LENGTH = CONFIG_HV_RAM_SIZE
+    ram     :   ORIGIN = CONFIG_HV_RAM_START, LENGTH = 0x80000000 - CONFIG_HV_RAM_START
 }
 
 SECTIONS
 {
     .boot :
     {
-        _ld_ram_start = . ;
+        ld_ram_start = . ;
         KEEP(*(multiboot_header)) ;
     } > ram
 
@@ -98,6 +98,6 @@ SECTIONS
         ld_bss_end = . ;
     } > ram
 
-    _ld_ram_size = LENGTH(ram) ;
-    _ld_ram_end = _ld_ram_size + _ld_ram_start ;
+   . = ALIGN(0x200000) ;
+    ld_ram_end = . ;
 }

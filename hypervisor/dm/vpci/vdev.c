@@ -140,7 +140,7 @@ static void pci_vdev_update_vbar_base(struct pci_vdev *vdev, uint32_t idx)
 			* Currently, we don't support the reprogram of PIO bar of pass-thru devs,
 			* If guest tries to reprogram, hv will inject #GP to guest.
 			*/
-			if ((vdev->pdev != NULL) && ((lo & PCI_BASE_ADDRESS_IO_MASK) != vbar->base_hpa)) {
+			if ((vdev->pdev != NULL) && ((lo & PCI_BASE_ADDRESS_IO_MASK) != (uint32_t)vbar->base_hpa)) {
 				struct acrn_vcpu *vcpu = vcpu_from_pid(vpci2vm(vdev->vpci), get_pcpu_id());
 				if (vcpu != NULL) {
 					vcpu_inject_gp(vcpu, 0U);
@@ -155,7 +155,7 @@ static void pci_vdev_update_vbar_base(struct pci_vdev *vdev, uint32_t idx)
 					|| (!mem_aligned_check(base, vdev->vbars[idx].size))) {
 			res = (base < (1UL << 32UL)) ? &(vdev->vpci->res32): &(vdev->vpci->res64);
 			/* VM tries to reprogram vbar address out of pci mmio bar window, it can be caused by:
-			 * 1. For SOS, <board>.xml is misaligned with the actual native platform, and we get wrong mmio window.
+			 * 1. For Service VM, <board>.xml is misaligned with the actual native platform, and we get wrong mmio window.
 			 * 2. Malicious operation from VM, it tries to reprogram vbar address out of pci mmio bar window
 			 */
 			pr_err("%s reprogram PCI:%02x:%02x.%x BAR%d to addr:0x%lx,"

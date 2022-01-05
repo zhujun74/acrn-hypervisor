@@ -411,6 +411,7 @@ struct ext_context {
 
 	uint64_t dr7;
 	uint64_t tsc_offset;
+	uint64_t tsc_aux;
 
 	struct xsave_area xs_area;
 	uint64_t xcr0;
@@ -521,16 +522,30 @@ static inline void asm_hlt(void)
 }
 
 /* Disables interrupts on the current CPU */
-#define CPU_IRQ_DISABLE()                                   \
+#ifdef CONFIG_KEEP_IRQ_DISABLED
+#define CPU_IRQ_DISABLE_ON_CONFIG()		do { } while (0)
+#else
+#define CPU_IRQ_DISABLE_ON_CONFIG()                         \
 {                                                           \
 	asm volatile ("cli\n" : : : "cc");                  \
 }
+#endif
 
-/* Enables interrupts on the current CPU */
-#define CPU_IRQ_ENABLE()                                    \
+/* Enables interrupts on the current CPU
+ * If CONFIG_KEEP_IRQ_DISABLED is 'y', all interrupts
+ * received in root mode will be handled in external interrupt
+ * vmexit after next VM entry. The postpone latency is negligible.
+ * Permanently turning off interrupts in root mode can be useful in
+ * many scenarios (e.g., x86_tee).
+ */
+#ifdef CONFIG_KEEP_IRQ_DISABLED
+#define CPU_IRQ_ENABLE_ON_CONFIG()		do { } while (0)
+#else
+#define CPU_IRQ_ENABLE_ON_CONFIG()                          \
 {                                                           \
 	asm volatile ("sti\n" : : : "cc");                  \
 }
+#endif
 
 /* This macro writes the stack pointer. */
 static inline void cpu_sp_write(uint64_t *stack_ptr)
@@ -616,7 +631,7 @@ cpu_rdtscp_execute(uint64_t *timestamp_ptr, uint32_t *cpu_id_ptr)
 #define CPU_INT_ALL_DISABLE(p_rflags)               \
 {                                                   \
 	CPU_RFLAGS_SAVE(p_rflags);	             \
-	CPU_IRQ_DISABLE();                          \
+	CPU_IRQ_DISABLE_ON_CONFIG();                    \
 }
 
 /* This macro restores the architecture status / state register used to lockout

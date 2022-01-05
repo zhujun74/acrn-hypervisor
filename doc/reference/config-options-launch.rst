@@ -6,10 +6,10 @@ Launch Configuration Options
 As explained in :ref:`acrn_configuration_tool`, launch configuration files
 define post-launched User VM settings. This document describes these option settings.
 
-``uos``:
+``user_vm``:
   Specify the User VM ``id`` to the Service VM.
 
-``uos_type``:
+``user_vm_type``:
   Specify the User VM type, such as ``CLEARLINUX``, ``ANDROID``, ``ALIOS``,
   ``PREEMPT-RT LINUX``, ``GENERIC LINUX``, ``WINDOWS``, ``YOCTO``, ``UBUNTU``,
   ``ZEPHYR`` or ``VXWORKS``.
@@ -77,7 +77,11 @@ define post-launched User VM settings. This document describes these option sett
 
 ``network`` (a child node of ``virtio_devices``):
   The virtio network device setting.
-  Input format: ``[tap_name|macvtap_name],[vhost],[mac=XX:XX:XX:XX:XX:XX]``.
+  Input format: ``<device_name>[,vhost][,mac=<XX:XX:XX:XX:XX:XX>]``.
+  The ``<device_name>`` is the name of the TAP (or MacVTap) device.
+  It must include the keyword ``tap``. ``vhost`` specifies the
+  vhost backend; otherwise, the VBSU backend is used. The ``mac``
+  address is optional.
 
 ``block`` (a child node of ``virtio_devices``):
   The virtio block device setting.

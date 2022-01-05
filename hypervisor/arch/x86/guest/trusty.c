@@ -70,8 +70,8 @@ static void create_secure_world_ept(struct acrn_vm *vm, uint64_t gpa_orig,
 	/* Map [gpa_rebased, gpa_rebased + size) to secure ept mapping */
 	ept_add_mr(vm, (uint64_t *)vm->arch_vm.sworld_eptp, hpa, gpa_rebased, size, EPT_RWX | EPT_WB);
 
-	/* Backup secure world info, will be used when destroy secure world and suspend UOS */
-	vm->sworld_control.sworld_memory.base_gpa_in_uos = gpa_orig;
+	/* Backup secure world info, will be used when destroy secure world and suspend User VM */
+	vm->sworld_control.sworld_memory.base_gpa_in_user_vm = gpa_orig;
 	vm->sworld_control.sworld_memory.base_hpa = hpa;
 	vm->sworld_control.sworld_memory.length = size;
 }
@@ -79,7 +79,7 @@ static void create_secure_world_ept(struct acrn_vm *vm, uint64_t gpa_orig,
 void destroy_secure_world(struct acrn_vm *vm, bool need_clr_mem)
 {
 	uint64_t hpa = vm->sworld_control.sworld_memory.base_hpa;
-	uint64_t gpa_uos = vm->sworld_control.sworld_memory.base_gpa_in_uos;
+	uint64_t gpa_user_vm = vm->sworld_control.sworld_memory.base_gpa_in_user_vm;
 	uint64_t size = vm->sworld_control.sworld_memory.length;
 
 	if (vm->arch_vm.sworld_eptp != NULL) {
@@ -90,11 +90,11 @@ void destroy_secure_world(struct acrn_vm *vm, bool need_clr_mem)
 			clac();
 		}
 
-		ept_del_mr(vm, vm->arch_vm.sworld_eptp, gpa_uos, size);
+		ept_del_mr(vm, vm->arch_vm.sworld_eptp, gpa_user_vm, size);
 		vm->arch_vm.sworld_eptp = NULL;
 
 		/* Restore memory to guest normal world */
-		ept_add_mr(vm, vm->arch_vm.nworld_eptp, hpa, gpa_uos, size, EPT_RWX | EPT_WB);
+		ept_add_mr(vm, vm->arch_vm.nworld_eptp, hpa, gpa_user_vm, size, EPT_RWX | EPT_WB);
 	} else {
 		pr_err("sworld eptp is NULL, it's not created");
 	}
@@ -149,6 +149,7 @@ static void save_world_ctx(struct acrn_vcpu *vcpu, struct ext_context *ext_ctx)
 	ext_ctx->ia32_lstar = msr_read(MSR_IA32_LSTAR);
 	ext_ctx->ia32_fmask = msr_read(MSR_IA32_FMASK);
 	ext_ctx->ia32_kernel_gs_base = msr_read(MSR_IA32_KERNEL_GS_BASE);
+	ext_ctx->tsc_aux = msr_read(MSR_IA32_TSC_AUX);
 
 	/* XSAVE area */
 	save_xsave_area(vcpu, ext_ctx);
@@ -164,12 +165,12 @@ static void load_world_ctx(struct acrn_vcpu *vcpu, const struct ext_context *ext
 	uint32_t i;
 
 	/* mark to update on-demand run_context for efer/rflags/rsp/rip/cr0/cr4 */
-	bitmap_set_lock(CPU_REG_EFER, &vcpu->reg_updated);
-	bitmap_set_lock(CPU_REG_RFLAGS, &vcpu->reg_updated);
-	bitmap_set_lock(CPU_REG_RSP, &vcpu->reg_updated);
-	bitmap_set_lock(CPU_REG_RIP, &vcpu->reg_updated);
-	bitmap_set_lock(CPU_REG_CR0, &vcpu->reg_updated);
-	bitmap_set_lock(CPU_REG_CR4, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_EFER, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_RFLAGS, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_RSP, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_RIP, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_CR0, &vcpu->reg_updated);
+	bitmap_set_nolock(CPU_REG_CR4, &vcpu->reg_updated);
 
 	/* VMCS Execution field */
 	exec_vmwrite64(VMX_TSC_OFFSET_FULL, ext_ctx->tsc_offset);
@@ -201,6 +202,7 @@ static void load_world_ctx(struct acrn_vcpu *vcpu, const struct ext_context *ext
 	msr_write(MSR_IA32_LSTAR, ext_ctx->ia32_lstar);
 	msr_write(MSR_IA32_FMASK, ext_ctx->ia32_fmask);
 	msr_write(MSR_IA32_KERNEL_GS_BASE, ext_ctx->ia32_kernel_gs_base);
+	msr_write(MSR_IA32_TSC_AUX, ext_ctx->tsc_aux);
 
 	/* XSAVE area */
 	rstore_xsave_area(vcpu, ext_ctx);
@@ -277,7 +279,7 @@ static bool setup_trusty_info(struct acrn_vcpu *vcpu, uint32_t mem_size, uint64_
 	/* Derive dvseed from dseed for Trusty */
 	if (derive_virtual_seed(&key_info.dseed_list[0U], &key_info.num_seeds,
 				  NULL, 0U,
-				  vcpu->vm->uuid, sizeof(vcpu->vm->uuid))) {
+				  (uint8_t *)vcpu->vm->name, strnlen_s(vcpu->vm->name, MAX_VM_NAME_LEN))) {
 		/* Derive encryption key of attestation keybox from dseed */
 		if (derive_attkb_enc_key(key_info.attkb_enc_key)) {
 			/* Prepare trusty startup param */
@@ -309,7 +311,7 @@ static bool setup_trusty_info(struct acrn_vcpu *vcpu, uint32_t mem_size, uint64_
 	return success;
 }
 
-/* Secure World will reuse environment of UOS_Loder since they are
+/* Secure World will reuse environment of User VM Loder since they are
  * both booting from and running in 64bit mode, except GP registers.
  * RIP, RSP and RDI are specified below, other GP registers are leaved
  * as 0.
@@ -409,7 +411,7 @@ void restore_sworld_context(struct acrn_vcpu *vcpu)
 		&vcpu->vm->sworld_control;
 
 	create_secure_world_ept(vcpu->vm,
-		sworld_ctl->sworld_memory.base_gpa_in_uos,
+		sworld_ctl->sworld_memory.base_gpa_in_user_vm,
 		sworld_ctl->sworld_memory.length,
 		TRUSTY_EPT_REBASE_GPA);
 

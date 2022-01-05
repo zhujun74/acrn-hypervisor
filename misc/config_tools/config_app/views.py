@@ -19,12 +19,13 @@ from flask import request, render_template, Blueprint, redirect, url_for, curren
 # Refer to https://github.com/pallets/werkzeug/blob/master/LICENSE.rst for the permission notice.
 from werkzeug.utils import secure_filename
 
+import common
 from controller import *
 from scenario_config.scenario_cfg_gen import get_scenario_item_values
 from scenario_config.scenario_cfg_gen import validate_scenario_setting
 from launch_config.launch_cfg_gen import get_launch_item_values
 from launch_config.launch_cfg_gen import validate_launch_setting
-from library.common import MAX_VM_NUM
+import scenario_config.default_populator as default_populator
 
 
 CONFIG_APP = Blueprint('CONFIG_APP', __name__, template_folder='templates')
@@ -59,13 +60,13 @@ def scenarios():
         else:
             scenario_list = (
                 generic_config_list[0], xml_config.list_all(xml_type='scenario')[0])
-        if default_xml_config.list_all(xml_type='uos_launcher')[0]:
+        if default_xml_config.list_all(xml_type='user_vm_launcher')[0]:
             launch_list = (
-                default_xml_config.list_all(xml_type='uos_launcher')[0],
-                xml_config.list_all(xml_type='uos_launcher')[0])
+                default_xml_config.list_all(xml_type='user_vm_launcher')[0],
+                xml_config.list_all(xml_type='user_vm_launcher')[0])
         else:
             launch_list = (
-                generic_config_list[1], xml_config.list_all(xml_type='uos_launcher')[0])
+                generic_config_list[1], xml_config.list_all(xml_type='user_vm_launcher')[0])
 
     return render_template('scenario.html', board_info_list=get_board_list(),
                            board_info=board_info, board_type=board_type,
@@ -97,13 +98,13 @@ def scenario(scenario_name):
         else:
             scenario_list = (
                 generic_config_list[0], xml_config.list_all(xml_type='scenario')[0])
-        if default_xml_config.list_all(xml_type='uos_launcher')[0]:
+        if default_xml_config.list_all(xml_type='user_vm_launcher')[0]:
             launch_list = (
-                default_xml_config.list_all(xml_type='uos_launcher')[0],
-                xml_config.list_all(xml_type='uos_launcher')[0])
+                default_xml_config.list_all(xml_type='user_vm_launcher')[0],
+                xml_config.list_all(xml_type='user_vm_launcher')[0])
         else:
             launch_list = (
-                generic_config_list[1], xml_config.list_all(xml_type='uos_launcher')[0])
+                generic_config_list[1], xml_config.list_all(xml_type='user_vm_launcher')[0])
 
     xpath_dict = get_xpath_dict_of_xsd()
 
@@ -153,13 +154,13 @@ def launches():
         else:
             scenario_list = (
                 generic_config_list[0], xml_config.list_all(xml_type='scenario')[0])
-        if default_xml_config.list_all(xml_type='uos_launcher')[0]:
+        if default_xml_config.list_all(xml_type='user_vm_launcher')[0]:
             launch_list = (
-                default_xml_config.list_all(xml_type='uos_launcher')[0],
-                xml_config.list_all(xml_type='uos_launcher')[0])
+                default_xml_config.list_all(xml_type='user_vm_launcher')[0],
+                xml_config.list_all(xml_type='user_vm_launcher')[0])
         else:
             launch_list = (
-                generic_config_list[1], xml_config.list_all(xml_type='uos_launcher')[0])
+                generic_config_list[1], xml_config.list_all(xml_type='user_vm_launcher')[0])
 
     return render_template('launch.html', board_info_list=get_board_list(),
                            board_info=board_info, board_type=board_type,
@@ -190,13 +191,13 @@ def launch(launch_name):
         else:
             scenario_list = (
                 generic_config_list[0], xml_config.list_all(xml_type='scenario')[0])
-        if default_xml_config.list_all(xml_type='uos_launcher')[0]:
+        if default_xml_config.list_all(xml_type='user_vm_launcher')[0]:
             launch_list = (
-                default_xml_config.list_all(xml_type='uos_launcher')[0],
-                xml_config.list_all(xml_type='uos_launcher')[0])
+                default_xml_config.list_all(xml_type='user_vm_launcher')[0],
+                xml_config.list_all(xml_type='user_vm_launcher')[0])
         else:
             launch_list = (
-                generic_config_list[1], xml_config.list_all(xml_type='uos_launcher')[0])
+                generic_config_list[1], xml_config.list_all(xml_type='user_vm_launcher')[0])
 
     launch_config.set_curr(launch_name)
 
@@ -244,6 +245,7 @@ def save_scenario():
     board_type = xml_configs[1]
     scenario_config = xml_configs[3]
 
+    common.MAX_VM_NUM = int(scenario_config_data['hv,CAPACITIES,MAX_VM_NUM'])
     if board_type is None or xml_configs[0] is None:
         return {'status': 'fail',
                 'error_list': {'error': 'Please select the board info before this operation.'}}
@@ -298,37 +300,14 @@ def save_scenario():
 
     generator = scenario_config_data['generator']
     if generator is not None:
-        if generator == 'remove_vm_kata':
-            scenario_config.delete_curr_key('vm:desc=specific for Kata')
-            assign_vm_id(scenario_config)
-        elif generator == 'add_vm_kata':
+        if generator.startswith('add_vm:'):
             vm_list = []
             for vm in list(scenario_config.get_curr_root()):
                 if vm.tag == 'vm':
                     vm_list.append(vm.attrib['id'])
-            if len(vm_list) >= MAX_VM_NUM:
+            if len(vm_list) >= common.MAX_VM_NUM:
                 return {'status': 'fail',
-                        'error_list': {'error': 'Can not add a new VM. Max VM number is {}.'.format(MAX_VM_NUM)}}
-
-            # clone vm kata from generic config
-            generic_scenario_config = get_generic_scenario_config(scenario_config)
-            generic_scenario_config_root = generic_scenario_config.get_curr_root()
-            elem_kata = None
-            for vm in list(generic_scenario_config_root):
-                if 'desc' in vm.attrib and vm.attrib['desc'] == 'specific for Kata':
-                    elem_kata = vm
-                    break
-            if elem_kata is not None:
-                scenario_config.clone_curr_elem(elem_kata)
-            assign_vm_id(scenario_config)
-        elif generator.startswith('add_vm:'):
-            vm_list = []
-            for vm in list(scenario_config.get_curr_root()):
-                if vm.tag == 'vm':
-                    vm_list.append(vm.attrib['id'])
-            if len(vm_list) >= MAX_VM_NUM:
-                return {'status': 'fail',
-                        'error_list': {'error': 'Can not add a new VM. Max VM number is {}.'.format(MAX_VM_NUM)}}
+                        'error_list': {'error': 'Cannot add a new VM. hv.CAPACITIES.MAX_VM_NUM is currently set to {}.'.format(common.MAX_VM_NUM)}}
             curr_vm_id = generator.split(':')[1]
             add_vm_type = scenario_config_data['add_vm_type']
             add_scenario_config = get_generic_scenario_config(scenario_config, add_vm_type)
@@ -342,7 +321,7 @@ def save_scenario():
                         curr_vm_index = i + 2
                         break
             if add_scenario_config is not None and add_scenario_config.tag == 'vm':
-                for i in range(0, MAX_VM_NUM):
+                for i in range(0, common.MAX_VM_NUM):
                     if str(i) not in vm_list:
                         break
                 add_scenario_config.attrib['id'] = str(i)
@@ -416,6 +395,8 @@ def save_launch():
     scenario_file_path = os.path.join(current_app.config.get('CONFIG_PATH'),
                                       current_app.config.get('BOARD_TYPE'),
                                       scenario_name + '.xml')
+    # update VM_COUNT and MAX_VM_NUM
+    common.get_vm_num(scenario_file_path)
 
     for key in launch_config_data:
         if launch_config_data[key] in [None, 'None']:
@@ -431,11 +412,16 @@ def save_launch():
         if generator.startswith('add_vm:'):
             vm_list = []
             for vm in list(launch_config.get_curr_root()):
-                if vm.tag == 'uos':
+                if vm.tag == 'user_vm':
                     vm_list.append(vm.attrib['id'])
-            if len(vm_list) >= MAX_VM_NUM:
-                return {'status': 'fail',
-                        'error_list': {'error': 'Can not add a new VM. Max VM number is {}.'.format(MAX_VM_NUM)}}
+            if len(vm_list) >= common.MAX_VM_NUM:
+                return {
+                    'status': 'fail',
+                    'error_list': {
+                        'error': 'Cannot add a new VM. hv.CAPACITIES.MAX_VM_NUM '
+                                 'is currently set to {}.'.format(common.MAX_VM_NUM)
+                    }
+                }
             curr_vm_id = generator.split(':')[1].strip()
             add_launch_type = launch_config_data['add_launch_type']
             if add_launch_type is None or len(add_launch_type.split('ID :')) < 2:
@@ -444,8 +430,6 @@ def save_launch():
                                                 'Please select a scenario with available post launched VMs.'}}
             add_vm_id = add_launch_type.split('ID :')[1].replace(')', '').strip()
             add_launch_type = 'LAUNCH_' + add_launch_type.split()[0]
-            if add_launch_type == 'LAUNCH_KATA_VM':
-                add_launch_type = 'LAUNCH_POST_STD_VM'
             add_launch_id = 1
             post_vm_list = get_post_launch_vm_list(scenario_name)
             for i in range(len(post_vm_list)):
@@ -463,8 +447,8 @@ def save_launch():
                     if curr_vm_id == vm_list[i]:
                         curr_vm_index = i + 1
                         break
-            if add_launch_config is not None and add_launch_config.tag == 'uos':
-                for i in range(1, MAX_VM_NUM):
+            if add_launch_config is not None and add_launch_config.tag == 'user_vm':
+                for i in range(1, common.MAX_VM_NUM):
                     if str(i) not in vm_list:
                         break
                 add_launch_config.attrib['id'] = str(add_launch_id)
@@ -474,12 +458,12 @@ def save_launch():
                 launch_config.insert_curr_elem(curr_vm_index, vm)
         elif generator.startswith('remove_vm:'):
             remove_vm_id = generator.split(':')[1]
-            launch_config.delete_curr_key('uos:id='+remove_vm_id.strip())
+            launch_config.delete_curr_key('user_vm:id='+remove_vm_id.strip())
 
     launch_config.set_curr_attr('scenario', scenario_name)
     launch_config.set_curr_attr('board', current_app.config.get('BOARD_TYPE'))
 
-    launch_config.set_curr_attr('uos_launcher', str(len(list(launch_config.get_curr_root()))))
+    launch_config.set_curr_attr('user_vm_launcher', str(len(list(launch_config.get_curr_root()))))
 
     tmp_launch_file = os.path.join(current_app.config.get('CONFIG_PATH'), xml_configs[1],
                                    'tmp_' + launch_config_data['new_launch_name'] + '.xml')
@@ -491,7 +475,7 @@ def save_launch():
     rename = False
     try:
         if generator is None or not (generator.startswith('add_vm:') or generator.startswith('remove_vm:')):
-            (error_list, pthru_sel, virtio, dm_value) = validate_launch_setting(
+            (error_list, pthru_sel, virtio, dm_value, sriov) = validate_launch_setting(
                 os.path.join(current_app.config.get('CONFIG_PATH'), xml_configs[1], xml_configs[0]+'.xml'),
                 scenario_file_path,
                 tmp_launch_file)
@@ -590,7 +574,7 @@ def create_setting():
         launch_file = os.path.join(setting_path,  create_name + '.xml')
 
         if mode == 'create':
-            template_file_name = 'hybrid_launch_2uos'
+            template_file_name = 'hybrid_launch_2user_vm'
             src_file_name = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), 'generic_board', template_file_name + '.xml')
         else: #load
             src_file_name = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), board_type, default_name + '.xml')
@@ -602,8 +586,8 @@ def create_setting():
 
         launch_config.set_curr(create_name)
         if mode == 'create':
-            launch_config.delete_curr_key('uos:id=2')
-            launch_config.delete_curr_key('uos:id=1')
+            launch_config.delete_curr_key('user_vm:id=2')
+            launch_config.delete_curr_key('user_vm:id=1')
         launch_config.save(create_name)
         if os.path.normcase(setting_path) != os.path.normcase(os.path.join(current_app.config.get('CONFIG_PATH'), board_type)):
             copyfile(os.path.join(current_app.config.get('CONFIG_PATH'), board_type, create_name + '.xml'),
@@ -617,13 +601,21 @@ def create_setting():
             template_file_name = 'shared'
             src_file_name = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), 'generic_board', template_file_name + '.xml')
         else: # load
-            src_file_name = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), board_type, default_name + '.xml')
+            src_file_name = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), board_type,
+                                         default_name + '.xml')
+            if not os.path.isfile(src_file_name):
+                src_file_name=os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), 'generic_board', default_name + '.xml')
+
         if os.path.isfile(src_file_name):
+            xsd_path =  os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'schema', 'config.xsd')
+            out_xml = os.path.join(os.path.dirname(os.path.abspath(__file__)), create_name + '.xml')
+            default_populator.main(xsd_path, src_file_name, out_xml)
             if os.path.isfile(scenario_file):
                 os.remove(scenario_file)
-            copyfile(src_file_name,
+            copyfile(out_xml,
                  os.path.join(current_app.config.get('CONFIG_PATH'), board_type,
                               create_name + '.xml'))
+            os.remove(out_xml)
 
         if mode == 'create':
             # update RDT->CLOS_MASK according to board xml
@@ -638,7 +630,7 @@ def create_setting():
                 scenario_config.clone_curr_elem(elem_clos_max, 'hv', 'FEATURES', 'RDT')
             # for i in range(num_mba_delay):
             #    scenario_config.clone_curr_elem(elem_mba_delay, 'hv', 'FEATURES', 'RDT')
-            for i in range(8):
+            for i in range(7):
                 scenario_config.delete_curr_key('vm:id={}'.format(i))
             scenario_config = set_default_config(scenario_config)
         scenario_config.save(create_name)
@@ -762,7 +754,7 @@ def upload_board_info():
             board_type = None
             if board_info_root is not None and 'board' in board_info_root.attrib \
                 and 'scenario' not in board_info_root.attrib \
-                    and 'uos_launcher' not in board_info_root.attrib:
+                    and 'user_vm_launcher' not in board_info_root.attrib:
                 board_type = board_info_root.attrib['board']
             if not board_type:
                 os.remove(save_tmp_board_path)
@@ -786,7 +778,7 @@ def upload_board_info():
                         xml_config.set_curr(generic_name.rsplit('.', 1)[0])
                         xml_config.set_curr_attr('board', board_type)
                         xml_config_root = xml_config.get_curr_root()
-                        if 'scenario' not in xml_config_root.attrib and 'uos_launcher' not in xml_config_root.attrib:
+                        if 'scenario' not in xml_config_root.attrib and 'user_vm_launcher' not in xml_config_root.attrib:
                             os.remove(new_file)
                             continue
                         # update RDT->CLOS_MASK according to board xml
@@ -868,7 +860,7 @@ def upload_scenario():
             else:
                 tmp_root = tmp_xml_config.get_curr_root()
                 if 'board' not in tmp_root.attrib or 'scenario' not in tmp_root.attrib \
-                        or 'uos_launcher' in tmp_root.attrib:
+                        or 'user_vm_launcher' in tmp_root.attrib:
                     status = 'Invalid scenario xml file, \nonly board and scenario ' \
                              'need to be configured.'
                 elif tmp_root.attrib['board'] != current_app.config.get('BOARD_TYPE'):
@@ -891,6 +883,8 @@ def upload_scenario():
                                         + datetime.now().strftime('%Y%m%d%H%M%S')
                     rename = True
 
+            xsd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'schema', 'config.xsd')
+            default_populator.main(xsd_path, tmp_scenario_file, tmp_scenario_file)
             os.rename(tmp_scenario_file, os.path.join(current_app.config.get('CONFIG_PATH'),
                                                       board_type, new_scenario_name + '.xml'))
 
@@ -933,9 +927,9 @@ def upload_launch():
             else:
                 tmp_root = tmp_xml_config.get_curr_root()
                 if 'board' not in tmp_root.attrib or 'scenario' not in tmp_root.attrib \
-                        or 'uos_launcher' not in tmp_root.attrib:
+                        or 'user_vm_launcher' not in tmp_root.attrib:
                     status = 'Invalid launch xml file, \nboard, scenario,' \
-                             'and uos_launcher need to be configured.'
+                             'and user_vm_launcher need to be configured.'
                 elif tmp_root.attrib['board'] != current_app.config.get('BOARD_TYPE'):
                     status = 'Current board: {} mismatched with the board in the launch file,' \
                              '\nplease reselect or upload the board info: {}' \
@@ -977,20 +971,20 @@ def get_post_launch_vms():
 
     vm_list = get_post_launch_vm_list(scenario_name)
 
-    uos_id_list = []
+    user_vmid_list = []
     launch_name = data['launch_name']
     xml_configs = get_xml_configs()
     launch_config = xml_configs[3]
     launch_config.set_curr(launch_name)
     if launch_config is not None and launch_config.get_curr_root() is not None:
-        for uos in list(launch_config.get_curr_root()):
-            if 'id' in uos.attrib:
-                uos_id_list.append(int(uos.attrib['id'])-1)
+        for user_vm in list(launch_config.get_curr_root()):
+            if 'id' in user_vm.attrib:
+                user_vmid_list.append(int(user_vm.attrib['id'])-1)
 
     vm_list_index = [i for i in range(len(vm_list))]
     vm_list_index = set(vm_list_index)
-    uos_id_list = set(uos_id_list)
-    index = list(vm_list_index - uos_id_list)
+    user_vmid_list = set(user_vmid_list)
+    index = list(vm_list_index - user_vmid_list)
     vm_list = [vm_list[i] for i in index]
 
     return {'vm_list': vm_list}
@@ -1070,18 +1064,22 @@ def get_generic_scenario_config(scenario_config, add_vm_type=None):
             'PRE_STD_VM': ('partitioned', 'vm:id=0'),
             'PRE_RT_VM': ('hybrid_rt', 'vm:id=0'),
             'SAFETY_VM': ('hybrid', 'vm:id=0'),
-            'SOS_VM': ('shared', 'vm:id=0'),
+            'SERVICE_VM': ('shared', 'vm:id=0'),
             'POST_STD_VM': ('shared', 'vm:id=1'),
             'POST_RT_VM': ('shared', 'vm:id=2'),
-            'KATA_VM': ('shared', 'vm:id=7'),
-            'LAUNCH_POST_STD_VM': ('hybrid_launch_2uos', 'uos:id=1'),
-            'LAUNCH_POST_RT_VM': ('shared_launch_6uos', 'uos:id=2')
+            'LAUNCH_POST_STD_VM': ('hybrid_launch_2user_vm', 'user_vm:id=1'),
+            'LAUNCH_POST_RT_VM': ('shared_launch_6user_vm', 'user_vm:id=2')
         }
         config_path = os.path.join(current_app.config.get('DEFAULT_CONFIG_PATH'), 'generic_board')
-        generic_scenario_config = XmlConfig(config_path)
-        if os.path.isfile(os.path.join(config_path, vm_dict[add_vm_type][0] + '.xml')):
-            generic_scenario_config.set_curr(vm_dict[add_vm_type][0])
+        xml_path = os.path.join(config_path, vm_dict[add_vm_type][0] + '.xml')
+        if os.path.isfile(xml_path):
+            xsd_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'schema', 'config.xsd')
+            output_xml = os.path.join(config_path, vm_dict[add_vm_type][0] + '_1' + '.xml')
+            default_populator.main(xsd_path, xml_path, output_xml)
+            generic_scenario_config = XmlConfig(config_path)
+            generic_scenario_config.set_curr(vm_dict[add_vm_type][0] + '_1')
             generic_scenario_config = set_default_config(generic_scenario_config)
+            os.remove(output_xml)
             return generic_scenario_config.get_curr_elem(vm_dict[add_vm_type][1])
         else:
             return None
@@ -1093,7 +1091,7 @@ def get_generic_scenario_config(scenario_config, add_vm_type=None):
             generic_scenario_config.set_curr(os.path.splitext(file)[0])
             generic_scenario_config_root = generic_scenario_config.get_curr_root()
             if 'scenario' in generic_scenario_config_root.attrib \
-                and 'uos_launcher' not in generic_scenario_config_root.attrib \
+                and 'user_vm_launcher' not in generic_scenario_config_root.attrib \
                 and generic_scenario_config_root.attrib['scenario'] == \
                     scenario_config.get_curr_root().attrib['scenario']:
                 return generic_scenario_config
@@ -1260,9 +1258,9 @@ def assign_vm_id(scenario_config):
                 if item.tag == 'vm_type':
                     if item.text in ['PRE_STD_VM', 'SAFETY_VM', 'PRE_RT_VM']:
                         pre_launched_vm_num += 1
-                    elif item.text in ['SOS_VM']:
+                    elif item.text in ['SERVICE_VM']:
                         sos_vm_num += 1
-                    elif item.text in ['POST_STD_VM', 'POST_RT_VM', 'KATA_VM']:
+                    elif item.text in ['POST_STD_VM', 'POST_RT_VM']:
                         post_launched_vm_num += 1
 
     pre_launched_vm_index = 0
@@ -1275,10 +1273,10 @@ def assign_vm_id(scenario_config):
                     if item.text in ['PRE_STD_VM', 'SAFETY_VM', 'PRE_RT_VM']:
                         vm.attrib['id'] = str(pre_launched_vm_index)
                         pre_launched_vm_index += 1
-                    elif item.text in ['SOS_VM']:
+                    elif item.text in ['SERVICE_VM']:
                         vm.attrib['id'] = str(sos_vm_index)
                         sos_vm_index += 1
-                    elif item.text in ['POST_STD_VM', 'POST_RT_VM', 'KATA_VM']:
+                    elif item.text in ['POST_STD_VM', 'POST_RT_VM']:
                         vm.attrib['id'] = str(post_launched_vm_index)
                         post_launched_vm_index += 1
 
@@ -1324,9 +1322,9 @@ def get_generic_config_list():
         if os.path.isfile(os.path.join(default_config_path, config_name)):
             default_xml_config.set_curr(config_name.rsplit('.', 1)[0])
             xml_config_root = default_xml_config.get_curr_root()
-            if 'scenario' in xml_config_root.attrib and 'uos_launcher' not in xml_config_root.attrib:
+            if 'scenario' in xml_config_root.attrib and 'user_vm_launcher' not in xml_config_root.attrib:
                 secenario_config_list.append(config_name.rsplit('.', 1)[0])
-            elif 'scenario' in xml_config_root.attrib and 'uos_launcher' in xml_config_root.attrib:
+            elif 'scenario' in xml_config_root.attrib and 'user_vm_launcher' in xml_config_root.attrib:
                 launch_config_list.append(config_name.rsplit('.', 1)[0])
 
     return (secenario_config_list, launch_config_list)

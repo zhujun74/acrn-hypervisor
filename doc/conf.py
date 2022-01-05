@@ -70,7 +70,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = u'Project ACRN™'
-copyright = u'2018-' + str(datetime.now().year) + u', ' + project
+copyright = u'2018-' + str(datetime.now().year) + u' ' + project + ', a Series of LF Projects, LLC'
 author = u'Project ACRN developers'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -158,7 +158,7 @@ else:
     html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
     html_theme_options = {
         'canonical_url': '',
-        'analytics_id': '',
+        'analytics_id': 'GTM-K4WWJZD',
         'logo_only': False,
         'display_version': True,
         #'prev_next_buttons_location': 'None',
@@ -192,17 +192,11 @@ html_context = {
    'docs_title': docs_title,
    'is_release': is_release,
    'versions': ( ("latest", "/latest/"),
+                 ("2.7", "/2.7/"),
                  ("2.6", "/2.6/"),
                  ("2.5", "/2.5/"),
-                 ("2.4", "/2.4/"),
-                 ("2.3", "/2.3/"),
-                 ("2.2", "/2.2/"),
-                 ("2.1", "/2.1/"),
                  ("2.0", "/2.0/"),
                  ("1.6.1", "/1.6.1/"),
-                 ("1.6", "/1.6/"),
-                 ("1.5", "/1.5/"),
-                 ("1.4", "/1.4/"),
                  ("1.0", "/1.0/"),   # keep 1.0
                )
     }
@@ -236,8 +230,9 @@ def setup(app):
       app.add_javascript("acrn-custom.js")
    else:
       app.add_css_file("acrn-custom.css")
-      app.add_js_file("https://www.googletagmanager.com/gtag/js?id=UA-831873-64")
-      # note more GA tag manager calls are in acrn-custom.js
+      # we removed the old google analytics codes in favor or enabling analytics
+      # via the "analytics_id" provided by sphinx_RTD_theme
+      # app.add_js_file("https://www.googletagmanager.com/gtag/js?id=UA-831873-64")
       app.add_js_file("acrn-custom.js")
 
 # Custom sidebar templates, must be a dictionary that maps document names
@@ -388,4 +383,8 @@ html_redirect_pages = [
    ('getting-started/rt_industry', 'getting-started/getting-started'),
    ('getting-started/rt_industry_ubuntu', 'getting-started/getting-started'),
    ('getting-started/building-from-source', 'getting-started/getting-started'),
+   ('tutorials/using_vx_works_as_uos', 'tutorials/using_vx_works_as_user_vm'),
+   ('tutorials/using_xenomai_as_uos', 'tutorials/using_xenomai_as_user_vm'),
+   ('tutorials/using_zephyr_as_uos', 'tutorials/using_zephyr_as_user_vm'),
+   ('tutorials/using_windows_as_uos', 'tutorials/using_windows_as_user_vm')
    ]

@@ -81,7 +81,6 @@ typedef void (*vmexit_handler_t)(struct vmctx *,
 
 char *vmname;
 
-char *guest_uuid_str;
 char *vsbl_file_name;
 char *ovmf_file_name;
 char *ovmf_code_file_name;
@@ -143,37 +142,30 @@ usage(int code)
 {
 	fprintf(stderr,
 		"Usage: %s [-hAWYv] [-B bootargs] [-E elf_image_path]\n"
-		"       %*s [-G GVT_args] [-i ioc_mediator_parameters] [-k kernel_image_path]\n"
+		"       %*s [-k kernel_image_path]\n"
 		"       %*s [-l lpc] [-m mem] [-r ramdisk_image_path]\n"
-		"       %*s [-s pci] [-U uuid] [--vsbl vsbl_file_name] [--ovmf ovmf_file_path]\n"
-		"       %*s [--part_info part_info_name] [--enable_trusty] [--intr_monitor param_setting]\n"
+		"       %*s [-s pci] [--ovmf ovmf_file_path]\n"
+		"       %*s [--enable_trusty] [--intr_monitor param_setting]\n"
 		"       %*s [--acpidev_pt HID] [--mmiodev_pt MMIO_Regions]\n"
 		"       %*s [--vtpm2 sock_path] [--virtio_poll interval] [--mac_seed seed_string]\n"
 		"       %*s [--cpu_affinity pCPUs] [--lapic_pt] [--rtvm] [--windows]\n"
 		"       %*s [--debugexit] [--logger_setting param_setting]\n"
-		"       %*s [--pm_notify_channel channel] [--pm_by_vuart vuart_node]\n"
 		"       %*s [--ssram] <vm>\n"
 		"       -A: create ACPI tables\n"
 		"       -B: bootargs for kernel\n"
 		"       -E: elf image path\n"
-		"       -G: GVT args: low_gm_size, high_gm_size, fence_sz\n"
 		"       -h: help\n"
-		"       -i: ioc boot parameters\n"
 		"       -k: kernel image path\n"
 		"       -l: LPC device configuration\n"
 		"       -m: memory size in MB\n"
 		"       -r: ramdisk image path\n"
 		"       -s: <slot,driver,configinfo> PCI slot config\n"
-		"       -U: uuid\n"
 		"       -v: version\n"
 		"       -W: force virtio to use single-vector MSI\n"
-		"       -Y: disable MPtable generation\n"
 		"       --mac_seed: set a platform unique string as a seed for generate mac address\n"
-		"       --vsbl: vsbl file path\n"
 		"       --ovmf: ovmf file path\n"
 		"       --ssram: Enable Software SRAM passthrough\n"
 		"       --cpu_affinity: list of pCPUs assigned to this VM\n"
-		"       --part_info: guest partition info file path\n"
 		"       --enable_trusty: enable trusty for guest\n"
 		"       --debugexit: enable debug exit function\n"
 		"       --intr_monitor: enable interrupt storm monitor\n"
@@ -185,15 +177,13 @@ usage(int code)
 		"       --lapic_pt: enable local apic passthrough\n"
 		"       --rtvm: indicate that the guest is rtvm\n"
 		"       --logger_setting: params like console,level=4;kmsg,level=3\n"
-		"       --pm_notify_channel: define the channel used to notify guest about power event\n"
-		"       --pm_by_vuart:pty,/run/acrn/vuart_vmname or tty,/dev/ttySn\n"
 		"       --windows: support Oracle virtio-blk, virtio-net and virtio-input devices\n"
 		"            for windows guest with secure boot\n",
 		progname, (int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
-		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "");
+		(int)strnlen(progname, PATH_MAX), "");
 
 	exit(code);
 }
@@ -411,7 +401,7 @@ handle_vmexit(struct vmctx *ctx, struct acrn_io_request *io_req, int vcpu)
 	(*handler[exitcode])(ctx, io_req, &vcpu);
 
 	/* We cannot notify the HSM/hypervisor on the request completion at this
-	 * point if the UOS is in suspend or system reset mode, as the VM is
+	 * point if the User VM is in suspend or system reset mode, as the VM is
 	 * still not paused and a notification can kick off the vcpu to run
 	 * again. Postpone the notification till vm_system_reset() or
 	 * vm_suspend_resume() for resetting the ioreq states in the HSM and
@@ -617,7 +607,7 @@ vm_system_reset(struct vmctx *ctx)
 	 *   1. pause VM
 	 *   2. flush and clear ioreqs
 	 *   3. reset virtual devices
-	 *   4. load software for UOS
+	 *   4. load software for User VM
 	 *   5. hypercall reset vm
 	 *   6. reset suspend mode to VM_SUSPEND_NONE
 	 */
@@ -635,7 +625,7 @@ vm_system_reset(struct vmctx *ctx)
 	 * When handling emergency mode triggered by one vcpu without
 	 * offlining any other vcpus, there can be multiple IO requests
 	 * with various states. We should be careful on potential races
-	 * when resetting especially in SMP SOS. vm_clear_ioreq can be used
+	 * when resetting especially in SMP Service VM. vm_clear_ioreq can be used
 	 * to clear all ioreq status in HSM after VM pause, then let VM
 	 * reset in hypervisor reset all ioreqs.
 	 */
@@ -777,7 +767,6 @@ static struct option long_options[] = {
 	{"lpc",			required_argument,	0, 'l' },
 	{"pci_slot",		required_argument,	0, 's' },
 	{"memsize",		required_argument,	0, 'm' },
-	{"uuid",		required_argument,	0, 'U' },
 	{"virtio_msix",		no_argument,		0, 'W' },
 	{"mptgen",		no_argument,		0, 'Y' },
 	{"kernel",		required_argument,	0, 'k' },
@@ -835,7 +824,7 @@ main(int argc, char *argv[])
 	/*
 	 * Ignore SIGPIPE signal and handle the error directly when write()
 	 * function fails. this will help us to catch the write failure rather
-	 * than crashing the UOS.
+	 * than crashing the User VM.
 	 */
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
 		fprintf(stderr, "cannot register handler for SIGPIPE\n");
@@ -852,7 +841,7 @@ main(int argc, char *argv[])
 			else
 				break;
 			break;
-		case 'i':
+		case 'i': /* obsolete parameter */
 			ioc_parse(optarg);
 			break;
 
@@ -872,13 +861,10 @@ main(int argc, char *argv[])
 			if (vm_parse_memsize(optarg, &memsize) != 0)
 				errx(EX_USAGE, "invalid memsize '%s'", optarg);
 			break;
-		case 'U':
-			guest_uuid_str = optarg;
-			break;
 		case 'W':
 			virtio_msix = 0;
 			break;
-		case 'Y':
+		case 'Y': /* obsolete parameter */
 			mptgen = 0;
 			break;
 		case 'k':
@@ -897,14 +883,14 @@ main(int argc, char *argv[])
 			else
 				break;
 			break;
-		case 'G':
+		case 'G': /* obsolete parameter */
 			if (acrn_parse_gvtargs(optarg) != 0)
 				errx(EX_USAGE, "invalid GVT param %s", optarg);
 			break;
 		case 'v':
 			print_version();
 			break;
-		case CMD_OPT_VSBL:
+		case CMD_OPT_VSBL: /* obsolete parameter */
 			if (high_bios_size() == 0 && acrn_parse_vsbl(optarg) != 0)
 				errx(EX_USAGE, "invalid vsbl param %s", optarg);
 			break;
@@ -917,7 +903,7 @@ main(int argc, char *argv[])
 			if (acrn_parse_cpu_affinity(optarg) != 0)
 				errx(EX_USAGE, "invalid pcpu param %s", optarg);
 			break;
-		case CMD_OPT_PART_INFO:
+		case CMD_OPT_PART_INFO: /* obsolete parameter */
 			if (acrn_parse_guest_part_info(optarg) != 0) {
 				errx(EX_USAGE,
 					"invalid guest partition info param %s",
@@ -955,11 +941,11 @@ main(int argc, char *argv[])
 			break;
 		case CMD_OPT_ACPIDEV_PT:
 			/* FIXME: check acpi TPM device rules in acpi device famework init functions */
-			if (vtpm2 || parse_pt_acpidev(optarg) != 0)
+			if (vtpm2 || create_pt_acpidev(optarg) != 0)
 				errx(EX_USAGE, "invalid pt acpi dev param %s", optarg);
 			break;
 		case CMD_OPT_MMIODEV_PT:
-			if (parse_pt_mmiodev(optarg) != 0)
+			if (create_pt_mmiodev(optarg) != 0)
 				errx(EX_USAGE, "invalid pt mmio dev param %s", optarg);
 			break;
 		case CMD_OPT_VTPM2:
@@ -974,7 +960,7 @@ main(int argc, char *argv[])
 			if (init_logger_setting(optarg) != 0)
 				errx(EX_USAGE, "invalid logger setting params %s", optarg);
 			break;
-		case CMD_OPT_PM_NOTIFY_CHANNEL:
+		case CMD_OPT_PM_NOTIFY_CHANNEL: /* obsolete parameter */
 			if (strncmp("ioc", optarg, sizeof("ioc")) == 0)
 				pm_notify_channel = PWR_EVENT_NOTIFY_IOC;
 			else if (strncmp("power_button", optarg, sizeof("power_button")) == 0)
@@ -990,7 +976,7 @@ main(int argc, char *argv[])
 			} else
 				errx(EX_USAGE, "invalid pm_notify_channel: %s", optarg);
 			break;
-		case CMD_OPT_PM_BY_VUART:
+		case CMD_OPT_PM_BY_VUART: /* obsolete parameter */
 			if (parse_pm_by_vuart(optarg) != 0)
 				errx(EX_USAGE, "invalid pm-by-vuart params %s", optarg);
 			break;
@@ -1006,12 +992,15 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if (argc != 1)
+	if (argc != 1) {
+		pr_err("You must provide the name of the Virtual Machine (VM) you want to start. Exiting.\n");
 		usage(1);
+        }
 
 	vmname = argv[0];
-	if (strnlen(vmname, MAX_VMNAME_LEN) >= MAX_VMNAME_LEN) {
-		pr_err("vmname size exceed %u\n", MAX_VMNAME_LEN);
+
+	if (strnlen(vmname, MAX_VM_NAME_LEN) >= MAX_VM_NAME_LEN) {
+		pr_err("The name of the VM exceeds the maximum length: %u\n", MAX_VM_NAME_LEN - 1);
 		exit(1);
 	}
 

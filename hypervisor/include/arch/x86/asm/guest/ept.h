@@ -25,13 +25,13 @@ struct acrn_vm;
  * @brief Check if the GPA range is guest valid GPA or not
  *
  * @param[in] vm the pointer that points to VM data structure
- * @param[in] base The specified start guest physical address of guest
- *                physical memory region
+ * @param[in] mr_base_gpa The specified start guest physical address of guest
+ *                        physical memory region
  * @param[in] size The size of guest physical memory region
  *
  * @retval true if the GPA range is guest valid GPA, false otherwise.
  */
-bool ept_is_valid_mr(struct acrn_vm *vm, uint64_t base, uint64_t size);
+bool ept_is_valid_mr(struct acrn_vm *vm, uint64_t mr_base_gpa, uint64_t size);
 
 /**
  * @brief EPT page tables destroy
@@ -64,13 +64,13 @@ uint64_t gpa2hpa(struct acrn_vm *vm, uint64_t gpa);
  */
 uint64_t local_gpa2hpa(struct acrn_vm *vm, uint64_t gpa, uint32_t *size);
 /**
- * @brief Translating from host-physical address to guest-physical address for SOS_VM
+ * @brief Translating from host-physical address to guest-physical address for Service VM
  *
  * @param[in] hpa the specified host-physical address
  *
- * @pre: the gpa and hpa are identical mapping in SOS.
+ * @pre: the gpa and hpa are identical mapping in Service VM.
  */
-uint64_t sos_vm_hpa2gpa(uint64_t hpa);
+uint64_t service_vm_hpa2gpa(uint64_t hpa);
 /**
  * @brief Guest-physical memory region mapping
  *

@@ -67,11 +67,11 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
    peripherals from SoC.  (The ``-i`` and ``-l`` parameters are only available
    on a platform with IOC.)
 
-   IOC DM opens ``/dev/ptmx`` device to create a peer PTY devices, IOC DM uses
-   these to communicate with UART DM since UART DM needs a TTY capable device
-   as its backend.
+   IOC DM opens the ``/dev/ptmx`` device to create peer PTY devices. IOC DM uses
+   these devices to communicate with UART DM since UART DM needs a TTY capable
+   device as its backend.
 
-   The device model configuration command syntax for IOC mediator is::
+   The Device Model configuration command syntax for IOC mediator is::
 
       -i,[ioc_channel_path],[wakeup_reason]
       -l,[lpc_port],[ioc_channel_path]
@@ -79,7 +79,7 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
    -  ``ioc_channel_path`` is an absolute path for communication between IOC
       mediator and UART DM.
    -  ``lpc_port`` is com1 or com2. IOC mediator needs one unassigned lpc
-      port for data transfer between User OS and Service OS.
+      port for data transfer between the User VM and Service VM.
    -  ``wakeup_reason`` is IOC mediator boot reason, where each bit represents
       one wakeup reason.
 
@@ -202,18 +202,8 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
    This adds virtual block in PCI slot 9 and uses ``/root/test.img`` as the
    disk image.
 
-----
 
-``-U``, ``--uuid <uuid>``
-   Set UUID for a VM.  Every VM is identified by a UUID.  You can define that
-   UUID with this option.  If you don't use this option, a default one
-   ("d2795438-25d6-11e8-864e-cb7a18b34643") will be used.
-
-   usage::
-
-      -u "42795636-1d31-6512-7432-087d33b34756"
-
-   set the newly created VM's UUID to ``42795636-1d31-6512-7432-087d33b34756``
+   For more information about emulated device types, see :ref:'emul_config'.
 
 ----
 
@@ -223,18 +213,18 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
 ----
 
 ``--vsbl <vsbl_file_path>``
-   Virtual Slim bootloader (vSBL) is the virtual bootloader supporting booting
+   Virtual Slim Bootloader (vSBL) is the virtual bootloader supporting booting
    of the User VM on the ACRN hypervisor platform.  The vSBL design is derived
    from Slim Bootloader, which follows a staged design approach that provides
    hardware initialization and launching a payload that provides the boot
    logic.
 
-   The vSBL image is installed on the Service OS root filesystem by the
-   service-os bundle, in ``/usr/share/acrn/bios/``.  In the current design,
-   the vSBL supports booting Android guest OS or Linux guest OS using the same
-   vSBL image.  For Android VM, the vSBL will load and verify trusty OS first,
-   and trusty OS will then load and verify Android OS according to Android OS
-   verification mechanism.
+   The vSBL image is installed on the Service VM root filesystem by the Service
+   VM OS bundle in ``/usr/share/acrn/bios/``.  In the current design, the vSBL
+   supports booting an Android guest OS or Linux guest OS using the same vSBL
+   image.  For an Android VM, the vSBL will load and verify the trusty OS first,
+   and the trusty OS will then load and verify the Android OS according to the
+   Android OS verification mechanism.
 
    .. note::
       vSBL is currently only supported on Apollo Lake processors.
@@ -411,12 +401,12 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
 ----
 
 ``--pm_by_vuart [pty|tty],<node_path>``
-   This option is used to set a user OS power management by virtual UART.
+   This option is used to set User VM power management by virtual UART.
    With acrn-dm UART emulation and hypervisor UART emulation and configure,
-   service OS can communicate with user OS through virtual UART. By this
-   option, service OS can notify user OS to shutdown itself by vUART.
+   the Service VM can communicate with the User VM through virtual UART. By this
+   option, the Service VM can notify the User VM to shut down itself by vUART.
 
-   It must work with `--pm_notify_channel` and PCI UART setting (lpc and -l).
+   It must work with ``--pm_notify_channel`` and PCI UART setting (lpc and -l).
 
    Example::
 
@@ -451,3 +441,200 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
    usage::
 
       --ssram
+
+.. _emul_config:
+
+Emulated PCI Device Types
+****************************
+
+In the acrn-dm ``-s`` or ``--pci_slot`` command line parameter, there is a ``<slot_config>`` argument
+that contains a string describing the type of emulated PCI device, along with optional device-dependent
+arguments used for configuration.  Here is a table describing these emulated device types and arguments:
+
+.. list-table:: Emulated PCI Device Types
+   :header-rows: 1
+   :widths: 20 80
+
+   * - PCI Device Type string
+     - Description
+
+   * - ``xhci``
+     - USB controller used to support USB 3.0 devices, (also supports USB 2.0
+       and USB 1.0 devices).  Parameter ``<bus number>-<port number>`` should be
+       added. The physical USB devices attached on the specified bus and port
+       will be detected by User VM and used as expected, e.g., ``xhci,1-2,2-2``.
+
+   * - ``lpc``
+     - Low Pin Count (LPC) bus is used to connect low speed devices to the CPU,
+       for example a serial port, keyboard, or mouse.
+
+   * - ``igd-lpc``
+     - Windows graphic driver requires this virtualized LPC device to operate
+       the display function.
+
+   * - ``ivshmem``
+     - Inter-VM shared memory (ivshmem) virtualized PCI device used specifically
+       for shared memory between VMs. Parameters should be added with the format
+       ``ivshmem,<shm_name>,<shm_size>``. ``<shm-name>`` specifies a shared memory
+       name, and must be listed in :option:`hv.FEATURES.IVSHMEM.IVSHMEM_REGION`
+       as configured using the ACRN configurator tool UI, and needs to start
+       with a ``dm:/`` prefix.
+
+   * - ``ahci``
+     - Advanced Host Controller Interface provides advanced features to access
+       Serial ATA (SATA) storage devices, such as a hard disk. Parameter
+       ``<type:><filepath>*`` should be added: ``type`` could be
+       ``hd`` (harddisk) or ``cd`` (CD-ROM). ``<filepath>`` is the path for the
+       backend file and could be a partition name or a regular file, e.g.,
+       ``ahci,hd:/dev/sda``.
+
+   * - ``ahci-hd``
+     - This is an alias for ``ahci``.
+
+   * - ``ahci-cd``
+     - Advanced Host Controller Interface used to connect with AT Attachment
+       Packet Interface device (for CD-ROM emulation). ``ahci-cd`` supports the same
+       parameters than ``ahci``.
+
+   * - ``amd_hostbridge``
+     - Virtualized PCI AMD hostbridge
+
+   * - ``hostbridge``
+     - Virtualized PCI hostbridge, a hardware bridge between the CPU's
+       high-speed system local bus and the Peripheral Component Interconnect
+       (PCI) bus.
+
+   * - ``virtio-blk``
+     - Virtio block type device, a string could be appended with the format 
+       ``virtio-blk,[,b,]<filepath>[,options]``
+
+       * ``[,b,]`` specifies a bootable device and the bootable image location
+         when using vsbl as the virtual bootloader. 
+       * ``<filepath>`` specifies the path of a file or disk partition. 
+         You can also could use ``nodisk`` to create a virtio-blk device with a dummy backend.
+         ``nodisk`` is used for hot-plugging a rootfs after the User VM has been launched. It is 
+         achieved by triggering a rescan of the ``virtio-blk`` device by the User VM. The empty file 
+         will be updated to valid file after rescan.
+       * ``[,options]`` includes:
+
+         * ``writethru``: write operation is reported completed only when the data
+           has been written to physical storage.
+         * ``writeback``: write operation is reported completed when data is placed
+           in the page cache. Needs to be flushed to the physical storage.
+         * ``ro``: open file with readonly mode.
+         * ``sectorsize``: configured as either ``sectorsize=<sector size>/<physical sector size>``
+           or ``sectorsize=<sector size>``. The default values for sector size and physical sector size are 512.
+         * ``range``: configured as ``range=<start lba in file>/<sub file size>`` meaning the virtio-blk will
+           only access part of the file, from the ``<start lba in file>`` to ``<start lba in file>`` + ``<sub file site>``.
+
+   * - ``virtio-coreu``
+     - Used for Protected Audio Visual Path (PAVP) session management to provide
+       a User VM with Protected Audio Visual Path service.
+
+   * - ``virtio-input``
+     - Virtio type device to emulate input device. ``evdev`` char device node
+       should be appended, e.g., ``-s
+       n,virtio-input,/dev/input/eventX[,serial]``. ``serial`` is an optional
+       string used as the unique identification code of guest virtio input device.
+
+   * - ``virtio-ipu``
+     - Virtio image processing unit (IPU), it is used to connect
+       camera device to system, to convert the raw Bayer image into YUV domain.
+
+   * - ``virtio-console``
+     - Virtio console type device for data input and output.
+
+   * - ``virtio-hyper_dmabuf``
+     - Virtio device that allows sharing data buffers between VMs using a
+       dmabuf-like interface.
+
+   * - ``virtio-hdcp``
+     - Virtio High-bandwidth Digital Content Protection (HDCP) type device. HDCP
+       is technology intended to protect unauthorized duplication of high
+       definition (HD) video and audio as it travels across connections.
+
+   * - ``virtio-heci``
+     - Virtio Host Embedded Controller Interface, parameters should be appended
+       with the format ``<bus>:<device>:<function>,d<0~8>``. You can find the BDF
+       information from the Service VM.
+
+   * - ``virtio-i2c``
+     - Virtio i2c type device,parameters with format:
+       ``<bus>[:<client_addr>[@<node>]][,<bus>[:<client_addr>[@<node>]]``
+
+       * ``<bus>`` specifies the bus number for the native I2C adapter, e.g.,
+         ``2`` means ``/dev/i2c-2``.
+       * ``<client_addr>`` specifies the address for the native client devices
+         such as ``1C`` or  ``2F``.
+       * ``@`` specifies the prefix for the ACPI node.
+       * ``<node>`` specifies the ACPI node name supported in the
+         ``acpi_node_table[]`` in the source code: only ``cam1``, ``cam2``, and
+         ``hdac`` are supported for APL platform and  are platform-specific.
+
+   * - ``virtio-gpio``
+     - Virtio GPIO type device, parameters format is:
+       ``virtio-gpio,<@controller_name{offset|name[=mapping_name]:offset|name[=mapping_name]:...}@controller_name{...}...]>``
+
+       * ``controller_name``: use the command ``ls /sys/bus/gpio/devices`` to
+         check the native GPIO controller information.  Usually, the devices
+         represent the ``controller_name`` that you can use. You can also use
+         the command ``cat /sys/bus/gpio/device/XXX/dev`` to get the device id
+         that can be used to match ``/dev/XXX``, and then use ``XXX`` as the
+         ``controller_name``. On Intel platforms, ``controller_name`` may be 
+         ``gpiochip0``, ``gpiochip1``, ``gpiochip2``, and ``gpiochip3``.
+       * ``offset|name``: use GPIO offset or its name to locate one native GPIO
+         within the GPIO controller.
+       * ``mapping_name``: is optional. If you want to use a customized name for
+         a FE GPIO, you can set a new name here.
+
+   * - ``virtio-rnd``
+     - Virtio random generator type device, the VBSU virtio backend is used by default.
+
+   * - ``virtio-rpmb``
+     - Virtio Replay Protected Memory Block (RPMB) type device, with
+       ``physical_rpmb`` to specify RPMB in physical mode,
+       otherwise RPMB is in simulated mode.
+
+   * - ``virtio-audio``
+     - Virtio audio type device
+
+   * - ``virtio-net``
+     - Virtio network type device, parameter should be appended with the format:
+       ``virtio-net,<device_name>,[vhost],[mac=<XX:XX:XX:XX:XX:XX>]``.
+       The ``mac`` address is optional, ``device_name`` is the name of the TAP (or MacVTap) device.
+       It must include the keyword ``tap``.
+       ``vhost`` specifies vhost backend, otherwise the VBSU backend is used.
+
+   * - ``passthru``
+     - Indicates a passthrough device. Use the parameter with the format
+       ``passthru,<bus>/<device>/<function>,<optional parameter>``
+       Optional parameters include:
+
+       * ``keep_gsi``: keep vGSI for MSI capable passthrough device.
+       * ``no_reset``: passthrough PCI devices are reset by default when
+         assigning them to a post-launched VM. This parameter prevents this
+         reset for debugging purposes.
+       * ``d3hot_reset``: when launching a  Windows post-launched VM, this
+         parameter should be appended to enable a Windows UEFI ACPI bug fix.
+       * ``gpu``: create the dedicated ``igd-lpc`` on ``00:1f.0`` for IGD
+         passthrough.
+       * ``vmsix_on_msi,<bar_id>``: enables vMSI-X emulation based on MSI
+         capability.  The specific virtual bar will be allocated.
+       * ``enable_ptm``: enable PCIE precise time measurement mechanism for the
+         passthrough device.
+
+   * - ``uart``
+     - Emulated PCI UART. Use the parameter with the format
+       ``uart,vuart_idx:<0~9>`` to specify hypervisor-emulated PCI vUART index.
+
+   * - ``npk``
+     - Intel Trace Hub (known as North Peak or NPK) is a set of hardware blocks
+       that produce, switch, and output trace data from multiple hardware,
+       firmware, and software sources, used to perform full system debugging.
+       Parameter with the format ``npk,<master_offset>/<master number>``
+       specifies the master offset in the physical STMR of the host, and the
+       master number owned by the User VM.
+
+   * - ``wdt-i6300esb``
+     - Emulated i6300ESB PCI Watch Dog Timer (WDT) Intel processors use to
+       monitor User VMs.

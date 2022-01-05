@@ -99,11 +99,11 @@ static void add_one_pcpu(int pcpu_id)
  */
 int acrn_parse_cpu_affinity(char *opt)
 {
-	char *str, *cp;
+	char *str, *cp, *cp_opt;
 	int pcpu_id;
 	int pcpu_start, pcpu_end;
 
-	cp = strdup(opt);
+	cp_opt = cp = strdup(opt);
 	if (!cp) {
 		pr_err("%s: strdup returns NULL\n", __func__);
 		return -1;
@@ -126,7 +126,7 @@ int acrn_parse_cpu_affinity(char *opt)
 
 				/* parse the entry before ',' */
 				if (dm_strtoi(str, NULL, 10, &pcpu_id)) {
-					return -1;
+					goto err;
 				}
 				add_one_pcpu(pcpu_id);
 			}
@@ -136,11 +136,11 @@ int acrn_parse_cpu_affinity(char *opt)
 
 				/* parse the entry before and after '-' respectively */
 				if (dm_strtoi(str, NULL, 10, &pcpu_start) || dm_strtoi(cp, NULL, 10, &pcpu_end)) {
-					return -1;
+					goto err;
 				}
 
 				if (pcpu_end <= pcpu_start) {
-					return -1;
+					goto err;
 				}
 
 				for (; pcpu_start <= pcpu_end; pcpu_start++) {
@@ -153,7 +153,12 @@ int acrn_parse_cpu_affinity(char *opt)
 		}
 	}
 
+	free(cp_opt);
 	return 0;
+
+err:
+	free(cp_opt);
+	return -1;
 }
 
 uint64_t vm_get_cpu_affinity_dm(void)
@@ -167,7 +172,6 @@ vm_create(const char *name, uint64_t req_buf, int *vcpu_num)
 	struct vmctx *ctx;
 	struct acrn_vm_creation create_vm;
 	int error, retry = 10;
-	uuid_t vm_uuid;
 	struct stat tmp_st;
 
 	memset(&create_vm, 0, sizeof(struct acrn_vm_creation));
@@ -186,19 +190,6 @@ vm_create(const char *name, uint64_t req_buf, int *vcpu_num)
 		pr_err("Could not open /dev/acrn_vhm\n");
 		goto err;
 	}
-
-	if (guest_uuid_str == NULL)
-		guest_uuid_str = "d2795438-25d6-11e8-864e-cb7a18b34643";
-
-	error = uuid_parse(guest_uuid_str, vm_uuid);
-	if (error != 0)
-		goto err;
-
-	/* save vm uuid to ctx */
-	uuid_copy(ctx->vm_uuid, vm_uuid);
-
-	/* Pass uuid as parameter of create vm*/
-	uuid_copy(create_vm.uuid, vm_uuid);
 
 	ctx->gvt_enabled = false;
 	ctx->fd = devfd;
@@ -224,6 +215,7 @@ vm_create(const char *name, uint64_t req_buf, int *vcpu_num)
 
 	/* command line arguments specified CPU affinity could overwrite HV's static configuration */
 	create_vm.cpu_affinity = cpu_affinity_bitmap;
+	strncpy((char *)create_vm.name, name, strnlen(name, MAX_VM_NAME_LEN));
 
 	if (is_rtvm) {
 		create_vm.vm_flag |= GUEST_FLAG_RT;
@@ -407,13 +399,13 @@ vm_unsetup_memory(struct vmctx *ctx)
 	/*
 	 * For security reason, clean the VM's memory region
 	 * to avoid secret information leaking in below case:
-	 * After a UOS is destroyed, the memory will be reclaimed,
-	 * then if the new UOS starts, that memory region may be
-	 * allocated the new UOS, the previous UOS sensitive data
-	 * may be leaked to the new UOS if the memory is not cleared.
+	 * After a User VM is destroyed, the memory will be reclaimed,
+	 * then if the new User VM starts, that memory region may be
+	 * allocated the new User VM, the previous User VM sensitive data
+	 * may be leaked to the new User VM if the memory is not cleared.
 	 *
 	 * For rtvm, we can't clean VM's memory as RTVM may still
-	 * run. But we need to return the memory to SOS here.
+	 * run. But we need to return the memory to Service VM here.
 	 * Otherwise, VM can't be restart again.
 	 */
 
@@ -711,7 +703,7 @@ vm_get_config(struct vmctx *ctx, struct acrn_vm_config_header *vm_cfg, struct ac
 
 	for (i = 0; i < platform_info.sw.max_vms; i++) {
 		pcfg = (struct acrn_vm_config_header *)(configs_buff + (i * platform_info.sw.vm_config_size));
-		if (!uuid_compare(ctx->vm_uuid, pcfg->uuid))
+		if (!strncmp(ctx->name, pcfg->name, strnlen(ctx->name, MAX_VM_NAME_LEN)))
 			break;
 	}
 

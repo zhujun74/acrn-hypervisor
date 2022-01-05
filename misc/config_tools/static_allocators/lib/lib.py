@@ -12,8 +12,8 @@ import common, board_cfg_lib
 from collections import namedtuple
 
 PRE_LAUNCHED_VMS_TYPE = ["SAFETY_VM", "PRE_RT_VM", "PRE_STD_VM"]
-POST_LAUNCHED_VMS_TYPE = ["POST_STD_VM", "POST_RT_VM", "KATA_VM"]
-SOS_VM_TYPE = ["SOS_VM"]
+POST_LAUNCHED_VMS_TYPE = ["POST_STD_VM", "POST_RT_VM"]
+SERVICE_VM_TYPE = ["SERVICE_VM"]
 
 class BusDevFunc(namedtuple(
         "BusDevFunc", [
@@ -123,6 +123,6 @@ def is_post_launched_vm(vm_type):
     return False
 
 def is_sos_vm(vm_type):
-    if vm_type in SOS_VM_TYPE:
+    if vm_type in SERVICE_VM_TYPE:
         return True
     return False

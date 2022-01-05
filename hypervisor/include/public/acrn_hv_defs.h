@@ -16,7 +16,7 @@
 #define ACRN_HV_DEFS_H
 
 /*
- * Common structures for HV/VHM
+ * Common structures for HV/HSM
  */
 
 #define BASE_HC_ID(x, y) (((x)<<24U)|(y))
@@ -27,7 +27,7 @@
 /* general */
 #define HC_ID_GEN_BASE               0x0UL
 #define HC_GET_API_VERSION          BASE_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x00UL)
-#define HC_SOS_OFFLINE_CPU          BASE_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x01UL)
+#define HC_SERVICE_VM_OFFLINE_CPU   BASE_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x01UL)
 #define HC_SET_CALLBACK_VECTOR      BASE_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x02UL)
 #define HC_GET_PLATFORM_INFO        BASE_HC_ID(HC_ID, HC_ID_GEN_BASE + 0x03UL)
 
@@ -89,6 +89,11 @@
 #define HC_ID_PM_BASE               0x80UL
 #define HC_PM_GET_CPU_STATE         BASE_HC_ID(HC_ID, HC_ID_PM_BASE + 0x00UL)
 
+/* X86 TEE */
+#define HC_ID_TEE_BASE              0x90UL
+#define HC_TEE_VCPU_BOOT_DONE	    BASE_HC_ID(HC_ID, HC_ID_TEE_BASE + 0x00UL)
+#define HC_SWITCH_EE		    BASE_HC_ID(HC_ID, HC_ID_TEE_BASE + 0x01UL)
+
 #define ACRN_INVALID_VMID (0xffffU)
 #define ACRN_INVALID_HPA (~0UL)
 
@@ -131,8 +136,8 @@ struct vm_memory_region {
 	/** the beginning guest physical address of the memory reion*/
 	uint64_t gpa;
 
-	/** SOS_VM's guest physcial address which gpa will be mapped to */
-	uint64_t sos_vm_gpa;
+	/** Service VM's guest physcial address which gpa will be mapped to */
+	uint64_t service_vm_gpa;
 
 	/** size of the memory region */
 	uint64_t size;
@@ -282,7 +287,7 @@ struct hc_api_version {
 	uint32_t minor_version;
 } __aligned(8);
 
-#define ACRN_PLATFORM_LAPIC_IDS_MAX	64
+#define ACRN_PLATFORM_LAPIC_IDS_MAX	64U
 /**
  * Hypervisor API, return it for HC_GET_PLATFORM_INFO hypercall
  */
@@ -329,7 +334,7 @@ struct acrn_platform_info {
 
 		/**
 		 * Address to an array of struct acrn_vm_config, containing all
-		 * the configurations of all VMs. VHM treats it as an opague data
+		 * the configurations of all VMs. HSM treats it as an opaque data
 		 * structure.
 		 *
 		 * The size of one array element is vm_config_entry_size while
@@ -337,10 +342,8 @@ struct acrn_platform_info {
 		 */
 		uint64_t vm_configs_addr;
 
-		/** Maximum Kata container number in SOS VM */
-		uint64_t max_kata_containers;
 		/** Align the size of Configuration info to 128Bytes. */
-		uint8_t  reserved[104];
+		uint8_t  reserved[112];
 	} sw;
 } __aligned(8);
 

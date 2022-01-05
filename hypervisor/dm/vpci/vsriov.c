@@ -114,7 +114,7 @@ static void create_vf(struct pci_vdev *pf_vdev, union pci_bdf vf_bdf, uint16_t v
 		pr_err("PF %x:%x.%x can't creat VF, unset VF_ENABLE",
 			pf_vdev->bdf.bits.b, pf_vdev->bdf.bits.d, pf_vdev->bdf.bits.f);
 	} else {
-		uint16_t bar_idx;
+		uint32_t bar_idx;
 		struct pci_vbar *vf_vbar;
 
 		/* VF bars information from its PF SRIOV capability, no need to access physical device */
@@ -216,7 +216,7 @@ static void enable_vfs(struct pci_vdev *pf_vdev)
 	} else {
 		/*
 		 * If the VF physical device was not created successfully, the pdev/vdev
-		 * will also not be created so that SOS can aware of VF creation failure,
+		 * will also not be created so that Service VM can aware of VF creation failure,
 		 */
 		pr_err("PF %x:%x.%x can't create VFs after 100 ms",
 			pf_vdev->bdf.bits.b, pf_vdev->bdf.bits.d, pf_vdev->bdf.bits.f);
@@ -238,7 +238,7 @@ static void disable_vfs(struct pci_vdev *pf_vdev)
 	 * we simply set the VF instance status to "zombie" to avoid dynamically adding/removing
 	 * resources
 	 *
-	 * If the VF drivers are still running in SOS or UOS, the MMIO access will return 0xFF.
+	 * If the VF drivers are still running in Service VM or User VM, the MMIO access will return 0xFF.
 	 */
 	num_vfs = read_sriov_reg(pf_vdev, PCIR_SRIOV_NUMVFS);
 	first = read_sriov_reg(pf_vdev, PCIR_SRIOV_FST_VF_OFF);

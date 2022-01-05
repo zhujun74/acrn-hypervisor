@@ -12,12 +12,9 @@
 #include <board_info.h>
 #include <boot.h>
 #include <acrn_common.h>
-#include <vm_uuids.h>
 #include <vm_configurations.h>
 #include <asm/sgx.h>
 #include <acrn_hv_defs.h>
-
-#define CONFIG_MAX_VM_NUM	(PRE_VM_NUM + SOS_VM_NUM + MAX_POST_VM_NUM)
 
 #define AFFINITY_CPU(n)		(1UL << (n))
 #define MAX_VCPUS_PER_VM	MAX_PCPU_NUM
@@ -25,51 +22,51 @@
 #define MAX_VM_OS_NAME_LEN	32U
 #define MAX_MOD_TAG_LEN		32U
 
-#ifdef CONFIG_SCHED_NOOP
-#define SOS_IDLE		""
+#if defined(CONFIG_SCHED_NOOP)
+#define SERVICE_VM_IDLE		""
+#elif defined(CONFIG_SCHED_PRIO)
+#define SERVICE_VM_IDLE		""
 #else
-#define SOS_IDLE		"idle=halt "
+#define SERVICE_VM_IDLE		"idle=halt "
 #endif
 
-#define PCI_DEV_TYPE_PTDEV	(1U << 0U)
-#define PCI_DEV_TYPE_HVEMUL	(1U << 1U)
-#define PCI_DEV_TYPE_SOSEMUL	(1U << 2U)
+#define PCI_DEV_TYPE_PTDEV		(1U << 0U)
+#define PCI_DEV_TYPE_HVEMUL		(1U << 1U)
+#define PCI_DEV_TYPE_SERVICE_VM_EMUL	(1U << 2U)
 
 #define MAX_MMIO_DEV_NUM	2U
 
-#define CONFIG_SOS_VM		.load_order = SOS_VM,	\
-				.uuid = SOS_VM_UUID,	\
-				.severity = SEVERITY_SOS
+#define CONFIG_SERVICE_VM	.load_order = SERVICE_VM,	\
+				.severity = SEVERITY_SERVICE_VM
 
-#define CONFIG_SAFETY_VM(idx)	.load_order = PRE_LAUNCHED_VM,	\
-				.uuid = SAFETY_VM_UUID##idx,	\
+#define CONFIG_SAFETY_VM	.load_order = PRE_LAUNCHED_VM,	\
 				.severity = SEVERITY_SAFETY_VM
 
-#define CONFIG_PRE_STD_VM(idx)	.load_order = PRE_LAUNCHED_VM,	\
-				.uuid = PRE_STANDARD_VM_UUID##idx,	\
+#define CONFIG_PRE_STD_VM	.load_order = PRE_LAUNCHED_VM,	\
 				.severity = SEVERITY_STANDARD_VM
 
-#define CONFIG_PRE_RT_VM(idx)	.load_order = PRE_LAUNCHED_VM,	\
-				.uuid = PRE_RTVM_UUID##idx,	\
+#define CONFIG_PRE_RT_VM	.load_order = PRE_LAUNCHED_VM,	\
 				.severity = SEVERITY_RTVM
 
-#define CONFIG_POST_STD_VM(idx)	.load_order = POST_LAUNCHED_VM,	\
-				.uuid = POST_STANDARD_VM_UUID##idx,	\
+#define CONFIG_POST_STD_VM	.load_order = POST_LAUNCHED_VM,	\
 				.severity = SEVERITY_STANDARD_VM
 
-#define CONFIG_POST_RT_VM(idx)	.load_order = POST_LAUNCHED_VM,	\
-				.uuid = POST_RTVM_UUID##idx,	\
+#define CONFIG_POST_RT_VM	.load_order = POST_LAUNCHED_VM,	\
 				.severity = SEVERITY_RTVM
 
-#define CONFIG_KATA_VM(idx)	.load_order = POST_LAUNCHED_VM,	\
-				.uuid = KATA_VM_UUID##idx,	\
-				.severity = SEVERITY_STANDARD_VM
+/* Bitmask of guest flags that can be programmed by device model. Other bits are set by hypervisor only. */
+#if (SERVICE_VM_NUM == 0)
+#define DM_OWNED_GUEST_FLAG_MASK	0UL
+#else
+#define DM_OWNED_GUEST_FLAG_MASK	(GUEST_FLAG_SECURE_WORLD_ENABLED | GUEST_FLAG_LAPIC_PASSTHROUGH \
+					| GUEST_FLAG_RT | GUEST_FLAG_IO_COMPLETION_POLLING)
+#endif
 
 /* ACRN guest severity */
 enum acrn_vm_severity {
 	SEVERITY_SAFETY_VM = 0x40U,
 	SEVERITY_RTVM = 0x30U,
-	SEVERITY_SOS = 0x20U,
+	SEVERITY_SERVICE_VM = 0x20U,
 	SEVERITY_STANDARD_VM = 0x10U,
 };
 
@@ -154,8 +151,7 @@ struct pt_intx_config {
 
 struct acrn_vm_config {
 	enum acrn_vm_load_order load_order;		/* specify the load order of VM */
-	char name[MAX_VM_OS_NAME_LEN];			/* VM name identifier, useful for debug. */
-	const uint8_t uuid[16];				/* UUID of the VM */
+	char name[MAX_VM_NAME_LEN];				/* VM name identifier */
 	uint8_t reserved[2];				/* Temporarily reserve it so that don't need to update
 							 * the users of get_platform_info frequently.
 							 */
@@ -170,6 +166,7 @@ struct acrn_vm_config {
 							 * We could add more guest flags in future;
 							 */
 	uint32_t vm_prio;				/* The priority for VM vCPU scheduling */
+	uint16_t companion_vm_id;			/* The companion VM id for this VM */
 	struct acrn_vm_mem_config memory;		/* memory configuration of VM */
 	struct epc_section epc;				/* EPC memory configuration of VM */
 	uint16_t pci_dev_num;				/* indicate how many PCI devices in VM */
@@ -179,12 +176,27 @@ struct acrn_vm_config {
 
 	/*
 	 * below are variable length members (per build).
-	 * SOS can get the vm_configs[] array through hypercall, but SOS may not
+	 * Service VM can get the vm_configs[] array through hypercall, but Service VM may not
 	 * need to parse these members.
 	 */
-	uint16_t clos[MAX_VCPUS_PER_VM];		/* Class of Service, effective only if CONFIG_RDT_ENABLED
-							 * is defined on CAT capable platforms
-							 */
+
+	uint16_t num_pclosids; /* This defines the number of elements in the array pointed to by pclosids */
+	/* pclosids: a pointer to an array of physical CLOSIDs (pCLOSIDs)) that is defined in vm_configurations.c
+	 * by vmconfig,
+	 * applicable only if CONFIG_RDT_ENABLED is defined on CAT capable platforms.
+	 * The number of elements in the array must be equal to the value given by num_pclosids
+	 */
+	uint16_t *pclosids;
+
+	/* max_type_pcbm (type: l2 or l3) specifies the allocated portion of physical cache
+	 * for the VM and is a contiguous capacity bitmask (CBM) starting at bit position low
+	 * (the lowest assigned physical cache way) and ending at position high
+	 * (the highest assigned physical cache way, inclusive).
+	 * As CBM only allows contiguous '1' combinations, so max_type_pcbm essentially
+	 * is a bitmask that selects/covers all the physical cache ways assigned to the VM.
+	 */
+	uint32_t max_l2_pcbm;
+	uint32_t max_l3_pcbm;
 
 	struct vuart_config vuart[MAX_VUART_NUM_PER_VM];/* vuart configuration for VM */
 
@@ -199,7 +211,7 @@ struct acrn_vm_config {
 
 struct acrn_vm_config *get_vm_config(uint16_t vm_id);
 uint8_t get_vm_severity(uint16_t vm_id);
-bool vm_has_matched_uuid(uint16_t vmid, const uint8_t *uuid);
+bool vm_has_matched_name(uint16_t vmid, const char *name);
 
 extern struct acrn_vm_config vm_configs[CONFIG_MAX_VM_NUM];
 

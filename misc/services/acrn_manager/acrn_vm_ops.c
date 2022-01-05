@@ -115,7 +115,9 @@ static void _scan_alive_vm(void)
 
 	ret = check_dir(ACRN_DM_SOCK_PATH, CHK_ONLY);
 	if (ret) {
-		printf("%s: Failed to check directory %s, err: %d\n", __func__, ACRN_DM_SOCK_PATH, ret);
+		printf("%s: Failed to check directory %s, err: %d\n\
+			Make sure the acrnd daemon is running ('systemctl status acrnd').\n",
+			__func__, ACRN_DM_SOCK_PATH, ret);
 		return;
 	}
 
@@ -357,7 +359,7 @@ int list_vm()
 
 int start_vm(const char *vmname)
 {
-	char cmd[PATH_LEN + sizeof(ACRN_CONF_PATH_ADD) * 2 + MAX_VMNAME_LEN * 2];
+	char cmd[PATH_LEN + sizeof(ACRN_CONF_PATH_ADD) * 2 + MAX_VM_NAME_LEN * 2];
 
 	if (snprintf(cmd, sizeof(cmd), "bash %s/%s.sh $(cat %s/%s.args)",
 			ACRN_CONF_PATH_ADD, vmname, ACRN_CONF_PATH_ADD, vmname) >= sizeof(cmd)) {
@@ -382,24 +384,6 @@ int stop_vm(const char *vmname, int force)
 	if (ack.data.err) {
 		printf("Error happens when try to stop vm. errno(%d)\n",
 			ack.data.err);
-	}
-
-	return ack.data.err;
-}
-
-int suspend_vm(const char *vmname)
-{
-	struct mngr_msg req;
-	struct mngr_msg ack;
-
-	req.magic = MNGR_MSG_MAGIC;
-	req.msgid = DM_SUSPEND;
-	req.timestamp = time(NULL);
-
-	send_msg(vmname, &req, &ack);
-
-	if (ack.data.err) {
-		printf("Unable to suspend vm. errno(%d)\n", ack.data.err);
 	}
 
 	return ack.data.err;

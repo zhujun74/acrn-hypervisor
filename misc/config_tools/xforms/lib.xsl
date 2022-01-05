@@ -104,6 +104,28 @@
     </func:result>
   </func:function>
 
+    <func:function name="acrn:vm_fill">
+
+        <xsl:param name="cur"/>
+        <xsl:param name="end"/>
+
+        <func:result>
+            <xsl:text>,</xsl:text>
+            <xsl:value-of select="$newline"/>
+            <xsl:text>{</xsl:text>
+            <xsl:value-of select="acrn:comment(concat('Dynamic configured  VM', $cur))"/>
+            <xsl:value-of select="$newline"/>
+            <xsl:text>CONFIG_POST_STD_VM,</xsl:text>
+            <xsl:value-of select="$newline"/>
+            <xsl:text>}</xsl:text>
+            <xsl:value-of select="$newline"/>
+
+            <xsl:if test="not($cur + 1 = $end)">
+                <xsl:value-of select="acrn:vm_fill($cur + 1, $end)"/>
+            </xsl:if>
+        </func:result>
+    </func:function>
+
   <func:function name="acrn:min">
     <xsl:param name="a" />
     <xsl:param name="b" />
@@ -356,7 +378,7 @@
 
   <func:function name="acrn:is-rdt-enabled">
     <xsl:choose>
-      <xsl:when test="//RDT_ENABLED = 'y'">
+      <xsl:when test="acrn:is-rdt-supported() and //RDT_ENABLED = 'y'">
         <func:result select="true()" />
       </xsl:when>
       <xsl:otherwise>
@@ -368,6 +390,17 @@
   <func:function name="acrn:is-cdp-enabled">
     <xsl:choose>
       <xsl:when test="acrn:is-rdt-enabled() and //CDP_ENABLED = 'y'">
+        <func:result select="true()" />
+      </xsl:when>
+      <xsl:otherwise>
+        <func:result select="false()" />
+      </xsl:otherwise>
+    </xsl:choose>
+  </func:function>
+
+  <func:function name="acrn:is-vcat-enabled">
+    <xsl:choose>
+      <xsl:when test="acrn:is-rdt-enabled() and //VCAT_ENABLED = 'y'">
         <func:result select="true()" />
       </xsl:when>
       <xsl:otherwise>
@@ -389,34 +422,35 @@
     </xsl:choose>
   </func:function>
 
-  <func:function name="acrn:get-common-clos-max">
+  <func:function name="acrn:get-common-clos-count">
     <xsl:choose>
       <xsl:when test="not(acrn:is-rdt-enabled()) and not(acrn:is-cdp-enabled())">
         <func:result select="0" />
       </xsl:when>
       <xsl:otherwise>
         <xsl:variable name="rdt_resource_list" select="str:split(acrn:get-normalized-closinfo-rdt-res-str(), ',')" />
-        <xsl:variable name="rdt_res_clos_max_list" select="str:split(acrn:get-normalized-closinfo-rdt-clos-max-str(), ',')" />
+        <xsl:variable name="rdt_res_clos_count_list" select="str:split(acrn:get-normalized-closinfo-rdt-clos-max-str(), ',')" />
         <xsl:variable name="cdp_enabled" select="acrn:is-cdp-enabled()"/>
 
-        <xsl:variable name="clos_max_list_rtf">
+        <xsl:variable name="clos_count_list_rtf">
           <xsl:for-each select="$rdt_resource_list">
             <xsl:variable name="pos" select="position()" />
-            <xsl:variable name="res_clos_max" select="number($rdt_res_clos_max_list[$pos])" />
+            <xsl:variable name="res_clos_count" select="number($rdt_res_clos_count_list[$pos])" />
 
             <xsl:choose>
               <xsl:when test=". = 'MBA'">
-                <node><xsl:value-of select="$res_clos_max"/></node>
+                <node><xsl:value-of select="$res_clos_count"/></node>
               </xsl:when>
+              <!-- Some platforms have odd clos counts. Use "floor" to avoid this function returning a float number. -->
               <xsl:otherwise>
-                <node><xsl:value-of select="$res_clos_max div (1 + $cdp_enabled)"/></node>
+                <node><xsl:value-of select="floor($res_clos_count div (1 + $cdp_enabled))"/></node>
               </xsl:otherwise>
             </xsl:choose>
           </xsl:for-each>
         </xsl:variable>
 
-        <xsl:variable name="clos_max_list_it" select="exslt:node-set($clos_max_list_rtf)/node" />
-        <func:result select="math:min($clos_max_list_it)" />
+        <xsl:variable name="clos_count_list_it" select="exslt:node-set($clos_count_list_rtf)/node" />
+        <func:result select="math:min($clos_count_list_it)" />
       </xsl:otherwise>
     </xsl:choose>
   </func:function>
@@ -424,7 +458,7 @@
   <func:function name="acrn:is-sos-vm">
     <xsl:param name="vm_type" />
     <xsl:choose>
-      <xsl:when test="$vm_type = 'SOS_VM'">
+      <xsl:when test="$vm_type = 'SERVICE_VM'">
         <func:result select="true()" />
       </xsl:when>
       <xsl:otherwise>
@@ -458,21 +492,6 @@
         <func:result select="true()" />
       </xsl:when>
       <xsl:when test="$vm_type = 'POST_RT_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:when test="$vm_type = 'KATA_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:otherwise>
-        <func:result select="false()" />
-      </xsl:otherwise>
-    </xsl:choose>
-  </func:function>
-
-  <func:function name="acrn:is-kata-vm">
-    <xsl:param name="vm_type" />
-    <xsl:choose>
-      <xsl:when test="$vm_type = 'KATA_VM'">
         <func:result select="true()" />
       </xsl:when>
       <xsl:otherwise>

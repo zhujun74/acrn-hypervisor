@@ -42,32 +42,47 @@
 #ifdef CONFIG_SECURITY_VM_FIXUP
 #include <quirks/security_vm_fixup.h>
 #endif
+#include <asm/boot/ld_sym.h>
+#include <asm/guest/optee.h>
 
 /* Local variables */
 
 /* pre-assumption: TRUSTY_RAM_SIZE is 2M aligned */
-static struct page post_uos_sworld_memory[MAX_POST_VM_NUM][TRUSTY_RAM_SIZE >> PAGE_SHIFT] __aligned(MEM_2M);
+static struct page post_user_vm_sworld_memory[MAX_POST_VM_NUM][TRUSTY_RAM_SIZE >> PAGE_SHIFT] __aligned(MEM_2M);
 
 static struct acrn_vm vm_array[CONFIG_MAX_VM_NUM] __aligned(PAGE_SIZE);
 
-static struct acrn_vm *sos_vm_ptr = NULL;
+static struct acrn_vm *service_vm_ptr = NULL;
 
 void *get_sworld_memory_base(void)
 {
-	return post_uos_sworld_memory;
+	return post_user_vm_sworld_memory;
 }
 
-uint16_t get_vmid_by_uuid(const uint8_t *uuid)
+uint16_t get_unused_vmid(void)
 {
-	uint16_t vm_id = 0U;
+	uint16_t vm_id;
+	struct acrn_vm_config *vm_config;
 
-	while (!vm_has_matched_uuid(vm_id, uuid)) {
-		vm_id++;
-		if (vm_id == CONFIG_MAX_VM_NUM) {
+	for (vm_id = 0; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
+		vm_config = get_vm_config(vm_id);
+		if ((vm_config->name[0] == '\0') && ((vm_config->guest_flags & GUEST_FLAG_STATIC_VM) == 0U)) {
 			break;
 		}
 	}
-	return vm_id;
+	return (vm_id < CONFIG_MAX_VM_NUM) ? (vm_id) : (ACRN_INVALID_VMID);
+}
+
+uint16_t get_vmid_by_name(const char *name)
+{
+	uint16_t vm_id;
+
+	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
+		if ((*name != '\0') && vm_has_matched_name(vm_id, name)) {
+			break;
+		}
+	}
+	return (vm_id < CONFIG_MAX_VM_NUM) ? (vm_id) : (ACRN_INVALID_VMID);
 }
 
 /**
@@ -94,9 +109,9 @@ bool is_paused_vm(const struct acrn_vm *vm)
 	return (vm->state == VM_PAUSED);
 }
 
-bool is_sos_vm(const struct acrn_vm *vm)
+bool is_service_vm(const struct acrn_vm *vm)
 {
-	return (vm != NULL)  && (get_vm_config(vm->vm_id)->load_order == SOS_VM);
+	return (vm != NULL)  && (get_vm_config(vm->vm_id)->load_order == SERVICE_VM);
 }
 
 /**
@@ -143,12 +158,48 @@ bool is_rt_vm(const struct acrn_vm *vm)
 
 /**
  * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
+ *
+ * Stateful VM refers to VM that has its own state (such as internal file cache),
+ * and will experience state loss (file system corruption) if force powered down.
+ */
+bool is_stateful_vm(const struct acrn_vm *vm)
+{
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	/* TEE VM doesn't has its own state. The TAs will do the content
+	 * flush by themselves, HV and OS doesn't need to care about the state.
+	 */
+	return ((vm_config->guest_flags & GUEST_FLAG_TEE) == 0U);
+}
+
+/**
+ * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
  */
 bool is_nvmx_configured(const struct acrn_vm *vm)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
 	return ((vm_config->guest_flags & GUEST_FLAG_NVMX_ENABLED) != 0U);
+}
+
+/**
+ * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
+ */
+bool is_vcat_configured(const struct acrn_vm *vm)
+{
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	return ((vm_config->guest_flags & GUEST_FLAG_VCAT_ENABLED) != 0U);
+}
+
+/**
+ * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
+ */
+bool is_static_configured_vm(const struct acrn_vm *vm)
+{
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	return ((vm_config->guest_flags & GUEST_FLAG_STATIC_VM) != 0U);
 }
 
 /**
@@ -200,7 +251,7 @@ bool vm_hide_mtrr(const struct acrn_vm *vm)
  */
 static void setup_io_bitmap(struct acrn_vm *vm)
 {
-	if (is_sos_vm(vm)) {
+	if (is_service_vm(vm)) {
 		(void)memset(vm->arch_vm.io_bitmap, 0x00U, PAGE_SIZE * 2U);
 	} else {
 		/* block all IO port access from Guest */
@@ -219,12 +270,12 @@ struct acrn_vm *get_vm_from_vmid(uint16_t vm_id)
 	return &vm_array[vm_id];
 }
 
-/* return a pointer to the virtual machine structure of SOS VM */
-struct acrn_vm *get_sos_vm(void)
+/* return a pointer to the virtual machine structure of Service VM */
+struct acrn_vm *get_service_vm(void)
 {
-	ASSERT(sos_vm_ptr != NULL, "sos_vm_ptr is NULL");
+	ASSERT(service_vm_ptr != NULL, "service_vm_ptr is NULL");
 
-	return sos_vm_ptr;
+	return service_vm_ptr;
 }
 
 /**
@@ -309,14 +360,14 @@ static void prepare_prelaunched_vm_memmap(struct acrn_vm *vm, const struct acrn_
 	}
 }
 
-static void deny_pci_bar_access(struct acrn_vm *sos, const struct pci_pdev *pdev)
+static void deny_pci_bar_access(struct acrn_vm *service_vm, const struct pci_pdev *pdev)
 {
-	uint32_t idx, mask;
+	uint32_t idx;
 	struct pci_vbar vbar = {};
-	uint64_t base = 0UL, size = 0UL;
+	uint64_t base = 0UL, size = 0UL, mask;
 	uint64_t *pml4_page;
 
-	pml4_page = (uint64_t *)sos->arch_vm.nworld_eptp;
+	pml4_page = (uint64_t *)service_vm->arch_vm.nworld_eptp;
 
 	for ( idx= 0; idx < pdev->nr_bars; idx++) {
 		vbar.bar_type.bits = pdev->bars[idx].phy_bar;
@@ -337,31 +388,31 @@ static void deny_pci_bar_access(struct acrn_vm *sos, const struct pci_pdev *pdev
 			if ((base != 0UL)) {
 				if (is_pci_io_bar(&vbar)) {
 					base &= 0xffffU;
-					deny_guest_pio_access(sos, base, size);
+					deny_guest_pio_access(service_vm, base, size);
 				} else {
 					/*for passthru device MMIO BAR base must be 4K aligned. This is the requirement of passthru devices.*/
 					ASSERT((base & PAGE_MASK) != 0U, "%02x:%02x.%d bar[%d] 0x%lx, is not 4K aligned!",
 						pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f, idx, base);
 					size =  round_page_up(size);
-					ept_del_mr(sos, pml4_page, base, size);
+					ept_del_mr(service_vm, pml4_page, base, size);
 				}
 			}
 		}
 	}
 }
 
-static void deny_pdevs(struct acrn_vm *sos, struct acrn_vm_pci_dev_config *pci_devs, uint16_t pci_dev_num)
+static void deny_pdevs(struct acrn_vm *service_vm, struct acrn_vm_pci_dev_config *pci_devs, uint16_t pci_dev_num)
 {
 	uint16_t i;
 
 	for (i = 0; i < pci_dev_num; i++) {
 		if ( pci_devs[i].pdev != NULL) {
-			deny_pci_bar_access(sos, pci_devs[i].pdev);
+			deny_pci_bar_access(service_vm, pci_devs[i].pdev);
 		}
 	}
 }
 
-static void deny_hv_owned_devices(struct acrn_vm *sos)
+static void deny_hv_owned_devices(struct acrn_vm *service_vm)
 {
 	uint16_t pio_address;
 	uint32_t nbytes, i;
@@ -369,11 +420,11 @@ static void deny_hv_owned_devices(struct acrn_vm *sos)
 	const struct pci_pdev **hv_owned = get_hv_owned_pdevs();
 
 	for (i = 0U; i < get_hv_owned_pdev_num(); i++) {
-		deny_pci_bar_access(sos, hv_owned[i]);
+		deny_pci_bar_access(service_vm, hv_owned[i]);
 	}
 
 	if (get_pio_dbg_uart_cfg(&pio_address, &nbytes)) {
-		deny_guest_pio_access(sos, pio_address, nbytes);
+		deny_guest_pio_access(service_vm, pio_address, nbytes);
 	}
 }
 
@@ -383,14 +434,14 @@ static void deny_hv_owned_devices(struct acrn_vm *sos)
  * @retval 0 on success
  *
  * @pre vm != NULL
- * @pre is_sos_vm(vm) == true
+ * @pre is_service_vm(vm) == true
  */
-static void prepare_sos_vm_memmap(struct acrn_vm *vm)
+static void prepare_service_vm_memmap(struct acrn_vm *vm)
 {
 	uint16_t vm_id;
 	uint32_t i;
 	uint64_t hv_hpa;
-	uint64_t sos_high64_max_ram = MEM_4G;
+	uint64_t service_vm_high64_max_ram = MEM_4G;
 	struct acrn_vm_config *vm_config;
 	uint64_t *pml4_page = (uint64_t *)vm->arch_vm.nworld_eptp;
 	struct epc_section* epc_secs;
@@ -399,19 +450,20 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 	uint32_t entries_count = vm->e820_entry_num;
 	const struct e820_entry *p_e820 = vm->e820_entries;
 	struct pci_mmcfg_region *pci_mmcfg;
+	uint64_t trampoline_memory_size = round_page_up((uint64_t)(&ld_trampoline_end - &ld_trampoline_start));
 
-	pr_dbg("SOS_VM e820 layout:\n");
+	pr_dbg("Service VM e820 layout:\n");
 	for (i = 0U; i < entries_count; i++) {
 		entry = p_e820 + i;
 		pr_dbg("e820 table: %d type: 0x%x", i, entry->type);
 		pr_dbg("BaseAddress: 0x%016lx length: 0x%016lx\n", entry->baseaddr, entry->length);
 		if (entry->type == E820_TYPE_RAM) {
-			sos_high64_max_ram = max((entry->baseaddr + entry->length), sos_high64_max_ram);
+			service_vm_high64_max_ram = max((entry->baseaddr + entry->length), service_vm_high64_max_ram);
 		}
 	}
 
-	/* create real ept map for [0, sos_high64_max_ram) with UC */
-	ept_add_mr(vm, pml4_page, 0UL, 0UL, sos_high64_max_ram, EPT_RWX | EPT_UNCACHED);
+	/* create real ept map for [0, service_vm_high64_max_ram) with UC */
+	ept_add_mr(vm, pml4_page, 0UL, 0UL, service_vm_high64_max_ram, EPT_RWX | EPT_UNCACHED);
 
 	/* update ram entries to WB attr */
 	for (i = 0U; i < entries_count; i++) {
@@ -421,9 +473,9 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 		}
 	}
 
-	/* Unmap all platform EPC resource from SOS.
+	/* Unmap all platform EPC resource from Service VM.
 	 * This part has already been marked as reserved by BIOS in E820
-	 * will cause EPT violation if sos accesses EPC resource.
+	 * will cause EPT violation if Service VM accesses EPC resource.
 	 */
 	epc_secs = get_phys_epc();
 	for (i = 0U; (i < MAX_EPC_SECTIONS) && (epc_secs[i].size != 0UL); i++) {
@@ -431,10 +483,10 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 	}
 
 	/* unmap hypervisor itself for safety
-	 * will cause EPT violation if sos accesses hv memory
+	 * will cause EPT violation if Service VM accesses hv memory
 	 */
 	hv_hpa = hva2hpa((void *)(get_hv_image_base()));
-	ept_del_mr(vm, pml4_page, hv_hpa, CONFIG_HV_RAM_SIZE);
+	ept_del_mr(vm, pml4_page, hv_hpa, get_hv_ram_size());
 	/* unmap prelaunch VM memory */
 	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 		vm_config = get_vm_config(vm_id);
@@ -452,7 +504,7 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 	/* unmap AP trampoline code for security
 	 * This buffer is guaranteed to be page aligned.
 	 */
-	ept_del_mr(vm, pml4_page, get_trampoline_start16_paddr(), CONFIG_LOW_RAM_SIZE);
+	ept_del_mr(vm, pml4_page, get_trampoline_start16_paddr(), trampoline_memory_size);
 
 	/* unmap PCIe MMCONFIG region since it's owned by hypervisor */
 	pci_mmcfg = get_mmcfg_region();
@@ -465,6 +517,15 @@ static void prepare_sos_vm_memmap(struct acrn_vm *vm)
 	 */
 	ept_del_mr(vm, pml4_page, PRE_RTVM_SW_SRAM_BASE_GPA, PRE_RTVM_SW_SRAM_END_GPA - PRE_RTVM_SW_SRAM_BASE_GPA);
 #endif
+
+	/* unmap Intel IOMMU register pages for below reason:
+	 * Service VM can detect IOMMU capability in its ACPI table hence it may access
+	 * IOMMU hardware resources, which is not expected, as IOMMU hardware is owned by hypervisor.
+	 */
+	for (i = 0U; i < plat_dmar_info.drhd_count; i++) {
+		ept_del_mr(vm, pml4_page, plat_dmar_info.drhd_units[i].reg_base_addr, PAGE_SIZE);
+	}
+
 }
 
 /* Add EPT mapping of EPC reource for the VM */
@@ -507,6 +568,24 @@ static uint64_t lapic_pt_enabled_pcpu_bitmap(struct acrn_vm *vm)
 	return bitmap;
 }
 
+void prepare_vm_identical_memmap(struct acrn_vm *vm, uint16_t e820_entry_type, uint64_t prot_orig)
+{
+	const struct e820_entry *entry;
+	const struct e820_entry *p_e820 = vm->e820_entries;
+	uint32_t entries_count = vm->e820_entry_num;
+	uint64_t *pml4_page = (uint64_t *)vm->arch_vm.nworld_eptp;
+	uint32_t i;
+
+	for (i = 0U; i < entries_count; i++) {
+		entry = p_e820 + i;
+		if (entry->type == e820_entry_type) {
+			ept_add_mr(vm, pml4_page, entry->baseaddr,
+				entry->baseaddr, entry->length,
+				prot_orig);
+		}
+	}
+}
+
 /**
  * @pre vm_id < CONFIG_MAX_VM_NUM && vm_config != NULL && rtn_vm != NULL
  * @pre vm->state == VM_POWERED_OFF
@@ -525,13 +604,12 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 	init_ept_pgtable(&vm->arch_vm.ept_pgtable, vm->vm_id);
 	vm->arch_vm.nworld_eptp = pgtable_create_root(&vm->arch_vm.ept_pgtable);
 
-	(void)memcpy_s(&vm->uuid[0], sizeof(vm->uuid),
-		&vm_config->uuid[0], sizeof(vm_config->uuid));
+	(void)memcpy_s(&vm->name[0], MAX_VM_NAME_LEN, &vm_config->name[0], MAX_VM_NAME_LEN);
 
-	if (is_sos_vm(vm)) {
-		/* Only for SOS_VM */
-		create_sos_vm_e820(vm);
-		prepare_sos_vm_memmap(vm);
+	if (is_service_vm(vm)) {
+		/* Only for Service VM */
+		create_service_vm_e820(vm);
+		prepare_service_vm_memmap(vm);
 
 		status = init_vm_boot_info(vm);
 	} else {
@@ -540,11 +618,11 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 			vm->sworld_control.flag.supported = 1U;
 		}
 		if (vm->sworld_control.flag.supported != 0UL) {
-			uint16_t sos_vm_id = (get_sos_vm())->vm_id;
-			uint16_t page_idx = vmid_2_rel_vmid(sos_vm_id, vm_id) - 1U;
+			uint16_t service_vm_id = (get_service_vm())->vm_id;
+			uint16_t page_idx = vmid_2_rel_vmid(service_vm_id, vm_id) - 1U;
 
 			ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp,
-				hva2hpa(post_uos_sworld_memory[page_idx]),
+				hva2hpa(post_user_vm_sworld_memory[page_idx]),
 				TRUSTY_EPT_REBASE_GPA, TRUSTY_RAM_SIZE, EPT_WB | EPT_RWX);
 		}
 		if (vm_config->name[0] == '\0') {
@@ -553,8 +631,18 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 		}
 
 		if (vm_config->load_order == PRE_LAUNCHED_VM) {
-			create_prelaunched_vm_e820(vm);
-			prepare_prelaunched_vm_memmap(vm, vm_config);
+			/*
+			 * If a prelaunched VM has the flag GUEST_FLAG_TEE set then it
+			 * is a special prelaunched VM called TEE VM which need special
+			 * memmap, e.g. mapping the REE VM into its space. Otherwise,
+			 * just use the standard preplaunched VM memmap.
+			 */
+			if ((vm_config->guest_flags & GUEST_FLAG_TEE) != 0U) {
+				prepare_tee_vm_memmap(vm, vm_config);
+			} else {
+				create_prelaunched_vm_e820(vm);
+				prepare_prelaunched_vm_memmap(vm, vm_config);
+			}
 			status = init_vm_boot_info(vm);
 		}
 	}
@@ -591,7 +679,7 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 			vrtc_init(vm);
 		}
 
-		if (is_sos_vm(vm)) {
+		if (is_service_vm(vm)) {
 			deny_hv_owned_devices(vm);
 		}
 
@@ -635,7 +723,7 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 
 	if (status == 0) {
 		/* We have assumptions:
-		 *   1) vcpus used by SOS has been offlined by DM before UOS re-use it.
+		 *   1) vcpus used by Service VM has been offlined by DM before User VM re-use it.
 		 *   2) pcpu_bitmap passed sanitization is OK for vcpu creating.
 		 */
 		vm->hw.cpu_affinity = pcpu_bitmap;
@@ -652,8 +740,8 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 	}
 
 	if (status == 0) {
-		uint32_t i;
-		for (i = 0; i < vm_config->pt_intx_num; i++) {
+		uint16_t i;
+		for (i = 0U; i < vm_config->pt_intx_num; i++) {
 			status = ptirq_add_intx_remapping(vm, vm_config->pt_intx[i].virt_gsi,
 								vm_config->pt_intx[i].phys_gsi, false);
 			if (status != 0) {
@@ -679,7 +767,7 @@ static bool is_ready_for_system_shutdown(void)
 	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 		vm = get_vm_from_vmid(vm_id);
 		/* TODO: Update code to cover hybrid mode */
-		if (!is_poweroff_vm(vm)) {
+		if (!is_poweroff_vm(vm) && is_stateful_vm(vm)) {
 			ret = false;
 			break;
 		}
@@ -744,7 +832,7 @@ int32_t shutdown_vm(struct acrn_vm *vm)
 	/* Only allow shutdown paused vm */
 	vm->state = VM_POWERED_OFF;
 
-	if (is_sos_vm(vm)) {
+	if (is_service_vm(vm)) {
 		sbuf_reset();
 	}
 
@@ -771,6 +859,9 @@ int32_t shutdown_vm(struct acrn_vm *vm)
 	/* after guest_flags not used, then clear it */
 	vm_config = get_vm_config(vm->vm_id);
 	vm_config->guest_flags &= ~DM_OWNED_GUEST_FLAG_MASK;
+	if (!is_static_configured_vm(vm)) {
+		memset(vm_config->name, 0U, MAX_VM_NAME_LEN);
+	}
 
 	if (is_ready_for_system_shutdown()) {
 		/* If no any guest running, shutdown system */
@@ -822,7 +913,7 @@ int32_t reset_vm(struct acrn_vm *vm)
 	 */
 	vm->arch_vm.vlapic_mode = VM_VLAPIC_XAPIC;
 
-	if (is_sos_vm(vm)) {
+	if (is_service_vm(vm)) {
 		(void)prepare_os_image(vm);
 	}
 
@@ -878,7 +969,7 @@ void pause_vm(struct acrn_vm *vm)
  * @wakeup_vec[in]	The resume address of vm
  *
  * @pre vm != NULL
- * @pre is_sos_vm(vm) && vm->state == VM_PAUSED
+ * @pre is_service_vm(vm) && vm->state == VM_PAUSED
  */
 void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 {
@@ -888,7 +979,7 @@ void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 
 	reset_vcpu(bsp, POWER_ON_RESET);
 
-	/* When SOS resume from S3, it will return to real mode
+	/* When Service VM resume from S3, it will return to real mode
 	 * with entry set to wakeup_vec.
 	 */
 	set_vcpu_startup_entry(bsp, wakeup_vec);
@@ -903,7 +994,7 @@ static uint8_t loaded_pre_vm_nr = 0U;
  *
  * @pre vm_id < CONFIG_MAX_VM_NUM && vm_config != NULL
  */
-void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
+int32_t prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 {
 	int32_t err = 0;
 	struct acrn_vm *vm = NULL;
@@ -911,18 +1002,23 @@ void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 #ifdef CONFIG_SECURITY_VM_FIXUP
 	security_vm_fixup(vm_id);
 #endif
-	/* SOS and pre-launched VMs launch on all pCPUs defined in vm_config->cpu_affinity */
-	err = create_vm(vm_id, vm_config->cpu_affinity, vm_config, &vm);
+	if (get_vmid_by_name(vm_config->name) != vm_id) {
+		pr_err("Invalid VM name: %s", vm_config->name);
+		err = -1;
+	} else {
+		/* Service VM and pre-launched VMs launch on all pCPUs defined in vm_config->cpu_affinity */
+		err = create_vm(vm_id, vm_config->cpu_affinity, vm_config, &vm);
+	}
 
 	if (err == 0) {
 		if (is_prelaunched_vm(vm)) {
 			build_vrsdp(vm);
 		}
 
-		if (is_sos_vm(vm)) {
+		if (is_service_vm(vm)) {
 			/* We need to ensure all modules of pre-launched VMs have been loaded already
-			 * before loading SOS VM modules, otherwise the module of pre-launched VMs could
-			 * be corrupted because SOS VM kernel might pick any usable RAM to extract kernel
+			 * before loading Service VM modules, otherwise the module of pre-launched VMs could
+			 * be corrupted because Service VM kernel might pick any usable RAM to extract kernel
 			 * when KASLR enabled.
 			 * In case the pre-launched VMs aren't loaded successfuly that cause deadlock here,
 			 * use a 10000ms timer to break the waiting loop.
@@ -944,17 +1040,9 @@ void prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 		if (is_prelaunched_vm(vm)) {
 			loaded_pre_vm_nr++;
 		}
-
-		if (err == 0) {
-
-			/* start vm BSP automatically */
-			start_vm(vm);
-
-			pr_acrnlog("Start VM id: %x name: %s", vm_id, vm_config->name);
-		} else {
-			pr_err("Failed to load VM id: %x name: %s, error = %d", vm_id, vm_config->name, err);
-		}
 	}
+
+	return err;
 }
 
 /**
@@ -968,12 +1056,35 @@ void launch_vms(uint16_t pcpu_id)
 
 	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 		vm_config = get_vm_config(vm_id);
-		if ((vm_config->load_order == SOS_VM) || (vm_config->load_order == PRE_LAUNCHED_VM)) {
+
+		if (((vm_config->guest_flags & GUEST_FLAG_REE) != 0U) &&
+		    ((vm_config->guest_flags & GUEST_FLAG_TEE) != 0U)) {
+			ASSERT(false, "%s: Wrong VM (VM id: %u) configuration, can't set both REE and TEE flags",
+				__func__, vm_id);
+		}
+
+		if ((vm_config->load_order == SERVICE_VM) || (vm_config->load_order == PRE_LAUNCHED_VM)) {
 			if (pcpu_id == get_configured_bsp_pcpu_id(vm_config)) {
-				if (vm_config->load_order == SOS_VM) {
-					sos_vm_ptr = &vm_array[vm_id];
+				if (vm_config->load_order == SERVICE_VM) {
+					service_vm_ptr = &vm_array[vm_id];
 				}
-				prepare_vm(vm_id, vm_config);
+
+				/*
+				 * We can only start a VM when there is no error in prepare_vm.
+				 * Otherwise, print out the corresponding error.
+				 *
+				 * We can only start REE VM when get the notification from TEE VM.
+				 * so skip "start_vm" here for REE, and start it in TEE hypercall
+				 * HC_TEE_VCPU_BOOT_DONE.
+				 */
+				if (prepare_vm(vm_id, vm_config) == 0) {
+					if ((vm_config->guest_flags & GUEST_FLAG_REE) != 0U) {
+						/* Nothing need to do here, REE will start in TEE hypercall */
+					} else {
+						start_vm(get_vm_from_vmid(vm_id));
+						pr_acrnlog("Start VM id: %x name: %s", vm_id, vm_config->name);
+					}
+				}
 			}
 		}
 	}

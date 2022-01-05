@@ -279,13 +279,13 @@ int32_t vmexit_handler(struct acrn_vcpu *vcpu)
 			if (basic_exit_reason == VMX_EXIT_REASON_EXTERNAL_INTERRUPT) {
 				/* Handling external_interrupt should disable intr */
 				if (!is_lapic_pt_enabled(vcpu)) {
-					CPU_IRQ_DISABLE();
+					CPU_IRQ_DISABLE_ON_CONFIG();
 				}
 
 				ret = dispatch->handler(vcpu);
 
 				if (!is_lapic_pt_enabled(vcpu)) {
-					CPU_IRQ_ENABLE();
+					CPU_IRQ_ENABLE_ON_CONFIG();
 				}
 			} else {
 				ret = dispatch->handler(vcpu);
@@ -396,7 +396,7 @@ static int32_t xsetbv_vmexit_handler(struct acrn_vcpu *vcpu)
 	uint32_t cpl;
 	uint64_t val64;
 
-	if (vcpu->arch.xsave_enabled && ((vcpu_get_cr4(vcpu) && CR4_OSXSAVE) != 0UL)) {
+	if (vcpu->arch.xsave_enabled && ((vcpu_get_cr4(vcpu) & CR4_OSXSAVE) != 0UL)) {
 		idx = vcpu->arch.cur_context;
 		/* get current privilege level */
 		cpl = exec_vmread32(VMX_GUEST_CS_ATTR);

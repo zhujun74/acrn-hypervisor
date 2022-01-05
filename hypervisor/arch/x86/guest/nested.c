@@ -476,7 +476,7 @@ static uint16_t vmcs_field_to_vmcs12_offset(uint32_t vmcs_field)
  * Given a vmcs field and the pointer to the vmcs12, this API returns the
  * corresponding value from the VMCS
  */
-static uint64_t vmcs12_read_field(uint64_t vmcs_hva, uint32_t field)
+static uint64_t vmcs12_read_field(void *vmcs_hva, uint32_t field)
 {
 	uint64_t *ptr = (uint64_t *)(vmcs_hva + vmcs_field_to_vmcs12_offset(field));
 	uint64_t val64 = 0UL;
@@ -507,7 +507,7 @@ static uint64_t vmcs12_read_field(uint64_t vmcs_hva, uint32_t field)
 /*
  * Write the given VMCS field to the given vmcs12 data structure.
  */
-static void vmcs12_write_field(uint64_t vmcs_hva, uint32_t field, uint64_t val64)
+static void vmcs12_write_field(void *vmcs_hva, uint32_t field, uint64_t val64)
 {
 	uint64_t *ptr = (uint64_t *)(vmcs_hva + vmcs_field_to_vmcs12_offset(field));
 
@@ -899,7 +899,7 @@ int32_t vmread_vmexit_handler(struct acrn_vcpu *vcpu)
 		} else {
 			/* TODO: VMfailValid for invalid VMCS fields */
 			vmcs_field = (uint32_t)vcpu_get_gpreg(vcpu, VMX_II_REG2(info));
-			vmcs_value = vmcs12_read_field((uint64_t)&cur_vvmcs->vmcs12, vmcs_field);
+			vmcs_value = vmcs12_read_field(&cur_vvmcs->vmcs12, vmcs_field);
 
 			/* Currently ACRN doesn't support 32bits L1 hypervisor, assuming operands are 64 bits */
 			if (VMX_II_IS_REG(info)) {
@@ -967,7 +967,7 @@ int32_t vmwrite_vmexit_handler(struct acrn_vcpu *vcpu)
 				}
 
 				pr_dbg("vmcs_field: %x vmcs_value: %llx", vmcs_field, vmcs_value);
-				vmcs12_write_field((uint64_t)&cur_vvmcs->vmcs12, vmcs_field, vmcs_value);
+				vmcs12_write_field(&cur_vvmcs->vmcs12, vmcs_field, vmcs_value);
 				nested_vmx_result(VMsucceed, 0);
 			}
 		}
@@ -989,7 +989,7 @@ static void sync_vmcs02_to_vmcs12(struct acrn_vmcs12 *vmcs12)
 
 	for (idx = 0; idx < MAX_SHADOW_VMCS_FIELDS; idx++) {
 		val64 = exec_vmread(vmcs_shadowing_fields[idx]);
-		vmcs12_write_field((uint64_t)vmcs12, vmcs_shadowing_fields[idx], val64);
+		vmcs12_write_field(vmcs12, vmcs_shadowing_fields[idx], val64);
 	}
 }
 
@@ -1038,7 +1038,7 @@ static void sync_vmcs12_to_vmcs02(struct acrn_vcpu *vcpu, struct acrn_vmcs12 *vm
 	uint32_t idx;
 
 	for (idx = 0; idx < MAX_SHADOW_VMCS_FIELDS; idx++) {
-		val64 = vmcs12_read_field((uint64_t)vmcs12, vmcs_shadowing_fields[idx]);
+		val64 = vmcs12_read_field(vmcs12, vmcs_shadowing_fields[idx]);
 		exec_vmwrite(vmcs_shadowing_fields[idx], val64);
 	}
 
@@ -1338,8 +1338,8 @@ static void set_vmcs01_guest_state(struct acrn_vcpu *vcpu)
 		 */
 		exec_vmwrite(VMX_GUEST_CR0, vmcs12->host_cr0);
 		exec_vmwrite(VMX_GUEST_CR4, vmcs12->host_cr4);
-		bitmap_clear_lock(CPU_REG_CR0, &vcpu->reg_cached);
-		bitmap_clear_lock(CPU_REG_CR4, &vcpu->reg_cached);
+		bitmap_clear_nolock(CPU_REG_CR0, &vcpu->reg_cached);
+		bitmap_clear_nolock(CPU_REG_CR4, &vcpu->reg_cached);
 
 		exec_vmwrite(VMX_GUEST_CR3, vmcs12->host_cr3);
 		exec_vmwrite(VMX_GUEST_DR7, DR7_INIT_VALUE);
@@ -1450,6 +1450,16 @@ int32_t nested_vmexit_handler(struct acrn_vcpu *vcpu)
 		vcpu->arch.nested.in_l2_guest = false;
 	}
 
+	/*
+	 * For VM-exits that reflect to L1 hypervisor, ACRN can't advance to next guest RIP
+	 * which is up to the L1 hypervisor to make the decision.
+	 *
+	 * The only case that doesn't need to be reflected is EPT violations that can be
+	 * completely handled by ACRN, which requires L2 VM to re-execute the instruction
+	 * after the shadow EPT is being properly setup.
+
+	 * In either case, need to set vcpu->arch.inst_len to zero.
+	 */
 	vcpu_retain_rip(vcpu);
 	return 0;
 }

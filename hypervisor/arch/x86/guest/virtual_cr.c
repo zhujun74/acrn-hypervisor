@@ -74,7 +74,7 @@ static uint64_t	cr4_trap_and_passthru_mask = CR4_TRAP_AND_PASSTHRU_BITS; /* boun
 #define CR4_EMRSV_BITS_PHYS_VALUE	CR4_VMXE
 
 /* The CR4 value guest expected to see for bits of CR4_EMULATED_RESERVE_BITS */
-#define CR4_EMRSV_BITS_VIRT_VALUE	0
+#define CR4_EMRSV_BITS_VIRT_VALUE	0UL
 static uint64_t cr4_rsv_bits_guest_value;
 
 /*
@@ -318,7 +318,7 @@ static void vmx_write_cr0(struct acrn_vcpu *vcpu, uint64_t value)
 			exec_vmwrite(VMX_CR0_READ_SHADOW, effective_cr0);
 
 			/* clear read cache, next time read should from VMCS */
-			bitmap_clear_lock(CPU_REG_CR0, &vcpu->reg_cached);
+			bitmap_clear_nolock(CPU_REG_CR0, &vcpu->reg_cached);
 
 			pr_dbg("VMM: Try to write %016lx, allow to write 0x%016lx to CR0", effective_cr0, tmp);
 		}
@@ -420,7 +420,7 @@ static void vmx_write_cr4(struct acrn_vcpu *vcpu, uint64_t cr4)
 			exec_vmwrite(VMX_CR4_READ_SHADOW, cr4);
 
 			/* clear read cache, next time read should from VMCS */
-			bitmap_clear_lock(CPU_REG_CR4, &vcpu->reg_cached);
+			bitmap_clear_nolock(CPU_REG_CR4, &vcpu->reg_cached);
 
 			pr_dbg("VMM: Try to write %016lx, allow to write 0x%016lx to CR4", cr4, tmp);
 		}
@@ -521,7 +521,7 @@ uint64_t vcpu_get_cr0(struct acrn_vcpu *vcpu)
 {
 	struct run_context *ctx = &vcpu->arch.contexts[vcpu->arch.cur_context].run_ctx;
 
-	if (bitmap_test_and_set_lock(CPU_REG_CR0, &vcpu->reg_cached) == 0) {
+	if (bitmap_test_and_set_nolock(CPU_REG_CR0, &vcpu->reg_cached) == 0) {
 		ctx->cr0 = (exec_vmread(VMX_CR0_READ_SHADOW) & ~cr0_passthru_mask) |
 			(exec_vmread(VMX_GUEST_CR0) & cr0_passthru_mask);
 	}
@@ -549,7 +549,7 @@ uint64_t vcpu_get_cr4(struct acrn_vcpu *vcpu)
 {
 	struct run_context *ctx = &vcpu->arch.contexts[vcpu->arch.cur_context].run_ctx;
 
-	if (bitmap_test_and_set_lock(CPU_REG_CR4, &vcpu->reg_cached) == 0) {
+	if (bitmap_test_and_set_nolock(CPU_REG_CR4, &vcpu->reg_cached) == 0) {
 		ctx->cr4 = (exec_vmread(VMX_CR4_READ_SHADOW) & ~cr4_passthru_mask) |
 			(exec_vmread(VMX_GUEST_CR4) & cr4_passthru_mask);
 	}

@@ -29,7 +29,7 @@ struct vmmngr_struct *vmmngr_find(const char *vmname);
 
 /* Per-vm vm managerment struct */
 struct vmmngr_struct {
-	char name[MAX_VMNAME_LEN];
+	char name[MAX_VM_NAME_LEN];
 	unsigned long state;
 	unsigned long state_tmp;
 	unsigned long update;   /* update count, remove a vm if no update for it */
@@ -38,7 +38,7 @@ struct vmmngr_struct {
 
 int shell_cmd(const char *cmd, char *outbuf, int len);
 
-/* update names and states of VMs in SOS
+/* update names and states of VMs in Service VM
  * before you stop, start, pause, resume, suspend continue a VM
  * use a name, it is better to run vmmngr_update() first
  * and use vmngr_find() to check is this VM is still available
@@ -56,7 +56,6 @@ int stop_vm(const char *vmname, int force);
 int start_vm(const char *vmname);
 int pause_vm(const char *vmname);
 int continue_vm(const char *vmname);
-int suspend_vm(const char *vmname);
 int resume_vm(const char *vmname, unsigned reason);
 int blkrescan_vm(const char *vmname, char *devargs);
 

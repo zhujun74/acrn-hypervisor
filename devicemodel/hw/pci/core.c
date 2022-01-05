@@ -701,7 +701,7 @@ update_bar_address(struct vmctx *ctx, struct pci_vdev *dev, uint64_t addr,
 	 * need remove pcibar_type != PCIBAR_IO condition
 	 */
 	if(type != PCIBAR_IO && ctx->gvt_enabled)
-		/* uos kernel may update gvt bars' value,
+		/* User VM kernel may update gvt bars' value,
 		 * but ACRN-DM doesn't know this update.
 		 * When other pci devices write bar address,
 		 * ACRN-DM need update vgpu bars' info.
@@ -750,7 +750,7 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 		    enum pcibar_type type, uint64_t size)
 {
 	int error;
-	uint64_t *baseptr, limit, addr, mask, lobits, bar;
+	uint64_t *baseptr = NULL, limit = 0, addr, mask, lobits, bar;
 	struct io_rsvd_rgn *region;
 
 	if ((size & (size - 1)) != 0)

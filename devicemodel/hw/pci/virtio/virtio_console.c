@@ -283,6 +283,9 @@ virtio_console_control_tx(struct virtio_console_port *port, void *arg,
 	console = port->console;
 	ctrl = (struct virtio_console_control *)iov->iov_base;
 
+	if ((console == NULL) || (ctrl == NULL))
+		return;
+
 	switch (ctrl->event) {
 	case VIRTIO_CONSOLE_DEVICE_READY:
 		console->ready = true;
@@ -487,7 +490,7 @@ virtio_console_backend_read(int fd __attribute__((unused)),
 			if (len == -1 && errno == EAGAIN)
 				return;
 
-			/* when client uos reboot or shutdown,
+			/* when client User VM reboot or shutdown,
 			 * be->fd will be closed, then the return
 			 * value of readv function will be 0 */
 			if (len == 0 || errno == ECONNRESET)
@@ -667,7 +670,7 @@ virtio_console_accept_new_connection(int fd __attribute__((unused)),
 	addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
 
 	len = sizeof(addr);
-	/* be->server_fd is kept for client uos reconnect again */
+	/* be->server_fd is kept for client User VM reconnect again */
 	accepted_fd = accept(be->server_fd, (struct sockaddr *)&addr, &len);
 	if (accepted_fd == -1) {
 		WPRINTF(("accept error= %d, addr.sun_path=%s\n", errno, addr.sun_path));

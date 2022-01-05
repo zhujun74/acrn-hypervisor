@@ -57,6 +57,10 @@
 #define GUEST_FLAG_RT				(1UL << 4U)     /* Whether the vm is RT-VM */
 #define GUEST_FLAG_NVMX_ENABLED			(1UL << 5U)	/* Whether this VM supports nested virtualization */
 #define GUEST_FLAG_SECURITY_VM			(1UL << 6U)	/* Whether this VM needs to do security-vm related fixup (TPM2 and SMBIOS pt) */
+#define GUEST_FLAG_VCAT_ENABLED			(1UL << 7U)	/* Whether this VM supports vCAT */
+#define GUEST_FLAG_STATIC_VM       (1UL << 8U)  /* Whether this VM uses static VM configuration */
+#define GUEST_FLAG_TEE				(1UL << 9U)	/* Whether the VM is TEE VM */
+#define GUEST_FLAG_REE				(1UL << 10U)	/* Whether the VM is REE VM */
 
 /* TODO: We may need to get this addr from guest ACPI instead of hardcode here */
 #define VIRTUAL_SLEEP_CTL_ADDR		0x400U /* Pre-launched VM uses ACPI reduced HW mode and sleep control register */
@@ -65,6 +69,8 @@
 #define VIRTUAL_PM1A_SLP_TYP		0x1c00U
 #define VIRTUAL_PM1A_SLP_EN		0x2000U
 #define	VIRTUAL_PM1A_ALWAYS_ZERO	0xc003
+
+#define MAX_VM_NAME_LEN        (16U)
 
 /**
  * @brief Hypercall
@@ -192,11 +198,11 @@ struct acrn_pci_request {
  *    FREE -> PENDING -> PROCESSING -> COMPLETE -> FREE -> ...
  *
  * When a request is in COMPLETE or FREE state, the request is owned by the
- * hypervisor. SOS (HSM or DM) shall not read or write the internals of the
+ * hypervisor. Service VM (HSM or DM) shall not read or write the internals of the
  * request except the state.
  *
  * When a request is in PENDING or PROCESSING state, the request is owned by
- * SOS. The hypervisor shall not read or write the request other than the state.
+ * Service VM. The hypervisor shall not read or write the request other than the state.
  *
  * Based on the rules above, a typical I/O request lifecycle should looks like
  * the following.
@@ -204,20 +210,20 @@ struct acrn_pci_request {
  * @verbatim embed:rst:leading-asterisk
  *
  * +-----------------------+-------------------------+----------------------+
- * | SOS vCPU 0            | SOS vCPU x              | UOS vCPU y           |
+ * | Service VM vCPU 0     | Service VM vCPU x       | User VM vCPU y       |
  * +=======================+=========================+======================+
  * |                       |                         | Hypervisor:          |
  * |                       |                         |                      |
  * |                       |                         | - Fill in type,      |
  * |                       |                         |   addr, etc.         |
- * |                       |                         | - Pause UOS vCPU y   |
+ * |                       |                         | - Pause User VM vCPU |
  * |                       |                         | - Set state to       |
  * |                       |                         |   PENDING (a)        |
  * |                       |                         | - Fire upcall to     |
- * |                       |                         |   SOS vCPU 0         |
+ * |                       |                         |   Service VM vCPU 0  |
  * |                       |                         |                      |
  * +-----------------------+-------------------------+----------------------+
- * | VHM:                  |                         |                      |
+ * | HSM:                  |                         |                      |
  * |                       |                         |                      |
  * | - Scan for pending    |                         |                      |
  * |   requests            |                         |                      |
@@ -239,7 +245,7 @@ struct acrn_pci_request {
  * +-----------------------+-------------------------+----------------------+
  * |                       | Hypervisor:             |                      |
  * |                       |                         |                      |
- * |                       | - resume UOS vCPU y     |                      |
+ * |                       | - resume User VM vCPU y |                      |
  * |                       |   (e)                   |                      |
  * |                       |                         |                      |
  * +-----------------------+-------------------------+----------------------+
@@ -260,14 +266,14 @@ struct acrn_pci_request {
  *   4. One vCPU cannot trigger another I/O request before the previous one has
  *      completed (i.e. the state switched to FREE)
  *
- * Accesses to the state of a vhm_request shall be atomic and proper barriers
+ * Accesses to the state of a acrn_io_request shall be atomic and proper barriers
  * are needed to ensure that:
  *
  *   1. Setting state to PENDING is the last operation when issuing a request in
  *      the hypervisor, as the hypervisor shall not access the request any more.
  *
  *   2. Due to similar reasons, setting state to COMPLETE is the last operation
- *      of request handling in HSM or clients in SOS.
+ *      of request handling in HSM or clients in Service VM.
  */
 struct acrn_io_request {
 	/**
@@ -338,7 +344,7 @@ struct acrn_io_request_buffer {
  * @brief Info to create a VM, the parameter for HC_CREATE_VM hypercall
  */
 struct acrn_vm_creation {
-	/** created vmid return to VHM. Keep it first field */
+	/** created vmid return to HSM. Keep it first field */
 	uint16_t vmid;
 
 	/** Reserved */
@@ -350,8 +356,8 @@ struct acrn_vm_creation {
 	/** Reserved */
 	uint16_t reserved1;
 
-	/** the UUID of this VM */
-	uint8_t	 uuid[16];
+	/** the name of this VM */
+	uint8_t	 name[MAX_VM_NAME_LEN];
 
 	/* VM flag bits from Guest OS, now used
 	 *  GUEST_FLAG_SECURE_WORLD_ENABLED          (1UL<<0)
@@ -435,7 +441,7 @@ struct acrn_regs {
 /**
  * @brief Info to set vcpu state
  *
- * the pamameter for HC_SET_VCPU_STATE
+ * the parameter for HC_SET_VCPU_STATE
  */
 struct acrn_vcpu_regs {
 	/** the virtual CPU ID for the VCPU to set state */
@@ -577,7 +583,7 @@ struct acrn_intr_monitor {
 
 /*
  * PRE_LAUNCHED_VM is launched by ACRN hypervisor, with LAPIC_PT;
- * SOS_VM is launched by ACRN hypervisor, without LAPIC_PT;
+ * Service VM is launched by ACRN hypervisor, without LAPIC_PT;
  * POST_LAUNCHED_VM is launched by ACRN devicemodel, with/without LAPIC_PT depends on usecases.
  *
  * Assumption: vm_configs array is completely initialized w.r.t. load_order member of
@@ -585,17 +591,14 @@ struct acrn_intr_monitor {
  */
 enum acrn_vm_load_order {
 	PRE_LAUNCHED_VM = 0,
-	SOS_VM,
-	POST_LAUNCHED_VM,	/* Launched by Devicemodel in SOS_VM */
+	SERVICE_VM,
+	POST_LAUNCHED_VM,	/* Launched by Devicemodel in Service VM */
 	MAX_LOAD_ORDER
 };
 
-#define MAX_VM_OS_NAME_LEN      32U
-
 struct acrn_vm_config_header {
        enum acrn_vm_load_order load_order;
-       char name[MAX_VM_OS_NAME_LEN];
-       const uint8_t uuid[16];
+       char name[MAX_VM_NAME_LEN];
        uint8_t reserved[2];
        uint8_t severity;
        uint64_t cpu_affinity;

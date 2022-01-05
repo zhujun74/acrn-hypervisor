@@ -37,7 +37,6 @@
     <xsl:if test="count(vm[acrn:is-sos-vm(vm_type)])">
       <xsl:call-template name="sos_rootfs" />
       <xsl:call-template name="sos_serial_console" />
-      <xsl:call-template name="sos_com_vuarts" />
       <xsl:call-template name="sos_bootargs_diff" />
     </xsl:if>
     <xsl:call-template name="cpu_affinity" />
@@ -67,7 +66,7 @@
   </xsl:template>
 
 <xsl:template name="sos_rootfs">
-  <xsl:value-of select="acrn:define('SOS_ROOTFS', concat($quot, 'root=', vm/board_private/rootfs[text()], ' ', $quot), '')" />
+  <xsl:value-of select="acrn:define('SERVICE_VM_ROOTFS', concat($quot, 'root=', vm/board_private/rootfs[text()], ' ', $quot), '')" />
 </xsl:template>
 
 <xsl:template name="sos_serial_console">
@@ -85,29 +84,7 @@
       </xsl:if>
     </xsl:if>
   </xsl:variable>
-  <xsl:value-of select="acrn:define('SOS_CONSOLE', $sos_console, '')" />
-</xsl:template>
-
-<xsl:template name="sos_com_vuarts">
-  <xsl:for-each select="vm">
-    <xsl:if test="acrn:is-sos-vm(vm_type)">
-      <xsl:choose>
-        <xsl:when test="legacy_vuart[@id = 0]/base[text() != 'INVALID_COM_BASE']">
-          <xsl:value-of select="acrn:define('SOS_COM1_BASE', //allocation-data/acrn-config/vm[acrn:is-sos-vm(vm_type)]/legacy_vuart[@id = 0]/base, 'U')" />
-          <xsl:value-of select="acrn:define('SOS_COM1_IRQ', //allocation-data/acrn-config/vm[acrn:is-sos-vm(vm_type)]/legacy_vuart[@id = 0]/irq, 'U')" />
-        </xsl:when>
-        <xsl:otherwise>
-          <xsl:value-of select="acrn:define('SOS_COM1_BASE', '0', 'U')" />
-          <xsl:value-of select="acrn:define('SOS_COM1_IRQ', '0', 'U')" />
-        </xsl:otherwise>
-      </xsl:choose>
-      <xsl:if test="legacy_vuart[@id = 1]/base[text() != 'INVALID_COM_BASE']">
-        <xsl:value-of select="acrn:define('SOS_COM2_BASE', //allocation-data/acrn-config/vm[acrn:is-sos-vm(vm_type)]/legacy_vuart[@id = 1]/base, 'U')" />
-        <xsl:value-of select="acrn:define('SOS_COM2_IRQ', //allocation-data/acrn-config/vm[acrn:is-sos-vm(vm_type)]/legacy_vuart[@id = 1]/irq, 'U')" />
-      </xsl:if>
-      <xsl:value-of select="$newline" />
-    </xsl:if>
-  </xsl:for-each>
+  <xsl:value-of select="acrn:define('SERVICE_VM_OS_CONSOLE', $sos_console, '')" />
 </xsl:template>
 
 <xsl:template name="sos_bootargs_diff">
@@ -129,25 +106,19 @@
       <xsl:value-of select="concat('hugepagesz=1G hugepages=', $hugepages)" />
     </xsl:if>
   </xsl:variable>
-  <xsl:value-of select="acrn:define('SOS_BOOTARGS_DIFF', concat($quot, $bootargs, ' ', $maxcpus, ' ', $hugepage_kernelstring, ' ', $quot), '')" />
+  <xsl:value-of select="acrn:define('SERVICE_VM_BOOTARGS_DIFF', concat($quot, $bootargs, ' ', $maxcpus, ' ', $hugepage_kernelstring, ' ', $quot), '')" />
 </xsl:template>
 
 <xsl:template name="cpu_affinity">
   <xsl:for-each select="vm">
     <xsl:choose>
       <xsl:when test="acrn:is-sos-vm(vm_type)">
-        <xsl:value-of select="acrn:define('SOS_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-sos-vm(vm_type)]/cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
+        <xsl:value-of select="acrn:define('SERVICE_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-sos-vm(vm_type)]/cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
       </xsl:when>
       <xsl:otherwise>
         <xsl:value-of select="acrn:define(concat('VM', @id, '_CONFIG_CPU_AFFINITY'), concat('(', acrn:string-join(cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
       </xsl:otherwise>
     </xsl:choose>
-  </xsl:for-each>
-</xsl:template>
-
-<xsl:template name="vcpu_clos">
-  <xsl:for-each select="vm">
-    <xsl:value-of select="acrn:define(concat('VM', @id, '_VCPU_CLOS'), concat('{', acrn:string-join(clos/vcpu_clos, ',', '', 'U'),'}'), '')" />
   </xsl:for-each>
 </xsl:template>
 
@@ -165,7 +136,7 @@
   Max number of MBA delay entries corresponding to each CLOS. -->
 <xsl:template name="rdt">
   <xsl:variable name="rdt_res_clos_max" select="acrn:get-normalized-closinfo-rdt-clos-max-str()" />
-  <xsl:variable name="common_clos_max" select="acrn:get-common-clos-max()"/>
+  <xsl:variable name="common_clos_max" select="acrn:get-common-clos-count()"/>
   <xsl:choose>
     <xsl:when test="acrn:is-cdp-enabled()">
       <xsl:value-of select="acrn:ifdef('CONFIG_RDT_ENABLED')" />
@@ -195,7 +166,6 @@
     <xsl:for-each select="hv/FEATURES/RDT/CLOS_MASK">
       <xsl:value-of select="acrn:define(concat('CLOS_MASK_', position() - 1), current(), 'U')" />
     </xsl:for-each>
-    <xsl:call-template name="vcpu_clos" />
     <xsl:value-of select="$endif" />
   </xsl:if>
 </xsl:template>

@@ -43,9 +43,11 @@
  *  |  |  +---------------+  |  |     |    |        app           |
  *  |  +---------|-----------+  |     |    +----------------------+
  *  +------------|--------------+     | echo H or D |
- *               | SOS USER SPACE     |             |  UOS USER SPACE
+ *               | Service VM   |     |             v User VM
+ *               | User Space   |     |             |  User Space
  *  -------------|--------------------|-------------|-----------------
- *               v SOS KERNEL SPACE   |             v  UOS KERNEL SPACE
+ *               v SERVICE VM         |             v  User VM
+ *               |     Kernel Space   |             |  Kernel Space
  *  +------------------------------+  |    +--------------------------+
  *  | native drd sysfs interface   |  |    |native drd sysfs interface|
  *  +------------------------------+  |    +--------------------------+
@@ -4268,7 +4270,7 @@ errout:
 static int
 pci_xhci_parse_opts(struct pci_xhci_vdev *xdev, char *opts)
 {
-	char *s, *t, *n, *tptr;
+	char *s = NULL, *t, *n, *tptr;
 	int i, rc = 0;
 	struct pci_xhci_option_elem *elem;
 	int (*f)(struct pci_xhci_vdev *, char *);
@@ -4289,6 +4291,11 @@ pci_xhci_parse_opts(struct pci_xhci_vdev *xdev, char *opts)
 	}
 
 	s = strdup(opts);
+	/*The first call of strtok_s need s should be specified string */
+	if (!s) {
+		UPRINTF(LDBG, "options: strdup return NULL\n");
+		goto errout;
+	}
 	UPRINTF(LDBG, "options: %s\r\n", s);
 
 	elem = xhci_option_table;
@@ -4352,7 +4359,8 @@ errout:
 		return rc;
 	}
 
-	free(s);
+	if (s)
+		free(s);
 	return xdev->ndevices;
 }
 

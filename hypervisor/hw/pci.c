@@ -414,7 +414,7 @@ static uint32_t pci_check_override_drhd_index(union pci_bdf pbdf,
 		const struct pci_bdf_mapping_group *const bdfs_from_drhds,
 		uint32_t current_drhd_index)
 {
-	uint16_t bdfi;
+	uint32_t bdfi;
 	uint32_t bdf_drhd_index = current_drhd_index;
 
 	for (bdfi = 0U; bdfi < bdfs_from_drhds->pci_bdf_map_count; bdfi++) {
@@ -461,7 +461,7 @@ static void scan_pci_hierarchy(uint8_t bus, uint64_t buses_visited[BUSES_BITMAP_
 					&buses_visited[current_bus_index >> 6U]);
 
 		pbdf.bits.b = current_bus_index;
-		if (pbdf.bits.b < phys_pci_mmcfg.start_bus || pbdf.bits.b > phys_pci_mmcfg.end_bus) {
+		if ((pbdf.bits.b < phys_pci_mmcfg.start_bus) || (pbdf.bits.b > phys_pci_mmcfg.end_bus)) {
 			continue;
 		}
 
@@ -558,7 +558,7 @@ static void pci_parse_iommu_devscopes(struct pci_bdf_mapping_group *const bdfs_f
 }
 
 /*
- * There are some rules to config PCI bridge: try to avoid interference between SOS and RTVM or
+ * There are some rules to config PCI bridge: try to avoid interference between Service VM and RTVM or
  * pre-launched VM; and to support some features like SRIOV by default, so as following:
  *	1. disable interrupt, including INTx and MSI.
  *	2. enable ARI if it's a PCIe bridge and all its sub devices support ARI (need check further).
@@ -600,7 +600,7 @@ static void	config_pci_bridge(const struct pci_pdev *pdev)
 /*
  * @brief: walks through all pdevs that have been initialized and determine
  * which pdevs need to be added to pci dev_config. The pdevs added to pci
- * dev_config will be exposed to SOS finally.
+ * dev_config will be exposed to Service VM finally.
  */
 static void init_all_dev_config(void)
 {
@@ -726,11 +726,17 @@ static void pci_enumerate_ext_cap(struct pci_pdev *pdev)
 	uint32_t hdr, pos, pre_pos = 0U;
 	uint8_t pcie_dev_type;
 
+	/* guard against malformed list */
+	int node_limit;
+
 	pos = PCI_ECAP_BASE_PTR;
+
+	/* minimum 8 bytes per cap */
+	node_limit = (PCIE_CONFIG_SPACE_SIZE - PCI_CONFIG_SPACE_SIZE) / 8;
 
 	/* PCI Express Extended Capability must have 4 bytes header */
 	hdr = pci_pdev_read_cfg(pdev->bdf, pos, 4U);
-	while (hdr != 0U) {
+	while ((hdr != 0U) && (node_limit > 0)) {
 		if (PCI_ECAP_ID(hdr) == PCIZ_SRIOV) {
 			pdev->sriov.capoff = pos;
 			pdev->sriov.caplen = PCI_SRIOV_CAP_LEN;
@@ -739,8 +745,8 @@ static void pci_enumerate_ext_cap(struct pci_pdev *pdev)
 			pcie_dev_type = (((uint8_t)pci_pdev_read_cfg(pdev->bdf,
 				pdev->pcie_capoff + PCIER_FLAGS, 1)) & PCIEM_FLAGS_TYPE) >> 4;
 
-			if (pcie_dev_type == PCIEM_TYPE_ENDPOINT ||
-					pcie_dev_type == PCIEM_TYPE_ROOT_INT_EP) {
+			if ((pcie_dev_type == PCIEM_TYPE_ENDPOINT) ||
+					(pcie_dev_type == PCIEM_TYPE_ROOT_INT_EP)) {
 				/* No need to enable ptm on ep device.  If a PTM-capable ep pass
 				 * through to guest, guest OS will enable it
 				 */
@@ -767,8 +773,20 @@ static void pci_enumerate_ext_cap(struct pci_pdev *pdev)
 		if (pos == 0U) {
 			break;
 		}
+		if (pos < PCI_CONFIG_SPACE_SIZE) {
+			pr_err("pdev %x:%x.%x: Illegal PCIe extended capability offset %x",
+				pdev->bdf.bits.b, pdev->bdf.bits.d, pdev->bdf.bits.f, pos);
+			break;
+		}
 		hdr = pci_pdev_read_cfg(pdev->bdf, pos, 4U);
+		node_limit--;
 	};
+
+	if (node_limit <= 0) {
+		pr_err("%s: pdev[%x:%x.%x] Malformed linked list in PCIe extended \
+			capability region detected\n", __func__, pdev->bdf.bits.b,
+			pdev->bdf.bits.d, pdev->bdf.bits.f);
+	}
 }
 
 /*

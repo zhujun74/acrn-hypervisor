@@ -177,7 +177,7 @@ static inline int ptdev_msix_pba_bar(struct passthru_dev *ptdev)
 static int
 cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
-	int i, error;
+	int i, error = 0;
 	struct pci_vdev *dev;
 	struct pci_bar_io bar;
 	enum pcibar_type bartype;
@@ -318,10 +318,10 @@ cfginit(struct vmctx *ctx, struct passthru_dev *ptdev, int bus,
 		irq_type = ACRN_PTDEV_IRQ_INTX;
 	}
 
-	/* If SOS kernel provides 'reset' entry in sysfs, related dev has some
+	/* If Service VM kernel provides 'reset' entry in sysfs, related dev has some
 	 * reset capability, e.g. FLR, or secondary bus reset. We do 2 things:
 	 * - reset each dev before passthrough to achieve valid dev state after
-	 *   UOS reboot
+	 *   User VM reboot
 	 * - refuse to passthrough PCIe dev without any reset capability
 	 */
 	if (ptdev->need_reset) {
@@ -490,6 +490,25 @@ passthru_gpu_dsm_opregion(struct vmctx *ctx, struct passthru_dev *ptdev,
 	case 0x4693:
 	case 0x4698:
 	case 0x4699:
+	/* ADL-P GT graphics */
+	case 0x4626:
+	case 0x4628:
+	case 0x462a:
+	case 0x46a0:
+	case 0x46a1:
+	case 0x46a2:
+	case 0x46a3:
+	case 0x46a6:
+	case 0x46a8:
+	case 0x46aa:
+	case 0x46b0:
+	case 0x46b1:
+	case 0x46b2:
+	case 0x46b3:
+	case 0x46c0:
+	case 0x46c1:
+	case 0x46c2:
+	case 0x46c3:
 		/* BDSM register has 64 bits.
 		 * bits 63:20 contains the base address of stolen memory
 		 */

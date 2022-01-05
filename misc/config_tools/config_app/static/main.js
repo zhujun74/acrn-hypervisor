@@ -440,7 +440,7 @@ $().ready(function(){
         }
     });
 
-    $(document).on('change', "select[ID^='uos'][ID$='vuart0']", function() {
+    $(document).on('change', "select[ID^='user_vm'][ID$='vuart0']", function() {
         var id = $(this).attr('id');
         var value = $(this).val();
         if(value == 'Enable') {
@@ -450,7 +450,7 @@ $().ready(function(){
         }
     });
 
-    $(document).on('change', "select[ID^='uos'][ID$='console_vuart']", function() {
+    $(document).on('change', "select[ID^='user_vm'][ID$='console_vuart']", function() {
         var id = $(this).attr('id');
         var value = $(this).val();
         if(value == 'Enable') {
@@ -596,18 +596,6 @@ $().ready(function(){
             config_item.next().remove();
         }
         config_item.remove();
-    });
-
-    $('#remove_vm_kata').on('click', function() {
-        if(confirm("Do you want to remove the VM?")) {
-            save_scenario("remove_vm_kata");
-        }
-    });
-
-    $('#add_vm_kata').on('click', function() {
-        if(confirm("Do you want to add the Kata VM based on generic config?")) {
-            save_scenario("add_vm_kata");
-        }
     });
 })
 

@@ -51,11 +51,6 @@
 
 #define VLAPIC_VERBOS 0
 
-static inline uint32_t prio(uint32_t x)
-{
-	return (x >> 4U);
-}
-
 #define VLAPIC_VERSION		(16U)
 #define	APICBASE_BSP		0x00000100UL
 #define	APICBASE_X2APIC		0x00000400UL
@@ -223,7 +218,7 @@ vlapic_timer_divisor_shift(uint32_t dcr)
 	return ((val + 1U) & 0x7U);
 }
 
-static inline bool
+__unused static inline bool
 vlapic_lvtt_oneshot(const struct acrn_vlapic *vlapic)
 {
 	return (((vlapic->apic_page.lvt[APIC_LVT_TIMER].v) & APIC_LVTT_TM)
@@ -1889,7 +1884,7 @@ static int32_t inject_msi_for_non_lapic_pt(struct acrn_vm *vm, uint64_t addr, ui
 }
 
 /**
- *@pre Pointer vm shall point to SOS_VM
+ *@pre Pointer vm shall point to Service VM
  */
 static void inject_msi_for_lapic_pt(struct acrn_vm *vm, uint64_t addr, uint64_t data)
 {
@@ -2058,6 +2053,11 @@ vlapic_x2apic_pt_icr_access(struct acrn_vcpu *vcpu, uint64_t val)
 	} else {
 		dmask = vlapic_calc_dest(vcpu, shorthand, (dest == 0xffffffffU), dest, phys, false);
 
+		/**
+		 * The hypervisor sets the "Destination Shorthand" field to 00B (No Shorthand)
+		 * since the emulation is done through sending IPI to each VCPU in dmask one by one.
+		 */
+		icr_low = icr_low & (~APIC_DEST_MASK);
 		for (vcpu_id = 0U; vcpu_id < vcpu->vm->hw.created_vcpus; vcpu_id++) {
 			if (((dmask & (1UL << vcpu_id)) != 0UL) &&
 					(vcpu->vm->hw.vcpu_array[vcpu_id].state != VCPU_OFFLINE)) {
@@ -2184,8 +2184,8 @@ void vlapic_create(struct acrn_vcpu *vcpu, uint16_t pcpu_id)
 	if (is_vcpu_bsp(vcpu)) {
 		uint64_t *pml4_page =
 			(uint64_t *)vcpu->vm->arch_vm.nworld_eptp;
-		/* only need unmap it from SOS as UOS never mapped it */
-		if (is_sos_vm(vcpu->vm)) {
+		/* only need unmap it from Service VM as User VM never mapped it */
+		if (is_service_vm(vcpu->vm)) {
 			ept_del_mr(vcpu->vm, pml4_page,
 				DEFAULT_APIC_BASE, PAGE_SIZE);
 		}
@@ -2337,19 +2337,31 @@ bool vlapic_has_pending_delivery_intr(struct acrn_vcpu *vcpu)
 	return vlapic->ops->has_pending_delivery_intr(vcpu);
 }
 
-static bool apicv_basic_has_pending_intr(struct acrn_vcpu *vcpu)
+uint32_t vlapic_get_next_pending_intr(struct acrn_vcpu *vcpu)
 {
 	struct acrn_vlapic *vlapic = vcpu_vlapic(vcpu);
 	uint32_t vector;
 
 	vector = vlapic_find_highest_irr(vlapic);
 
-	return vector != 0UL;
+	return vector;
+}
+
+static bool apicv_basic_has_pending_intr(struct acrn_vcpu *vcpu)
+{
+	return vlapic_get_next_pending_intr(vcpu) != 0UL;
 }
 
 static bool apicv_advanced_has_pending_intr(struct acrn_vcpu *vcpu)
 {
 	return apicv_basic_has_pending_intr(vcpu);
+}
+
+bool vlapic_clear_pending_intr(struct acrn_vcpu *vcpu, uint32_t vector)
+{
+	struct lapic_reg *irrptr = &(vcpu->arch.vlapic.apic_page.irr[0]);
+	uint32_t idx = vector >> 5U;
+	return bitmap32_test_and_clear_lock((uint16_t)(vector & 0x1fU), &irrptr[idx].v);
 }
 
 bool vlapic_has_pending_intr(struct acrn_vcpu *vcpu)

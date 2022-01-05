@@ -186,6 +186,10 @@ void init_pcpu_pre(bool is_bsp)
 			panic("System IOAPIC info is incorrect!");
 		}
 
+#ifdef CONFIG_VCAT_ENABLED
+		init_intercepted_cat_msr_list();
+#endif
+
 #ifdef CONFIG_RDT_ENABLED
 		init_rdt_info();
 #endif
@@ -472,7 +476,7 @@ void cpu_dead(void)
 		vmx_off();
 
 		stac();
-		flush_cache_range((void *)get_hv_image_base(), CONFIG_HV_RAM_SIZE);
+		flush_cache_range((void *)get_hv_image_base(), get_hv_ram_size());
 		clac();
 
 		/* Set state to show CPU is dead */

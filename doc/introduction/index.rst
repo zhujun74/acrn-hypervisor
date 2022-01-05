@@ -76,7 +76,7 @@ ACRN has these key capabilities and benefits:
   non-safety-critical domains coexisting on one SoC using Intel VT-backed
   isolation.
 * **Adaptable and Flexible**: ACRN has multi-OS support with efficient
-  virtualization for VM OSs including Linux, Android, Zephyr, and Windows, as
+  virtualization for VM OSs including Linux, Zephyr, and Windows, as
   needed for a variety of application use cases. ACRN scenario configurations
   support shared, partitioned, and hybrid VM models to support a variety of
   application use cases.
@@ -148,7 +148,7 @@ shared among the Service VM and User VMs. The Service VM is launched by the
 hypervisor after any pre-launched VMs are launched. The Service VM can access
 remaining hardware resources directly by running native drivers and provides
 device sharing services to the User VMs, through the Device Model.  These
-post-launched User VMs can run one of many OSs including Ubuntu, Android,
+post-launched User VMs can run one of many OSs including Ubuntu or
 Windows, or a real-time OS such as Zephyr, VxWorks, or Xenomai. Because of its
 real-time capability, a real-time VM (RTVM) can be used for software
 programmable logic controller (PLC), inter-process communication (IPC), or
@@ -158,7 +158,7 @@ the Service VM since they may rely on its mediation services for device access.
 The Service VM owns most of the devices including the platform devices, and
 provides I/O mediation. The notable exceptions are the devices assigned to the
 pre-launched User VM. Some PCIe devices may be passed through to the
-post-launched User OSes via the VM configuration.
+post-launched User VMs via the VM configuration.
 
 The ACRN hypervisor also runs the ACRN VM manager to collect running
 information of the User VMs, and controls the User VMs such as starting,
@@ -319,7 +319,8 @@ Project ACRN provides some predefined sample scenarios to illustrate how you
 can define your own configuration scenarios.
 
 
-* **Industry** is a traditional computing, memory, and device resource sharing
+* **Shared** (called **Industry** in previous releases) is a traditional
+  computing, memory, and device resource sharing
   model among VMs. The ACRN hypervisor launches the Service VM. The Service VM
   then launches any post-launched User VMs and provides device and resource
   sharing mediation through the Device Model.  The Service VM runs the native
@@ -331,7 +332,7 @@ can define your own configuration scenarios.
      :align: center
      :name: arch-shared-example
 
-     ACRN High-Level Architecture Industry (Shared) Example
+     ACRN High-Level Architecture Shared Example
 
   Virtualization is especially important in industrial environments because of
   device and application longevity. Virtualization enables factories to

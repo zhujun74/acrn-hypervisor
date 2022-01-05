@@ -596,9 +596,9 @@
 /* 5 high-order bits in every field are reserved */
 #define PAT_FIELD_RSV_BITS			(0xF8UL)
 /* MSR_TEST_CTL bits */
-#define MSR_TEST_CTL_GP_UCLOCK                 (1U << 28U)
-#define MSR_TEST_CTL_AC_SPLITLOCK              (1U << 29U)
-#define MSR_TEST_CTL_DISABLE_LOCK_ASSERTION    (1U << 31U)
+#define MSR_TEST_CTL_GP_UCLOCK                 (1UL << 28U)
+#define MSR_TEST_CTL_AC_SPLITLOCK              (1UL << 29U)
+#define MSR_TEST_CTL_DISABLE_LOCK_ASSERTION    (1UL << 31U)
 
 #ifndef ASSEMBLER
 static inline bool is_pat_mem_type_invalid(uint64_t x)
@@ -617,6 +617,7 @@ static inline bool is_x2apic_msr(uint32_t msr)
 struct acrn_vcpu;
 
 void init_msr_emulation(struct acrn_vcpu *vcpu);
+void init_intercepted_cat_msr_list(void);
 uint32_t vmsr_get_guest_msr_index(uint32_t msr);
 void update_msr_bitmap_x2apic_apicv(struct acrn_vcpu *vcpu);
 void update_msr_bitmap_x2apic_passthru(struct acrn_vcpu *vcpu);
