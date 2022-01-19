@@ -67,6 +67,7 @@
 #include "pm_vuart.h"
 #include "log.h"
 #include "pci_util.h"
+#include "vssram.h"
 
 #define	VM_MAXCPU		16	/* maximum virtual cpus */
 
@@ -93,7 +94,7 @@ bool stdio_in_use;
 bool lapic_pt;
 bool is_rtvm;
 bool pt_tpm2;
-bool pt_rtct;
+bool ssram;
 bool vtpm2;
 bool is_winvm;
 bool skip_pci_mem64bar_workaround = false;
@@ -164,7 +165,7 @@ usage(int code)
 		"       -W: force virtio to use single-vector MSI\n"
 		"       --mac_seed: set a platform unique string as a seed for generate mac address\n"
 		"       --ovmf: ovmf file path\n"
-		"       --ssram: Enable Software SRAM passthrough\n"
+		"       --ssram: Congfiure Software SRAM parameters\n"
 		"       --cpu_affinity: list of pCPUs assigned to this VM\n"
 		"       --enable_trusty: enable trusty for guest\n"
 		"       --debugexit: enable debug exit function\n"
@@ -483,6 +484,9 @@ vm_init_vdevs(struct vmctx *ctx)
 	if (debugexit_enabled)
 		init_debugexit();
 
+	if ((ssram) && (init_vssram(ctx) < 0))
+		goto ssram_fail;
+
 	ret = monitor_init(ctx);
 	if (ret < 0)
 		goto monitor_fail;
@@ -504,6 +508,9 @@ pci_fail:
 	deinit_mmio_devs(ctx);
 mmio_dev_fail:
 	monitor_close();
+ssram_fail:
+	if (ssram)
+		deinit_vssram(ctx);
 monitor_fail:
 	if (debugexit_enabled)
 		deinit_debugexit();
@@ -537,6 +544,9 @@ vm_deinit_vdevs(struct vmctx *ctx)
 
 	if (debugexit_enabled)
 		deinit_debugexit();
+
+	if (ssram)
+		deinit_vssram(ctx);
 
 	vhpet_deinit(ctx);
 	vpit_deinit(ctx);
@@ -573,6 +583,9 @@ vm_reset_vdevs(struct vmctx *ctx)
 	if (debugexit_enabled)
 		deinit_debugexit();
 
+	if (ssram)
+		deinit_vssram(ctx);
+
 	vhpet_deinit(ctx);
 	vpit_deinit(ctx);
 	vrtc_deinit(ctx);
@@ -589,6 +602,9 @@ vm_reset_vdevs(struct vmctx *ctx)
 
 	if (debugexit_enabled)
 		init_debugexit();
+
+	if (ssram)
+		init_vssram(ctx);
 
 	ioapic_init(ctx);
 	init_pci(ctx);
@@ -794,7 +810,7 @@ static struct option long_options[] = {
 	{"vtpm2",		required_argument,	0, CMD_OPT_VTPM2},
 	{"lapic_pt",		no_argument,		0, CMD_OPT_LAPIC_PT},
 	{"rtvm",		no_argument,		0, CMD_OPT_RTVM},
-	{"ssram",		no_argument,		0, CMD_OPT_SOFTWARE_SRAM},
+	{"ssram",		required_argument,	0, CMD_OPT_SOFTWARE_SRAM},
 	{"logger_setting",	required_argument,	0, CMD_OPT_LOGGER_SETTING},
 	{"pm_notify_channel",	required_argument,	0, CMD_OPT_PM_NOTIFY_CHANNEL},
 	{"pm_by_vuart",	required_argument,	0, CMD_OPT_PM_BY_VUART},
@@ -936,8 +952,9 @@ main(int argc, char *argv[])
 			is_rtvm = true;
 			break;
 		case CMD_OPT_SOFTWARE_SRAM:
-			/* TODO: we need to support parameter to specify Software SRAM size in the future */
-			pt_rtct = true;
+			if (parse_vssram_buf_params(optarg) != 0)
+				errx(EX_USAGE, "invalid vSSRAM buffer size param %s", optarg);
+			ssram = true;
 			break;
 		case CMD_OPT_ACPIDEV_PT:
 			/* FIXME: check acpi TPM device rules in acpi device famework init functions */
@@ -1116,6 +1133,9 @@ main(int argc, char *argv[])
 
 vm_fail:
 	vm_deinit_vdevs(ctx);
+	if (ssram)
+		clean_vssram_configs();
+
 dev_fail:
 	mevent_deinit();
 mevent_fail:

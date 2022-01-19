@@ -196,19 +196,6 @@ def run_container(board_name, user_vm_type, config):
     print('}', file=config)
     print('', file=config)
 
-def boot_image_type(args, vmid, config):
-
-    if not args['vbootloader'][vmid] or (args['vbootloader'][vmid] and args['vbootloader'][vmid] != "vsbl"):
-        return
-
-    print('boot_dev_flag=",b"', file=config)
-    print("if [ $4 == 1 ];then", file=config)
-    print('  boot_image_option="--vsbl /usr/share/acrn/bios/VSBL_debug.bin"', file=config)
-    print("else", file=config)
-    print('  boot_image_option="--vsbl /usr/share/acrn/bios/VSBL.bin"', file=config)
-    print("fi", file=config)
-    print("", file=config)
-
 
 def interrupt_storm(pt_sel, config):
     if not pt_sel:
@@ -458,8 +445,6 @@ def vboot_arg_set(dm, vmid, config):
     # TODO: Support to generate '-k' xml config from webUI and to parse it
     if dm['vbootloader'][vmid] == "ovmf":
         print("   --ovmf /usr/share/acrn/bios/OVMF.fd \\", file=config)
-    elif dm['vbootloader'][vmid] == "vsbl":
-        print("   $boot_image_option \\",file=config)
 
 
 def xhci_args_set(dm, vmid, config):
@@ -553,15 +538,12 @@ def dm_arg_set(names, sel, virt_io, dm, sriov, vmid, config):
     user_vm_type = names['user_vm_types'][vmid]
     board_name = names['board_name']
 
-    boot_image_type(dm, vmid, config)
-
     sos_vmid = launch_cfg_lib.get_sos_vmid()
 
     # clearlinux/android/alios
-    print('acrn-dm -A -m $mem_size -s 0:0,hostbridge \\', file=config)
+    print('acrn-dm -m $mem_size -s 0:0,hostbridge \\', file=config)
     if launch_cfg_lib.is_linux_like(user_vm_type) or user_vm_type in ("ANDROID", "ALIOS"):
         if user_vm_type in ("ANDROID", "ALIOS"):
-            print('   $npk_virt \\', file=config)
             print("   -s {},virtio-rpmb \\".format(launch_cfg_lib.virtual_dev_slot("virtio-rpmb")), file=config)
             print("   --enable_trusty \\", file=config)
         # mac_seed
@@ -580,27 +562,6 @@ def dm_arg_set(names, sel, virt_io, dm, sriov, vmid, config):
     # windows
     if user_vm_type == "WINDOWS":
         print("   --windows \\", file=config)
-
-    # pm_channel set
-    if dm['pm_channel'][vmid] and dm['pm_channel'][vmid] != None:
-        pm_key = dm['pm_channel'][vmid]
-        pm_vuart = "--pm_notify_channel uart"
-        if vmid in dm["allow_trigger_s5"] and dm["allow_trigger_s5"][vmid] == 'y':
-            pm_vuart = pm_vuart + ",allow_trigger_s5 "
-        else:
-            pm_vuart = pm_vuart + " "
-        if pm_key == "vuart1(tty)":
-            vuart_base = launch_cfg_lib.get_vuart1_from_scenario(sos_vmid + vmid)
-            if vuart_base == "INVALID_COM_BASE":
-                err_key = "user_vm:id={}:poweroff_channel".format(vmid)
-                launch_cfg_lib.ERR_LIST[err_key] = "vuart1 of VM{} in scenario file should select 'SERVICE_VM_COM2_BASE'".format(sos_vmid + vmid)
-                return
-            scenario_cfg_lib.get_sos_vuart_settings()
-            print("   {} \\".format(pm_vuart + launch_cfg_lib.PM_CHANNEL_DIC[pm_key] + scenario_cfg_lib.SERVICE_VM_UART1_VALID_NUM), file=config)
-        elif pm_key == "vuart1(pty)":
-            print("   {} \\".format(pm_vuart + launch_cfg_lib.PM_CHANNEL_DIC[pm_key]), file=config)
-        else:
-            print("   {} \\".format(launch_cfg_lib.PM_CHANNEL_DIC[pm_key]), file=config)
 
     # set logger_setting for all VMs
     print("   $logger_setting \\", file=config)
@@ -651,7 +612,6 @@ def dm_arg_set(names, sel, virt_io, dm, sriov, vmid, config):
 
     if launch_cfg_lib.is_linux_like(user_vm_type) or user_vm_type in ("ANDROID", "ALIOS"):
         if board_name == "apl-mrb":
-            print("   -i /run/acrn/ioc_$vm_name,0x20 \\", file=config)
             print("   -l com2,/run/acrn/ioc_$vm_name \\", file=config)
 
         if not is_nuc_whl_linux(names, vmid):

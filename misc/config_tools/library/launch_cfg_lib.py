@@ -14,7 +14,7 @@ import lxml
 import lxml.etree
 
 ERR_LIST = {}
-BOOT_TYPE = ['no', 'vsbl', 'ovmf']
+BOOT_TYPE = ['no', 'ovmf']
 RTOS_TYPE = ['no', 'Soft RT', 'Hard RT']
 DM_VUART0 = ['Disable', 'Enable']
 y_n = ['y', 'n']
@@ -49,15 +49,6 @@ PT_SLOT = {
         "igd-lpc":31,
     }
 
-
-PM_CHANNEL = ['', 'IOC', 'PowerButton', 'vuart1(pty)', 'vuart1(tty)']
-PM_CHANNEL_DIC = {
-    None:'',
-    'IOC':'--pm_notify_channel ioc',
-    'PowerButton':'--pm_notify_channel power_button',
-    'vuart1(pty)':'--pm_by_vuart pty,/run/acrn/life_mngr_$vm_name \\\n   -l com2,/run/acrn/life_mngr_$vm_name',
-    'vuart1(tty)':'--pm_by_vuart tty,/dev/',
-}
 
 MOUNT_FLAG_DIC = {}
 
