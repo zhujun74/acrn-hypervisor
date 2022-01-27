@@ -51,17 +51,16 @@ options:
 
 .. code-block:: none
 
-   acrn-dm [-hAWYv] [-B bootargs] [-E elf_image_path]
+   acrn-dm [-hYv] [-B bootargs] [-E elf_image_path]
                [-k kernel_image_path]
                [-l lpc] [-m mem] [-r ramdisk_image_path]
                [-s pci] [--ovmf ovmf_file_path]
                [--enable_trusty] [--intr_monitor param_setting]
                [--acpidev_pt HID] [--mmiodev_pt MMIO_regions]
                [--vtpm2 sock_path] [--virtio_poll interval] [--mac_seed seed_string]
-               [--cpu_affinity pCPUs] [--lapic_pt] [--rtvm] [--windows]
+               [--cpu_affinity lapic_ids] [--lapic_pt] [--rtvm] [--windows]
                [--debugexit] [--logger-setting param_setting]
                [--ssram] <vm>
-       -A: create ACPI tables
        -B: bootargs for kernel
        -E: elf image path
        -h: help
@@ -71,12 +70,12 @@ options:
        -r: ramdisk image path
        -s: <slot,driver,configinfo> PCI slot config
        -v: version
-       -W: force virtio to use single-vector MSI
        -Y: disable MPtable generation
        --mac_seed: set a platform unique string as a seed for generate mac address
        --ovmf: ovmf file path
        --ssram: Enable Software SRAM
-       --cpu_affinity: list of pCPUs assigned to this VM
+       --cpu_affinity: comma-separated of Service VM vCPUs assigned to this VM. A Service VM vCPU is
+            identified by its lapic ID.\n"
        --enable_trusty: enable trusty for guest
        --debugexit: enable debug exit function
        --intr_monitor: enable interrupt storm monitor
@@ -90,6 +89,7 @@ options:
        --logger_setting: params like console,level=4;kmsg,level=3
        --windows: support Oracle virtio-blk, virtio-net, and virtio-input devices
             for windows guest with secure boot
+       --virtio_msi: force virtio to use single-vector MSI
 
 See :ref:`acrn-dm_parameters` for more detailed descriptions of these
 configuration options.
@@ -105,7 +105,7 @@ Here's an example showing how to run a VM with:
 
 .. code-block:: bash
 
-   acrn-dm -A -m 2048M \
+   acrn-dm -m 2048M \
      -s 0:0,hostbridge \
      -s 1:0,lpc -l com1,stdio \
      -s 5,virtio-console,@pty:pty_port \
@@ -166,11 +166,9 @@ DM Initialization
    dedicated ``vdev_init()`` function. For more details on the DM PCI
    emulation, refer to `PCI Emulation`_.
 
--  **ACPI Build**: If there is an "-A" option in the ``acrn-dm`` command line,
-   the DM
-   will build an ACPI table into its VM's F-Segment (0xf2400). This
-   ACPI table includes full tables for RSDP, RSDT, XSDT, MADT, FADT,
-   HPET, MCFG, FACS, and DSDT. All these items are programed
+-  **ACPI Build**: The DM will build an ACPI table into its VM's
+   F-Segment (0xf2400). This ACPI table includes full tables for RSDP, RSDT,
+   XSDT, MADT, FADT, HPET, MCFG, FACS, and DSDT. All these items are programed
    according to the ``acrn-dm`` command-line configuration and derived from
    their default value.
 
@@ -770,7 +768,7 @@ example:
 
 .. code-block:: bash
 
-   acrn-dm -A -m 2048M \
+   acrn-dm -m 2048M \
      -s 0:0,hostbridge \
      -s 1:0,lpc -l com1,stdio \
      -s 5,virtio-console,@pty:pty_port \

@@ -10,15 +10,6 @@ emulation based on command line configurations, as introduced in
 
 Here are descriptions for each of these ``acrn-dm`` command line parameters:
 
-``-A``, ``--acpi``
-   Create ACPI tables.  With this option, DM will build an ACPI table into its
-   VMs F-Segment (0xf2400).  This ACPI table includes full tables for RSDP,
-   RSDT, XSDT, MADT, FADT, HPET, MCFG, FACS, and DSDT.  All these items are
-   programmed according to acrn-dm command line configuration and derived from
-   their default value.
-
-----
-
 ``-B``, ``--bootargs <bootargs>``
    Set the User VM kernel command-line arguments. The maximum length is 1023.
    The bootargs string will be passed to the kernel as its cmdline.
@@ -202,14 +193,17 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
 
 ----
 
-``--cpu_affinity <list of pCPUs>``
-   list of pCPUs assigned to this VM.
+``--cpu_affinity <list of lapic_ids>``
+   comma-separated list of vCPUs assigned to this VM. Each CPU has a Local Programmable
+   Interrupt Controller (LAPIC). The unique ID of the LAPIC (lapic_id) is used to identify vCPU.
+   The ``lapic_id`` for a vCPU can be found in the service VM file ``/proc/cpuinfo``
+   identified as ``apicid``.
 
    Example::
 
       --cpu_affinity 1,3
 
-   to assign physical CPUs (pCPUs) 1 and 3 to this VM.
+   to assign vCPUs with lapic_id 1 and 3 to this VM.
 
 ----
 
@@ -259,7 +253,7 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
 
 ----
 
-``-W, --virtio_msix``
+``--virtio_msi``
    This option forces virtio to use single-vector MSI.  By default, any
    virtio-based devices will use MSI-X as its interrupt method.  If you want
    to use single-vector MSI interrupt, you can do so using this option.

@@ -89,7 +89,6 @@ char *ovmf_vars_file_name;
 char *kernel_file_name;
 char *elf_file_name;
 uint8_t trusty_enabled;
-char *mac_seed;
 bool stdio_in_use;
 bool lapic_pt;
 bool is_rtvm;
@@ -102,10 +101,7 @@ bool skip_pci_mem64bar_workaround = false;
 static int guest_ncpus;
 static int virtio_msix = 1;
 static bool debugexit_enabled;
-static char mac_seed_str[50];
 static int pm_notify_channel;
-
-static int acpi;
 
 static char *progname;
 static const int BSP;
@@ -142,17 +138,16 @@ static void
 usage(int code)
 {
 	fprintf(stderr,
-		"Usage: %s [-hAWYv] [-B bootargs] [-E elf_image_path]\n"
+		"Usage: %s [-hYv] [-B bootargs] [-E elf_image_path]\n"
 		"       %*s [-k kernel_image_path]\n"
 		"       %*s [-l lpc] [-m mem] [-r ramdisk_image_path]\n"
 		"       %*s [-s pci] [--ovmf ovmf_file_path]\n"
 		"       %*s [--enable_trusty] [--intr_monitor param_setting]\n"
 		"       %*s [--acpidev_pt HID] [--mmiodev_pt MMIO_Regions]\n"
-		"       %*s [--vtpm2 sock_path] [--virtio_poll interval] [--mac_seed seed_string]\n"
+		"       %*s [--vtpm2 sock_path] [--virtio_poll interval]\n"
 		"       %*s [--cpu_affinity pCPUs] [--lapic_pt] [--rtvm] [--windows]\n"
 		"       %*s [--debugexit] [--logger_setting param_setting]\n"
 		"       %*s [--ssram] <vm>\n"
-		"       -A: create ACPI tables\n"
 		"       -B: bootargs for kernel\n"
 		"       -E: elf image path\n"
 		"       -h: help\n"
@@ -162,8 +157,6 @@ usage(int code)
 		"       -r: ramdisk image path\n"
 		"       -s: <slot,driver,configinfo> PCI slot config\n"
 		"       -v: version\n"
-		"       -W: force virtio to use single-vector MSI\n"
-		"       --mac_seed: set a platform unique string as a seed for generate mac address\n"
 		"       --ovmf: ovmf file path\n"
 		"       --ssram: Congfiure Software SRAM parameters\n"
 		"       --cpu_affinity: list of pCPUs assigned to this VM\n"
@@ -179,7 +172,8 @@ usage(int code)
 		"       --rtvm: indicate that the guest is rtvm\n"
 		"       --logger_setting: params like console,level=4;kmsg,level=3\n"
 		"       --windows: support Oracle virtio-blk, virtio-net and virtio-input devices\n"
-		"            for windows guest with secure boot\n",
+		"            for windows guest with secure boot\n"
+		"       --virtio_msi: force virtio to use single-vector MSI\n",
 		progname, (int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
@@ -609,9 +603,7 @@ vm_reset_vdevs(struct vmctx *ctx)
 	ioapic_init(ctx);
 	init_pci(ctx);
 
-	if (acpi) {
-		acpi_build(ctx, guest_ncpus);
-	}
+	acpi_build(ctx, guest_ncpus);
 }
 
 static void
@@ -774,16 +766,15 @@ enum {
 	CMD_OPT_PM_NOTIFY_CHANNEL,
 	CMD_OPT_PM_BY_VUART,
 	CMD_OPT_WINDOWS,
+	CMD_OPT_FORCE_VIRTIO_MSI,
 };
 
 static struct option long_options[] = {
-	{"acpi",		no_argument,		0, 'A' },
 	{"elf_file",		required_argument,	0, 'E' },
 	{"ioc_node",		required_argument,	0, 'i' },
 	{"lpc",			required_argument,	0, 'l' },
 	{"pci_slot",		required_argument,	0, 's' },
 	{"memsize",		required_argument,	0, 'm' },
-	{"virtio_msix",		no_argument,		0, 'W' },
 	{"mptgen",		no_argument,		0, 'Y' },
 	{"kernel",		required_argument,	0, 'k' },
 	{"ramdisk",		required_argument,	0, 'r' },
@@ -802,7 +793,6 @@ static struct option long_options[] = {
 	{"enable_trusty",	no_argument,		0,
 					CMD_OPT_TRUSTY_ENABLE},
 	{"virtio_poll",		required_argument,	0, CMD_OPT_VIRTIO_POLL_ENABLE},
-	{"mac_seed",		required_argument,	0, CMD_OPT_MAC_SEED},
 	{"debugexit",		no_argument,		0, CMD_OPT_DEBUGEXIT},
 	{"intr_monitor",	required_argument,	0, CMD_OPT_INTR_MONITOR},
 	{"acpidev_pt",		required_argument,	0, CMD_OPT_ACPIDEV_PT},
@@ -815,10 +805,11 @@ static struct option long_options[] = {
 	{"pm_notify_channel",	required_argument,	0, CMD_OPT_PM_NOTIFY_CHANNEL},
 	{"pm_by_vuart",	required_argument,	0, CMD_OPT_PM_BY_VUART},
 	{"windows",		no_argument,		0, CMD_OPT_WINDOWS},
+	{"virtio_msi",		no_argument,		0, CMD_OPT_FORCE_VIRTIO_MSI},
 	{0,			0,			0,  0  },
 };
 
-static char optstr[] = "hAWYvE:k:r:B:s:m:l:U:G:i:";
+static char optstr[] = "hYvE:k:r:B:s:m:l:U:G:i:";
 
 int
 main(int argc, char *argv[])
@@ -848,9 +839,6 @@ main(int argc, char *argv[])
 	while ((c = getopt_long(argc, argv, optstr, long_options,
 			&option_idx)) != -1) {
 		switch (c) {
-		case 'A':
-			acpi = 1;
-			break;
 		case 'E':
 			if (acrn_parse_elf(optarg) != 0)
 				exit(1);
@@ -876,9 +864,6 @@ main(int argc, char *argv[])
 		case 'm':
 			if (vm_parse_memsize(optarg, &memsize) != 0)
 				errx(EX_USAGE, "invalid memsize '%s'", optarg);
-			break;
-		case 'W':
-			virtio_msix = 0;
 			break;
 		case 'Y': /* obsolete parameter */
 			mptgen = 0;
@@ -935,11 +920,6 @@ main(int argc, char *argv[])
 					"invalid virtio poll interval %s",
 					optarg);
 			}
-			break;
-		case CMD_OPT_MAC_SEED:
-			strncpy(mac_seed_str, optarg, sizeof(mac_seed_str));
-			mac_seed_str[sizeof(mac_seed_str) - 1] = '\0';
-			mac_seed = mac_seed_str;
 			break;
 		case CMD_OPT_DEBUGEXIT:
 			debugexit_enabled = true;
@@ -999,6 +979,9 @@ main(int argc, char *argv[])
 			break;
 		case CMD_OPT_WINDOWS:
 			is_winvm = true;
+			break;
+		case CMD_OPT_FORCE_VIRTIO_MSI:
+			virtio_msix = 0;
 			break;
 		case 'h':
 			usage(0);
@@ -1075,12 +1058,10 @@ main(int argc, char *argv[])
 			}
 		}
 
-		if (acpi) {
-			error = acpi_build(ctx, guest_ncpus);
-			if (error) {
-				pr_err("acpi_build failed, error=%d\n", error);
-				goto vm_fail;
-			}
+		error = acpi_build(ctx, guest_ncpus);
+		if (error) {
+			pr_err("acpi_build failed, error=%d\n", error);
+			goto vm_fail;
 		}
 
 		pr_notice("acrn_sw_load\n");
