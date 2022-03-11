@@ -34,8 +34,7 @@
   </xsl:template>
 
   <xsl:template match="config-data/acrn-config">
-    <xsl:if test="count(vm[acrn:is-sos-vm(vm_type)])">
-      <xsl:call-template name="sos_serial_console" />
+    <xsl:if test="count(vm[acrn:is-service-vm(load_order)])">
       <xsl:call-template name="sos_bootargs_diff" />
     </xsl:if>
     <xsl:call-template name="cpu_affinity" />
@@ -64,27 +63,9 @@
     </xsl:for-each>
   </xsl:template>
 
-<xsl:template name="sos_serial_console">
-  <xsl:variable name="consoleport" select="hv/DEBUG_OPTIONS/SERIAL_CONSOLE" />
-  <xsl:variable name="sos_console">
-    <xsl:if test="$consoleport = ''">
-      <xsl:text>" "</xsl:text>
-    </xsl:if>
-    <xsl:if test="$consoleport != ''">
-      <xsl:if test="contains($consoleport, '/')">
-        <xsl:value-of select="concat($quot, 'console=', substring-after(substring-after($consoleport,'/'), '/'), ' ', $quot)" />
-      </xsl:if>
-      <xsl:if test="not(contains($consoleport, '/'))">
-        <xsl:value-of select="concat($quot, 'console=', $consoleport, ' ', $quot)" />
-      </xsl:if>
-    </xsl:if>
-  </xsl:variable>
-  <xsl:value-of select="acrn:define('SERVICE_VM_OS_CONSOLE', $sos_console, '')" />
-</xsl:template>
-
 <xsl:template name="sos_bootargs_diff">
   <xsl:variable name="sos_rootfs">
-  <xsl:variable name="bootargs" select="str:split(//vm[acrn:is-sos-vm(vm_type)]/os_config/bootargs[text()], ' ')" />
+  <xsl:variable name="bootargs" select="str:split(//vm[acrn:is-service-vm(load_order)]/os_config/bootargs[text()], ' ')" />
   <xsl:for-each select="$bootargs">
     <xsl:variable name="pos" select="position()" />
     <xsl:variable name="bootarg" select="$bootargs[$pos]" />
@@ -93,8 +74,8 @@
       </xsl:if>
   </xsl:for-each>
   </xsl:variable>
-  <xsl:variable name="sos_bootargs" select="normalize-space(str:replace(//vm[acrn:is-sos-vm(vm_type)]/os_config/bootargs[text()], $sos_rootfs, ''))" />
-  <xsl:variable name="maxcpunum" select="count(//vm[acrn:is-sos-vm(vm_type)]/cpu_affinity/pcpu_id)" />
+  <xsl:variable name="sos_bootargs" select="normalize-space(str:replace(//vm[acrn:is-service-vm(load_order)]/os_config/bootargs[text()], $sos_rootfs, ''))" />
+  <xsl:variable name="maxcpunum" select="count(//vm[acrn:is-service-vm(load_order)]/cpu_affinity/pcpu_id)" />
   <xsl:variable name="hugepages" select="round(number(substring-before(//board-data//TOTAL_MEM_INFO, 'kB')) div (1024 * 1024)) - 3" />
   <xsl:variable name="maxcpus">
     <xsl:choose>
@@ -118,8 +99,8 @@
 <xsl:template name="cpu_affinity">
   <xsl:for-each select="vm">
     <xsl:choose>
-      <xsl:when test="acrn:is-sos-vm(vm_type)">
-        <xsl:value-of select="acrn:define('SERVICE_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-sos-vm(vm_type)]/cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
+      <xsl:when test="acrn:is-service-vm(load_order)">
+        <xsl:value-of select="acrn:define('SERVICE_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-service-vm(load_order)]/cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
       </xsl:when>
       <xsl:otherwise>
         <xsl:value-of select="acrn:define(concat('VM', @id, '_CONFIG_CPU_AFFINITY'), concat('(', acrn:string-join(cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
@@ -177,7 +158,7 @@
 </xsl:template>
 
 <xsl:template name="vm0_passthrough_tpm">
-  <xsl:if test="acrn:is-pre-launched-vm(vm[@id = 0]/vm_type)">
+  <xsl:if test="acrn:is-pre-launched-vm(vm[@id = 0]/load_order)">
     <xsl:if test="//vm/mmio_resources/TPM2/text() = 'y' and //device[@id = 'MSFT0101' or compatible_id = 'MSFT0101']">
       <xsl:value-of select="acrn:define('VM0_PASSTHROUGH_TPM', '', '')" />
       <xsl:value-of select="acrn:define('VM0_TPM_BUFFER_BASE_ADDR', '0xFED40000', 'UL')" />
@@ -203,7 +184,7 @@
 
 <xsl:template name="vm_boot_args">
   <xsl:for-each select="vm">
-    <xsl:if test="acrn:is-pre-launched-vm(vm_type)">
+    <xsl:if test="acrn:is-pre-launched-vm(load_order)">
     <xsl:variable name="bootargs" select="normalize-space(os_config/bootargs)" />
       <xsl:if test="$bootargs">
         <xsl:value-of select="acrn:define(concat('VM', @id, '_BOOT_ARGS'), concat($quot, $bootargs, ' ', $quot), '')" />

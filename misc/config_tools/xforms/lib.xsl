@@ -304,27 +304,27 @@
   </func:function>
   <!-- End of C code templates-->
 
-  <!-- Scenario-specific functions-->
-  <func:function name="acrn:parse-shmem-size">
+  <func:function name="acrn:shmem-index">
     <xsl:param name="v" />
-    <xsl:if test="$v and $v != 'n' and $v != 'y'">
-      <func:result select="acrn:string-to-num(substring-before(substring-after($v, ','), ','), 10)" />
-    </xsl:if>
-  </func:function>
-
-  <func:function name="acrn:count-shmem-dev-num">
-    <xsl:param name="v" />
-    <func:result select="string-length($v) - string-length(translate($v, ':', ''))" />
+    <xsl:variable name="idx">
+      <xsl:for-each select="//hv//IVSHMEM/IVSHMEM_REGION">
+        <xsl:if test="@name = $v">
+          <xsl:value-of select="position() - 1" />
+        </xsl:if>
+      </xsl:for-each>
+    </xsl:variable>
+    <func:result select="$idx" />
   </func:function>
 
   <func:function name="acrn:pci-dev-num">
     <xsl:param name="vmid" />
     <xsl:for-each select="//config-data/acrn-config/vm[@id = $vmid]">
-      <xsl:variable name="vmtype" select="./vm_type" />
+      <xsl:variable name="vmtype" select="./load_order" />
       <xsl:variable name="ivshmem">
         <xsl:choose>
-          <xsl:when test="../hv/FEATURES/IVSHMEM/IVSHMEM_ENABLED = 'y'">
-            <xsl:value-of select="count(../hv/FEATURES/IVSHMEM/IVSHMEM_REGION[contains(substring-after(substring-after(text(), ','), ','), $vmid)])" />
+          <xsl:when test="count(//hv//IVSHMEM/IVSHMEM_REGION) > 0">
+            <xsl:variable name="vm_name" select="./name" />
+            <xsl:value-of select="count(//hv//IVSHMEM/IVSHMEM_REGION/IVSHMEM_VMS/IVSHMEM_VM/VM_NAME[text() = $vm_name])" />
           </xsl:when>
           <xsl:otherwise>
             <xsl:value-of select="0" />
@@ -353,7 +353,7 @@
       <xsl:if test="acrn:is-post-launched-vm($vmtype)">
         <func:result select="$ivshmem + $console_vuart + $communication_vuart + $virtual_root_port" />
       </xsl:if>
-      <xsl:if test="acrn:is-sos-vm($vmtype)">
+      <xsl:if test="acrn:is-service-vm($vmtype)">
         <func:result select="$ivshmem + $console_vuart + $communication_vuart" />
       </xsl:if>
     </xsl:for-each>
@@ -455,49 +455,19 @@
     </xsl:choose>
   </func:function>
 
-  <func:function name="acrn:is-sos-vm">
-    <xsl:param name="vm_type" />
-    <xsl:choose>
-      <xsl:when test="$vm_type = 'SERVICE_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:otherwise>
-        <func:result select="false()" />
-      </xsl:otherwise>
-    </xsl:choose>
+  <func:function name="acrn:is-service-vm">
+    <xsl:param name="load_order" />
+    <func:result select="$load_order = 'SERVICE_VM'" />
   </func:function>
 
   <func:function name="acrn:is-pre-launched-vm">
-    <xsl:param name="vm_type" />
-    <xsl:choose>
-      <xsl:when test="$vm_type = 'PRE_RT_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:when test="$vm_type = 'PRE_STD_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:when test="$vm_type = 'SAFETY_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:otherwise>
-        <func:result select="false()" />
-      </xsl:otherwise>
-    </xsl:choose>
+    <xsl:param name="load_order" />
+    <func:result select="$load_order = 'PRE_LAUNCHED_VM'" />
   </func:function>
 
   <func:function name="acrn:is-post-launched-vm">
-    <xsl:param name="vm_type" />
-    <xsl:choose>
-      <xsl:when test="$vm_type = 'POST_STD_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:when test="$vm_type = 'POST_RT_VM'">
-        <func:result select="true()" />
-      </xsl:when>
-      <xsl:otherwise>
-        <func:result select="false()" />
-      </xsl:otherwise>
-    </xsl:choose>
+    <xsl:param name="load_order" />
+    <func:result select="$load_order = 'POST_LAUNCHED_VM'" />
   </func:function>
 
   <!-- acrn:is-vmsix-supported-device checks the given params are matched with any of the listed devices -->

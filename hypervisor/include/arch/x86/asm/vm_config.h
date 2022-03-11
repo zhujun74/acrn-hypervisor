@@ -59,7 +59,7 @@
 #define DM_OWNED_GUEST_FLAG_MASK	0UL
 #else
 #define DM_OWNED_GUEST_FLAG_MASK	(GUEST_FLAG_SECURE_WORLD_ENABLED | GUEST_FLAG_LAPIC_PASSTHROUGH \
-					| GUEST_FLAG_RT | GUEST_FLAG_IO_COMPLETION_POLLING)
+					| GUEST_FLAG_RT | GUEST_FLAG_IO_COMPLETION_POLLING | GUEST_FLAG_PMU_PASSTHROUGH)
 #endif
 
 /* ACRN guest severity */
@@ -152,9 +152,7 @@ struct pt_intx_config {
 struct acrn_vm_config {
 	enum acrn_vm_load_order load_order;		/* specify the load order of VM */
 	char name[MAX_VM_NAME_LEN];				/* VM name identifier */
-	uint8_t reserved[2];				/* Temporarily reserve it so that don't need to update
-							 * the users of get_platform_info frequently.
-							 */
+	uint8_t reserved[2];
 	uint8_t severity;				/* severity of the VM */
 	uint64_t cpu_affinity;				/* The set bits represent the pCPUs the vCPUs of
 							 * the VM may run on.

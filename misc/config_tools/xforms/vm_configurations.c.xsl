@@ -29,7 +29,7 @@
     <!-- Declaration of pci_devs -->
     <xsl:for-each select="vm">
       <xsl:choose>
-        <xsl:when test="acrn:is-sos-vm(vm_type)">
+        <xsl:when test="acrn:is-service-vm(load_order)">
           <xsl:value-of select="acrn:extern('struct acrn_vm_pci_dev_config', 'sos_pci_devs', 'CONFIG_MAX_PCI_DEV_NUM')" />
         </xsl:when>
         <xsl:when test="acrn:pci-dev-num(@id)">
@@ -38,7 +38,7 @@
       </xsl:choose>
 
       <!-- Declaration of pt_intx -->
-      <xsl:if test="acrn:is-pre-launched-vm(vm_type)">
+      <xsl:if test="acrn:is-pre-launched-vm(load_order)">
 	<xsl:variable name="vm_id" select="@id" />
 	<xsl:variable name="length" select="count(acrn:get-intx-mapping(//vm[@id=$vm_id]//pt_intx))" />
 	<xsl:choose>
@@ -83,15 +83,15 @@
     <xsl:value-of select="acrn:comment(concat('Static configured VM', @id))" />
     <xsl:value-of select="$newline" />
 
-    <xsl:apply-templates select="vm_type" />
+    <xsl:call-template name="load_order" />
     <xsl:apply-templates select="name" />
-    <xsl:if test="acrn:is-sos-vm(vm_type)">
+    <xsl:if test="acrn:is-service-vm(load_order)">
       <xsl:value-of select="acrn:comment('Allow Service VM to reboot the system since it is the highest priority VM.')" />
       <xsl:value-of select="$newline" />
     </xsl:if>
     <xsl:value-of select="acrn:initializer('vm_prio', priority)" />
     <xsl:value-of select="acrn:initializer('companion_vm_id', concat(companion_vmid, 'U'))" />
-    <xsl:apply-templates select="guest_flags" />
+    <xsl:call-template name="guest_flags" />
 
     <xsl:if test="acrn:is-rdt-enabled()">
       <xsl:apply-templates select="clos" />
@@ -103,9 +103,10 @@
     <xsl:apply-templates select="os_config" />
     <xsl:call-template name="acpi_config" />
     <xsl:call-template name="legacy_vuart" />
+    <xsl:call-template name="vuart_connection" />
     <xsl:call-template name="pci_dev_num" />
     <xsl:call-template name="pci_devs" />
-    <xsl:if test="acrn:is-pre-launched-vm(vm_type)">
+    <xsl:if test="acrn:is-pre-launched-vm(load_order)">
       <xsl:call-template name="pre_launched" />
     </xsl:if>
 
@@ -117,9 +118,25 @@
     </xsl:if>
   </xsl:template>
 
-  <xsl:template match="vm_type">
-    <xsl:value-of select="concat('CONFIG_', current())" />
-    <xsl:text>,</xsl:text>
+  <xsl:template name="load_order">
+    <xsl:variable name="vm_type" select="vm_type" />
+    <xsl:choose>
+      <xsl:when test="load_order = 'SERVICE_VM'">
+        <xsl:value-of select="'CONFIG_SERVICE_VM,'" />
+      </xsl:when>
+      <xsl:when test="load_order = 'PRE_LAUNCHED_VM' and $vm_type = 'RTVM'">
+        <xsl:value-of select="'CONFIG_PRE_RT_VM,'" />
+      </xsl:when>
+      <xsl:when test="load_order = 'PRE_LAUNCHED_VM' and $vm_type != 'RTVM'">
+        <xsl:value-of select="'CONFIG_PRE_STD_VM,'" />
+      </xsl:when>
+      <xsl:when test="load_order = 'POST_LAUNCHED_VM' and $vm_type = 'RTVM'">
+        <xsl:value-of select="'CONFIG_POST_RT_VM,'" />
+      </xsl:when>
+      <xsl:when test="load_order = 'POST_LAUNCHED_VM' and $vm_type != 'RTVM'">
+        <xsl:value-of select="'CONFIG_POST_STD_VM,'" />
+      </xsl:when>
+    </xsl:choose>
     <xsl:value-of select="$newline" />
   </xsl:template>
 
@@ -129,7 +146,7 @@
 
   <xsl:template name="cpu_affinity">
     <xsl:choose>
-      <xsl:when test="acrn:is-sos-vm(vm_type)">
+      <xsl:when test="acrn:is-service-vm(load_order)">
         <xsl:value-of select="acrn:initializer('cpu_affinity', 'SERVICE_VM_CONFIG_CPU_AFFINITY')" />
       </xsl:when>
       <xsl:otherwise>
@@ -140,17 +157,9 @@
     </xsl:choose>
   </xsl:template>
 
-  <xsl:template match="guest_flags">
-    <xsl:if test="guest_flag">
-      <xsl:choose>
-        <xsl:when test="guest_flag = '' or guest_flag = '0' or guest_flag = '0UL'">
-          <xsl:value-of select="acrn:initializer('guest_flags', 'GUEST_FLAG_STATIC_VM')" />
-        </xsl:when>
-        <xsl:otherwise>
-          <xsl:value-of select="acrn:initializer('guest_flags', concat('(GUEST_FLAG_STATIC_VM|', acrn:string-join(guest_flag, '|', '', ''),')'))" />
-        </xsl:otherwise>
-      </xsl:choose>
-    </xsl:if>
+  <xsl:template name="guest_flags">
+    <xsl:variable name="vm_id" select="@id" />
+    <xsl:value-of select="acrn:initializer('guest_flags', concat('(', acrn:string-join(//allocation-data/acrn-config/vm[@id=$vm_id]/guest_flags/guest_flag, '|', '', ''),')'))" />
   </xsl:template>
 
   <xsl:template match="clos">
@@ -159,7 +168,7 @@
 
     <xsl:value-of select="acrn:initializer('num_pclosids', concat(count(vcpu_clos), 'U'))" />
 
-    <xsl:if test="acrn:is-vcat-enabled() and ../guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED']">
+    <xsl:if test="acrn:is-vcat-enabled() and ../virtual_cat_support[text() = 'y']">
       <xsl:variable name="rdt_res_str" select="acrn:get-normalized-closinfo-rdt-res-str()" />
       <xsl:variable name="closid" select="vcpu_clos[1]" />
 
@@ -178,7 +187,7 @@
   <xsl:template match="memory">
     <xsl:value-of select="acrn:initializer('memory', '{', true())" />
     <xsl:choose>
-      <xsl:when test="acrn:is-sos-vm(../vm_type)">
+      <xsl:when test="acrn:is-service-vm(../load_order)">
         <xsl:value-of select="acrn:initializer('start_hpa', concat(start_hpa, 'UL'))" />
       </xsl:when>
       <xsl:otherwise>
@@ -216,10 +225,10 @@
     </xsl:if>
     <xsl:if test="normalize-space(bootargs)">
       <xsl:choose>
-        <xsl:when test="acrn:is-sos-vm(../vm_type)">
+        <xsl:when test="acrn:is-service-vm(../load_order)">
           <xsl:value-of select="acrn:initializer('bootargs', 'SERVICE_VM_OS_BOOTARGS')" />
         </xsl:when>
-        <xsl:when test="acrn:is-pre-launched-vm(../vm_type)">
+        <xsl:when test="acrn:is-pre-launched-vm(../load_order)">
             <xsl:value-of select="acrn:initializer('bootargs', concat('VM', ../@id, '_BOOT_ARGS'))" />
         </xsl:when>
       </xsl:choose>
@@ -229,7 +238,7 @@
   </xsl:template>
 
   <xsl:template name="acpi_config">
-    <xsl:if test="acrn:is-pre-launched-vm(vm_type)">
+    <xsl:if test="acrn:is-pre-launched-vm(load_order)">
       <xsl:value-of select="acrn:initializer('acpi_config', '{', true())" />
       <xsl:value-of select="acrn:initializer('acpi_mod_tag', concat($quot,'ACPI_VM', @id, $quot))" />
       <xsl:text>},</xsl:text>
@@ -256,9 +265,58 @@
     </xsl:for-each>
   </xsl:template>
 
+  <xsl:template name="vuart_connection">
+    <xsl:variable name="vm_id" select="@id" />
+    <xsl:variable name="vmname" select="name/text()" />
+    <xsl:for-each select="//vuart_connection[endpoint/vm_name = $vmname]">
+      <xsl:variable name="connection_name" select="name/text()" />
+      <xsl:variable name="type" select="type/text()" />
+      <xsl:variable name="vuart_id" select="position()"/>
+      <xsl:value-of select="acrn:initializer(concat('vuart[', $vuart_id, ']'), '{', true())" />
+      <xsl:choose>
+        <xsl:when test="$type = 'legacy'">
+          <xsl:value-of select="acrn:initializer('type', 'VUART_LEGACY_PIO')" />
+        </xsl:when>
+        <xsl:when test="$type = 'pci'">
+          <xsl:value-of select="acrn:initializer('type', 'VUART_PCI')" />
+        </xsl:when>
+      </xsl:choose>
+      <xsl:value-of select="acrn:initializer('irq', concat(//allocation-data/acrn-config/vm[@id=$vm_id]/legacy_vuart[@id=$vuart_id]/irq, 'U'))" />
+      <xsl:for-each select="endpoint">
+        <xsl:choose>
+          <xsl:when test="vm_name = $vmname">
+            <xsl:choose>
+              <xsl:when test="$type = 'legacy'">
+                <xsl:value-of select="acrn:initializer('addr.port_base', concat(io_port, 'U'))" />
+              </xsl:when>
+              <xsl:when test="$type = 'pci'">
+                <xsl:variable name="b" select="substring-before(vbdf/text(), ':')" />
+                <xsl:variable name="d" select="substring-before(substring-after(vbdf/text(), ':'), '.')" />
+                <xsl:variable name="f" select="substring-after(vbdf/text(), '.')" />
+                <xsl:value-of select="acrn:initializer('addr.bdf', concat('{', $b, ', ', $d, ', ', $f, '}'))" />
+              </xsl:when>
+            </xsl:choose>
+          </xsl:when>
+          <xsl:otherwise>
+            <xsl:variable name="target_name" select="vm_name" />
+            <xsl:value-of select="acrn:initializer('t_vuart.vm_id', concat(//vm[name = $target_name]/@id, 'U'))" />
+            <xsl:for-each select="//vuart_connection[endpoint/vm_name = $target_name]">
+              <xsl:variable name="uart_num" select="position()"/>
+              <xsl:if test="name = $connection_name">
+	        <xsl:value-of select="acrn:initializer('t_vuart.vuart_id', concat($uart_num, 'U'))" />
+              </xsl:if>
+          </xsl:for-each>
+          </xsl:otherwise>
+        </xsl:choose>
+      </xsl:for-each>
+      <xsl:text>},</xsl:text>
+      <xsl:value-of select="$newline" />
+    </xsl:for-each>
+  </xsl:template>
+
   <xsl:template name="pci_dev_num">
     <xsl:choose>
-      <xsl:when test="acrn:is-sos-vm(vm_type)">
+      <xsl:when test="acrn:is-service-vm(load_order)">
         <xsl:value-of select="acrn:initializer('pci_dev_num', concat(acrn:pci-dev-num(@id), 'U'))" />
       </xsl:when>
       <xsl:otherwise>
@@ -271,7 +329,7 @@
 
   <xsl:template name="pci_devs">
     <xsl:choose>
-      <xsl:when test="acrn:is-sos-vm(vm_type)">
+      <xsl:when test="acrn:is-service-vm(load_order)">
         <xsl:value-of select="acrn:initializer('pci_devs', 'sos_pci_devs')" />
       </xsl:when>
       <xsl:when test="acrn:pci-dev-num(@id)">

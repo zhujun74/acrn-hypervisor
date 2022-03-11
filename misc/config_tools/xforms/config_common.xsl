@@ -17,11 +17,13 @@
     </xsl:call-template>
     <xsl:call-template name="integer-by-key-value">
       <xsl:with-param name="key" select="'MAX_IOAPIC_NUM'" />
-      <xsl:with-param name="value" select="count(//ioapic)" />
+      <xsl:with-param name="value" select="//config-data//MAX_IOAPIC_NUM/text()" />
+      <xsl:with-param name="default" select="count(.//ioapic)" />
     </xsl:call-template>
     <xsl:call-template name="integer-by-key-value">
       <xsl:with-param name="key" select="'MAX_IOAPIC_LINES'" />
-      <xsl:with-param name="value" select="math:max(//gsi_number/text() | exslt:node-set(0))" />
+      <xsl:with-param name="value" select="//config-data//MAX_IOAPIC_LINES/text()" />
+      <xsl:with-param name="default" select="math:max(.//ioapic/gsi_number/text() | exslt:node-set(0))" />
     </xsl:call-template>
     <xsl:call-template name="msi-msix-max" />
   </xsl:template>
@@ -114,8 +116,9 @@
       <xsl:with-param name="key" select="'HYPERV_ENABLED'" />
     </xsl:call-template>
 
-    <xsl:call-template name="boolean-by-key">
+    <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="'NVMX_ENABLED'" />
+      <xsl:with-param name="value" select="count(//vm[nested_virtualization_support = 'y']) > 0" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key">
@@ -139,7 +142,7 @@
 
     <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="'IVSHMEM_ENABLED'" />
-      <xsl:with-param name="value" select="IVSHMEM/IVSHMEM_ENABLED" />
+      <xsl:with-param name="value" select="count(//hv//IVSHMEM/IVSHMEM_REGION) > 0" />
     </xsl:call-template>
   </xsl:template>
 
@@ -147,10 +150,6 @@
     <xsl:call-template name="integer-by-key">
       <xsl:with-param name="key" select="'HV_RAM_START'" />
       <xsl:with-param name="default" select="//allocation-data/acrn-config/hv/MEMORY/HV_RAM_START" />
-    </xsl:call-template>
-
-    <xsl:call-template name="integer-by-key">
-      <xsl:with-param name="key" select="'PLATFORM_RAM_SIZE'" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
@@ -208,26 +207,26 @@
 	<xsl:variable name="bus" select="substring-before($bdf, ':')" />
 	<xsl:variable name="device" select="substring-before(substring-after($bdf, ':'), '.')" />
 	<xsl:variable name="function" select="substring-after($bdf, '.')" />
+	<xsl:variable name="serial_bdf">
+	  <xsl:text>0b</xsl:text>
+	  <xsl:call-template name="hex-to-bin">
+	    <xsl:with-param name="s" select="$bus" />
+	    <xsl:with-param name="width" select="4" />
+	  </xsl:call-template>
+	  <xsl:call-template name="hex-to-bin">
+	    <xsl:with-param name="s" select="$device" />
+	    <xsl:with-param name="width" select="1" />
+	  </xsl:call-template>
+	  <xsl:call-template name="hex-to-bin">
+	    <xsl:with-param name="s" select="$function" />
+	    <xsl:with-param name="width" select="3" />
+	  </xsl:call-template>
+	</xsl:variable>
 
 	<xsl:call-template name="integer-by-key-value">
 	  <xsl:with-param name="key" select="'SERIAL_PCI_BDF'" />
+	  <xsl:with-param name="value" select="$serial_bdf" />
 	</xsl:call-template>
-
-	<xsl:text>0b</xsl:text>
-	<xsl:call-template name="hex-to-bin">
-	  <xsl:with-param name="s" select="$bus" />
-	  <xsl:with-param name="width" select="4" />
-	</xsl:call-template>
-	<xsl:call-template name="hex-to-bin">
-	  <xsl:with-param name="s" select="$device" />
-	  <xsl:with-param name="width" select="1" />
-	</xsl:call-template>
-	<xsl:call-template name="hex-to-bin">
-	  <xsl:with-param name="s" select="$function" />
-	  <xsl:with-param name="width" select="3" />
-	</xsl:call-template>
-	<xsl:value-of select="$integer-suffix" />
-	<xsl:text>&#xa;</xsl:text>
       </xsl:when>
       <xsl:otherwise>
 	<xsl:call-template name="boolean-by-key-value">
@@ -329,7 +328,7 @@
 	  <xsl:with-param name="value" select="concat($value, $integer-suffix)" />
 	</xsl:call-template>
       </xsl:when>
-      <xsl:when test="($value = '') and ($default != '')">
+      <xsl:when test="$default != ''">
 	<xsl:call-template name="entry-by-key-value">
 	  <xsl:with-param name="prefix" select="$prefix" />
 	  <xsl:with-param name="key" select="$key" />

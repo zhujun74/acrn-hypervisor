@@ -16,16 +16,22 @@ This setup was tested with the following configuration:
 - QEMU emulator version: 4.2.1
 - Host OS: Ubuntu 20.04
 - Service VM/User VM OS: Ubuntu 20.04
-- Platforms tested: Kaby Lake, Skylake
+- Platforms tested: Kaby Lake, Skylake, Whiskey Lake, Tiger Lake
 
 Prerequisites
 *************
 
 1. Make sure the platform supports Intel VMX as well as VT-d
    technologies. On Ubuntu 20.04, this
-   can be checked by installing the ``cpu-checker`` tool. If the
-   output displays **KVM acceleration can be used**,
-   the platform supports it.
+   can be checked by installing the ``kvm-ok`` tool found in the ``cpu-checker`` package.
+
+
+   .. code-block:: bash
+
+      sudo apt install cpu-checker
+
+   Run the ``kvm-ok`` tool and if the output displays **KVM acceleration can be used**,
+   the platform supports Intel VMX and VT-d technologies.
 
    .. code-block:: console
 
@@ -64,7 +70,7 @@ Prepare Service VM (L1 Guest)
       --os-variant ubuntu18.04 \
       --graphics none \
       --clock offset=utc,tsc_present=yes,kvmclock_present=no \
-      --qemu-commandline="-machine kernel-irqchip=split -cpu Denverton,+invtsc,+lm,+nx,+smep,+smap,+mtrr,+clflushopt,+vmx,+x2apic,+popcnt,-xsave,+sse,+rdrand,+vmx-apicv-xapic,+vmx-apicv-x2apic,+vmx-flexpriority,+tsc-deadline,+pdpe1gb -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48" \
+      --qemu-commandline="-machine kernel-irqchip=split -cpu Denverton,+invtsc,+lm,+nx,+smep,+smap,+mtrr,+clflushopt,+vmx,+x2apic,+popcnt,-xsave,+sse,+rdrand,-vmx-apicv-vid,+vmx-apicv-xapic,+vmx-apicv-x2apic,+vmx-flexpriority,+tsc-deadline,+pdpe1gb -device intel-iommu,intremap=on,caching-mode=on,aw-bits=48" \
       --location 'http://archive.ubuntu.com/ubuntu/dists/bionic/main/installer-amd64/' \
       --extra-args "console=tty0 console=ttyS0,115200n8"
 
@@ -179,7 +185,7 @@ Install ACRN Hypervisor
          insmod part_msdos
          insmod ext2
 
-         echo 'Loading ACRN hypervisor with SDC scenario ...'
+         echo 'Loading ACRN hypervisor ...'
          multiboot --quirk-modules-after-kernel /boot/acrn.32.out
          module /boot/bzImage Linux_bzImage
       }
@@ -274,7 +280,7 @@ Bring Up User VM (L2 Guest)
       $logger_setting \
       $vm_name
       }
-      # offline SOS CPUs except BSP before launch UOS
+      # offline Service VM CPUs except BSP before launching User VM
       for i in `ls -d /sys/devices/system/cpu/cpu[1-99]`; do
         online=`cat $i/online`
         idx=`echo $i | tr -cd "[1-99]"`

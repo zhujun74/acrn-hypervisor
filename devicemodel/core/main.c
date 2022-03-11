@@ -68,6 +68,7 @@
 #include "log.h"
 #include "pci_util.h"
 #include "vssram.h"
+#include "cmd_monitor.h"
 
 #define	VM_MAXCPU		16	/* maximum virtual cpus */
 
@@ -102,6 +103,7 @@ static int guest_ncpus;
 static int virtio_msix = 1;
 static bool debugexit_enabled;
 static int pm_notify_channel;
+static bool cmd_monitor;
 
 static char *progname;
 static const int BSP;
@@ -145,7 +147,7 @@ usage(int code)
 		"       %*s [--enable_trusty] [--intr_monitor param_setting]\n"
 		"       %*s [--acpidev_pt HID] [--mmiodev_pt MMIO_Regions]\n"
 		"       %*s [--vtpm2 sock_path] [--virtio_poll interval]\n"
-		"       %*s [--cpu_affinity pCPUs] [--lapic_pt] [--rtvm] [--windows]\n"
+		"       %*s [--cpu_affinity lapic_id] [--lapic_pt] [--rtvm] [--windows]\n"
 		"       %*s [--debugexit] [--logger_setting param_setting]\n"
 		"       %*s [--ssram] <vm>\n"
 		"       -B: bootargs for kernel\n"
@@ -159,11 +161,14 @@ usage(int code)
 		"       -v: version\n"
 		"       --ovmf: ovmf file path\n"
 		"       --ssram: Congfiure Software SRAM parameters\n"
-		"       --cpu_affinity: list of pCPUs assigned to this VM\n"
+		"       --cpu_affinity: list of Service VM vCPUs assigned to this User VM, the vCPUs are"
+		"	     identified by their local APIC IDs.\n"
 		"       --enable_trusty: enable trusty for guest\n"
 		"       --debugexit: enable debug exit function\n"
 		"       --intr_monitor: enable interrupt storm monitor\n"
 		"            its params: threshold/s,probe-period(s),delay_time(ms),delay_duration(ms)\n"
+		"       --cmd_monitor: enable command monitor\n"
+		"            its params: unix domain socket path\n"
 		"       --virtio_poll: enable virtio poll mode with poll interval with ns\n"
 		"       --acpidev_pt: acpi device ID args: HID in ACPI Table\n"
 		"       --mmiodev_pt: MMIO resources args: physical MMIO regions\n"
@@ -485,6 +490,9 @@ vm_init_vdevs(struct vmctx *ctx)
 	if (ret < 0)
 		goto monitor_fail;
 
+	if ((cmd_monitor) && init_cmd_monitor(ctx) < 0)
+		goto monitor_fail;
+
 	ret = init_mmio_devs(ctx);
 	if (ret < 0)
 		goto mmio_dev_fail;
@@ -756,6 +764,7 @@ enum {
 	CMD_OPT_VMCFG,
 	CMD_OPT_DUMP,
 	CMD_OPT_INTR_MONITOR,
+	CMD_OPT_CMD_MONITOR,
 	CMD_OPT_ACPIDEV_PT,
 	CMD_OPT_MMIODEV_PT,
 	CMD_OPT_VTPM2,
@@ -795,6 +804,7 @@ static struct option long_options[] = {
 	{"virtio_poll",		required_argument,	0, CMD_OPT_VIRTIO_POLL_ENABLE},
 	{"debugexit",		no_argument,		0, CMD_OPT_DEBUGEXIT},
 	{"intr_monitor",	required_argument,	0, CMD_OPT_INTR_MONITOR},
+	{"cmd_monitor",		required_argument,	0, CMD_OPT_CMD_MONITOR},
 	{"acpidev_pt",		required_argument,	0, CMD_OPT_ACPIDEV_PT},
 	{"mmiodev_pt",		required_argument,	0, CMD_OPT_MMIODEV_PT},
 	{"vtpm2",		required_argument,	0, CMD_OPT_VTPM2},
@@ -835,6 +845,11 @@ main(int argc, char *argv[])
 	 */
 	if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
 		fprintf(stderr, "cannot register handler for SIGPIPE\n");
+
+	if (parse_madt()) {
+		pr_err("Failed to parse the MADT table\n");
+		exit(1);
+	}
 
 	while ((c = getopt_long(argc, argv, optstr, long_options,
 			&option_idx)) != -1) {
@@ -926,10 +941,10 @@ main(int argc, char *argv[])
 			break;
 		case CMD_OPT_LAPIC_PT:
 			lapic_pt = true;
-			is_rtvm = true;
 			break;
 		case CMD_OPT_RTVM:
 			is_rtvm = true;
+			lapic_pt = true;
 			break;
 		case CMD_OPT_SOFTWARE_SRAM:
 			if (parse_vssram_buf_params(optarg) != 0)
@@ -952,6 +967,11 @@ main(int argc, char *argv[])
 		case CMD_OPT_INTR_MONITOR:
 			if (acrn_parse_intr_monitor(optarg) != 0)
 				errx(EX_USAGE, "invalid intr-monitor params %s", optarg);
+			break;
+		case CMD_OPT_CMD_MONITOR:
+			if (acrn_parse_cmd_monitor(optarg) != 0)
+				errx(EX_USAGE, "invalid command monitor params %s", optarg);
+			cmd_monitor = true;
 			break;
 		case CMD_OPT_LOGGER_SETTING:
 			if (init_logger_setting(optarg) != 0)
@@ -997,6 +1017,10 @@ main(int argc, char *argv[])
 		usage(1);
         }
 
+	if (lapic_pt == true && is_rtvm == false) {
+		lapic_pt = false;
+		pr_warn("Only a Realtime VM can use local APIC pass through, '--lapic_pt' is invalid here.\n");
+	}
 	vmname = argv[0];
 
 	if (strnlen(vmname, MAX_VM_NAME_LEN) >= MAX_VM_NAME_LEN) {
@@ -1125,8 +1149,9 @@ fail:
 	vm_pause(ctx);
 	vm_destroy(ctx);
 create_fail:
+	if (cmd_monitor)
+		deinit_cmd_monitor();
 	uninit_hugetlb();
 	deinit_loggers();
-	clean_pci_cache();
 	exit(ret);
 }

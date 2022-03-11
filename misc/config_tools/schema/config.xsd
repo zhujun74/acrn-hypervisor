@@ -25,7 +25,7 @@ hypervisor shell.</xs:documentation>
       <xs:annotation>
         <xs:documentation>Specify the host serial device used for hypervisor debugging.
 This option is only valid if :option:`hv.DEBUG_OPTIONS.RELEASE` is set to ``n``.
-This option impacts the content of ``vm.(legacy_vuart id="0").base`` when :option:`vm.vm_type` is ``SERVICE_VM``,
+This option impacts the content of ``vm.(legacy_vuart id="0").base`` when :option:`vm.load_order` is ``SERVICE_VM``,
 which specifies the PIO base for Service VM legacy vUART 0 (used for the console).
 The PIO base for the Service VM's legacy vUART 0 is determined using these rules:
 
@@ -119,11 +119,6 @@ support RDT or CDP, setting this option to ``y`` is ignored.</xs:documentation>
         <xs:documentation>Enable Hyper-V.</xs:documentation>
       </xs:annotation>
     </xs:element>
-    <xs:element name="NVMX_ENABLED" type="Boolean" default="n">
-      <xs:annotation>
-        <xs:documentation>Enable nested virtualization.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
     <xs:element name="IOMMU_ENFORCE_SNP" type="Boolean" default="n">
       <xs:annotation>
         <xs:documentation>Specify if the IOMMU enforces snoop behavior
@@ -159,7 +154,6 @@ Machine Check Error on Page Size Change.</xs:documentation>
     </xs:element>
   </xs:all>
   <xs:assert test="not (RDT/RDT_ENABLED = 'y' and SSRAM/SSRAM_ENABLED = 'y')"/>
-  <xs:assert test="not (NVMX_ENABLED = 'y' and not (SCHEDULER = 'SCHED_NOOP'))"/>
 </xs:complexType>
 
 <xs:complexType name="MemoryOptionsType">
@@ -175,12 +169,6 @@ three for specific exceptions.</xs:documentation>
       <xs:annotation>
         <xs:documentation>The 2MB-aligned starting physical address of
 the RAM region used by the hypervisor.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="PLATFORM_RAM_SIZE" type="HexFormat" default="0x400000000">
-      <xs:annotation>
-        <xs:documentation>Size of the physical platform RAM. Default
-value ``0x400000000``.</xs:documentation>
       </xs:annotation>
     </xs:element>
   </xs:all>
@@ -304,14 +292,25 @@ If this value is empty, then the default value will be calculated from informati
     <xs:element name="MEMORY" type="MemoryOptionsType" />
     <xs:element name="CAPACITIES" type="CapacitiesOptionsType" />
     <xs:element name="MISC_CFG" type="MiscCfgOptionsType" />
+    <xs:element name="vuart_connections" type="VuartConnectionsType" minOccurs="0" maxOccurs="8">
+      <xs:annotation>
+        <xs:documentation>Specify the vUART connection setting.
+Refer to :ref:`vuart_config` for detailed vUART settings.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
   </xs:all>
 </xs:complexType>
 
 <xs:complexType name="VMConfigType">
   <xs:all>
-    <xs:element name="vm_type" type="VMOptionsType">
-      <xs:annotation acrn:readonly="y">
+    <xs:element name="vm_type" type="VMType">
+      <xs:annotation>
         <xs:documentation>Specify the VM type.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="load_order" type="LoadOrderType">
+      <xs:annotation>
+        <xs:documentation>Specify the load_order.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="name">
@@ -330,9 +329,39 @@ hypervisor console ``vm_list`` command.</xs:documentation>
         </xs:restriction>
       </xs:simpleType>
     </xs:element>
-    <xs:element name="guest_flags" type="GuestFlagsInfo" minOccurs="0">
-      <xs:annotation acrn:multiselect="y">
-        <xs:documentation>Select all applicable flags for the VM.</xs:documentation>
+    <xs:element name="lapic_passthrough" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify LAPIC to passthrough.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="io_completion_polling" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify Polling mode for IO Completion.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="nested_virtualization_support" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify nested virtualization support for KVM.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="virtual_cat_support" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify virtual CAT support for VM.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="secure_world_support" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify secure world support for trustry OS.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="hide_mtrr_support" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify MTRR capability to hide for VM.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="security_vm" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation>
+        <xs:documentation>Specify TPM2 FIXUP for VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="cpu_affinity" type="CPUAffinityConfiguration" minOccurs="0">
@@ -372,7 +401,7 @@ Refer SDM 17.19.2 for details, and use with caution.</xs:documentation>
 argument and memory.</xs:documentation>
       </xs:annotation>
     </xs:element>
-    <xs:element name="legacy_vuart" type="LegacyVuartConfiguration" minOccurs="2" maxOccurs="8">
+    <xs:element name="legacy_vuart" type="LegacyVuartConfiguration" minOccurs="1" maxOccurs="8">
       <xs:annotation>
         <xs:documentation>Specify the vUART (aka COM) with the vUART ID by its ``id`` attribute.
 Refer to :ref:`vuart_config` for detailed vUART settings.</xs:documentation>
@@ -382,12 +411,6 @@ Refer to :ref:`vuart_config` for detailed vUART settings.</xs:documentation>
       <xs:annotation>
         <xs:documentation>Specify the console vUART (aka PCI based vUART) with the vUART ID by
 its ``id`` attribute.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="communication_vuart" type="CommunicationVuartConfiguration" maxOccurs="unbounded">
-      <xs:annotation>
-        <xs:documentation>Specify the communication vUART (aka PCI based vUART) with the vUART ID by
-its ``id`` attribute. When it is enabled, specify which target VM's vUART the current VM connects to.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="mmio_resources" type="MMIOResourcesConfiguration" minOccurs="0">
@@ -418,9 +441,9 @@ its ``id`` attribute. When it is enabled, specify which target VM's vUART the cu
   </xs:all>
   <xs:attribute name="id" type="xs:integer" />
 
-  <xs:assert test="vm_type != 'SERVICE_VM' or count(guest_flags[guest_flag = 'GUEST_FLAG_LAPIC_PASSTHROUGH']) = 0 or count(guest_flags[guest_flag = 'GUEST_FLAG_NVMX_ENABLED']) > 0">
+  <xs:assert test="load_order != 'SERVICE_VM' or count(//lapic_passthrough[text() = 'y']) = 0 or count(//nested_virtualization_support[text() = 'y']) > 0">
     <xs:annotation>
-      <xs:documentation>Service VM cannot use LAPIC passthrough unless GUEST_FLAG_NVMX_ENABLED is set.</xs:documentation>
+      <xs:documentation>Service VM cannot use LAPIC passthrough unless nested_virtualization_support is set.</xs:documentation>
     </xs:annotation>
   </xs:assert>
 </xs:complexType>
@@ -447,12 +470,6 @@ to launch post-launched User VMs.</xs:documentation>
   <xs:attribute name="board" type="xs:string" use="required" />
   <xs:attribute name="scenario" type="xs:string" use="required" />
 
-  <xs:assert test="count(//guest_flag[text() = 'GUEST_FLAG_NVMX_ENABLED']) = 0 or //NVMX_ENABLED = 'y'">
-    <xs:annotation>
-      <xs:documentation>Per VM GUEST_FLAG_NVMX_ENABLED can be set only if CONFIG_NVMX_ENABLED is set.</xs:documentation>
-    </xs:annotation>
-  </xs:assert>
-
   <xs:assert test="if (//VCAT_ENABLED = 'y')
                    then (//CDP_ENABLED = 'n' and //RDT_ENABLED = 'y')
                    else true()">
@@ -461,17 +478,17 @@ to launch post-launched User VMs.</xs:documentation>
     </xs:annotation>
   </xs:assert>
 
-  <xs:assert test="if (count(//guest_flag[text() = 'GUEST_FLAG_VCAT_ENABLED']) > 0)
+  <xs:assert test="if (count(//virtual_cat_support[text() = 'y']) > 0)
                    then //RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y'
                    else true()">
     <xs:annotation>
-      <xs:documentation>Per VM GUEST_FLAG_VCAT_ENABLED can be set only when RDT_ENABLED is 'y' and VCAT_ENABLED is 'y'.</xs:documentation>
+      <xs:documentation>Per VM virtual_cat_support can be set only when RDT_ENABLED is 'y' and VCAT_ENABLED is 'y'.</xs:documentation>
     </xs:annotation>
   </xs:assert>
 
   <xs:assert test="every $vm in vm satisfies
                   (
-                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED'])
+                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/virtual_cat_support[text() = 'y'])
                     then count($vm/clos/vcpu_clos) > 1
                     else true()
                   )
@@ -482,7 +499,7 @@ to launch post-launched User VMs.</xs:documentation>
   </xs:assert>
 
   <xs:assert test="if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y')
-                   then count(vm[guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED'] and count(clos/vcpu_clos[. = 0])]) = 0
+                   then count(vm[virtual_cat_support[text() = 'y'] and count(clos/vcpu_clos[. = 0])]) = 0
                    else true()">
     <xs:annotation>
       <xs:documentation>For a vCAT VM, vcpu_clos cannot be set to CLOSID 0, CLOSID 0 is reserved to be used by hypervisor</xs:documentation>
@@ -491,7 +508,7 @@ to launch post-launched User VMs.</xs:documentation>
 
   <xs:assert test="every $vm in vm satisfies
                   (
-                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED'])
+                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/virtual_cat_support[text() = 'y'])
                     then count($vm[clos/vcpu_clos[. &gt;= count($vm/..//CLOS_MASK)]]) = 0
                     else true()
                   )
@@ -503,7 +520,7 @@ to launch post-launched User VMs.</xs:documentation>
 
   <xs:assert test="every $vm in vm satisfies
                   (
-                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED'])
+                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and $vm/virtual_cat_support[text() = 'y'])
                     then count($vm/clos/vcpu_clos) = count(distinct-values($vm/clos/vcpu_clos))
                     else true()
                   )
@@ -515,7 +532,7 @@ to launch post-launched User VMs.</xs:documentation>
 
   <xs:assert test="every $vm1 in vm, $vm2 in $vm1/following-sibling::vm satisfies
                   (
-                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and ($vm1/guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED'] or $vm2/guest_flags[guest_flag = 'GUEST_FLAG_VCAT_ENABLED']))
+                    if (//RDT_ENABLED = 'y' and //VCAT_ENABLED = 'y' and ($vm1/virtual_cat_support[text() = 'y'] or $vm2/virtual_cat_support[text() = 'y']))
                     then count($vm1/clos/vcpu_clos[. = $vm2/clos/vcpu_clos]) = 0
                     else true()
                   )

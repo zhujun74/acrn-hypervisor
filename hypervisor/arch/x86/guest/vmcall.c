@@ -38,8 +38,6 @@ static const struct hc_dispatch hc_dispatch_table[] = {
 		.handler = hcall_service_vm_offline_cpu},
 	[HC_IDX(HC_SET_CALLBACK_VECTOR)] = {
 		.handler = hcall_set_callback_vector},
-	[HC_IDX(HC_GET_PLATFORM_INFO)] = {
-		.handler = hcall_get_platform_info},
 	[HC_IDX(HC_CREATE_VM)] = {
 		.handler = hcall_create_vm},
 	[HC_IDX(HC_DESTROY_VM)] = {
@@ -183,7 +181,6 @@ struct acrn_vm *parse_target_vm(struct acrn_vm *service_vm, uint64_t hcall_id, u
 	case HC_GET_API_VERSION:
 	case HC_SERVICE_VM_OFFLINE_CPU:
 	case HC_SET_CALLBACK_VECTOR:
-	case HC_GET_PLATFORM_INFO:
 	case HC_SETUP_SBUF:
 	case HC_SETUP_HV_NPK_LOG:
 	case HC_PROFILING_OPS:
@@ -208,7 +205,7 @@ struct acrn_vm *parse_target_vm(struct acrn_vm *service_vm, uint64_t hcall_id, u
 
 static int32_t dispatch_hypercall(struct acrn_vcpu *vcpu)
 {
-	int32_t ret = -EINVAL;
+	int32_t ret = -ENOTTY;
 	struct acrn_vm *vm = vcpu->vm;
 	uint64_t guest_flags = get_vm_config(vm->vm_id)->guest_flags;  /* hypercall ID from guest */
 	uint64_t hcall_id = vcpu_get_gpreg(vcpu, CPU_REG_R8);  /* hypercall ID from guest */
@@ -240,7 +237,7 @@ static int32_t dispatch_hypercall(struct acrn_vcpu *vcpu)
 					((guest_flags & permission_flags) != 0UL)) {
 				ret = dispatch->handler(vcpu, vcpu->vm, param1, param2);
 			} else {
-				/* The vCPU is not allowed to invoke the given hypercall. Keep `ret` as -EINVAL and no
+				/* The vCPU is not allowed to invoke the given hypercall. Keep `ret` as -ENOTTY and no
 				 * further actions required.
 				 */
 			}

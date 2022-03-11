@@ -737,12 +737,7 @@ def gen_dsdt(board_etree, scenario_etree, allocation_etree, vm_id, dest_path):
                 builder.build_value(0))))
     objects.add_object("\\", s5_object)
 
-    rtvm = False
-    for guest_flag in scenario_etree.xpath(f"//vm[@id='{vm_id}']/guest_flags/guest_flag/text()"):
-        if guest_flag == 'GUEST_FLAG_LAPIC_PASSTHROUGH':
-            rtvm = True
-            break
-
+    rtvm = bool(scenario_etree.xpath(f"//vm[@id='{vm_id}']//lapic_passthrough[text()='y']"))
     # RTVM cannot set IRQ because no INTR is sent with LAPIC PT
     if rtvm is False:
         objects.add_object("\\_SB_", pnp_uart("UAR0", 0, "COM1", 0x3f8, 4))
@@ -800,8 +795,8 @@ def main(args):
     dict_pcpu_list = collections.OrderedDict()
     for vm in scenario_root.findall('vm'):
         vm_id = vm.attrib['id']
-        vm_type_node = vm.find('vm_type')
-        if (vm_type_node is not None) and (vm_type_node.text in ['PRE_STD_VM', 'SAFETY_VM', 'PRE_RT_VM']):
+        load_order_node = vm.find('load_order')
+        if (load_order_node is not None) and (load_order_node.text == 'PRE_LAUNCHED_VM'):
             dict_passthru_devices[vm_id] = []
             for pci_dev_node in vm.findall('pci_devs/pci_dev'):
                 if pci_dev_node is not None and pci_dev_node.text is not None and pci_dev_node.text.strip():
@@ -824,7 +819,8 @@ def main(args):
         for vm in scenario_root.findall('vm'):
             vm_id = vm.attrib['id']
             vm_type_node = vm.find('vm_type')
-            if (vm_type_node is not None) and (vm_type_node.text in ['PRE_RT_VM']):
+            load_order_node = vm.find('load_order')
+            if (load_order_node is not None) and (load_order_node.text == 'PRE_LAUNCHED_VM') and (vm_type_node.text == 'RTVM'):
                 PRELAUNCHED_RTVM_ID = vm_id
                 break
     except:
@@ -859,9 +855,9 @@ def main(args):
 
             apic_ids = []
             for id in dict_pcpu_list[vm_id]:
-                apic_id = common.get_node(f"//processors/die/core/thread[cpu_id='{id}']/apic_id/text()", board_etree)
+                apic_id = common.get_node(f"//processors//thread[cpu_id='{id}']/apic_id/text()", board_etree)
                 if apic_id is None:
-                    emsg = 'some or all of the processors/die/core/thread/cpu_id tags are missing in board xml file for cpu {}, please run board_inspector.py to regenerate the board xml file!'.format(id)
+                    emsg = 'some or all of the processors//thread/cpu_id tags are missing in board xml file for cpu {}, please run board_inspector.py to regenerate the board xml file!'.format(id)
                     print(emsg)
                     err_dic['board config: processors'] = emsg
                     return err_dic

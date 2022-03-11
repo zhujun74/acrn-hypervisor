@@ -132,6 +132,14 @@ To set up the ACRN build environment on the development computer:
            xsltproc \
            clang-format \
            bc
+         
+   .. note:: You need to follow these steps if you are on Ubuntu 18.04 as ``libcjson-dev`` is not available in the default repositories.
+
+      .. code-block:: bash
+
+         sudo add-apt-repository ppa:jrtc27/cjson
+         sudo apt-get update
+         sudo apt install libcjson-dev
 
 #. Install Python package dependencies:
 
@@ -328,12 +336,6 @@ Generate a Board Configuration File
          disk="/media/$USER/"$(ls /media/$USER)
          cp -r "$disk"/board_inspector ~/acrn-work
 
-#. On the target, load the ``msr`` driver, used by the Board Inspector:
-
-   .. code-block:: bash
-
-      sudo modprobe msr
-
 #. Run the Board Inspector tool ( ``board_inspector.py``)
    to generate the board configuration file. This
    example uses the parameter ``my_board`` as the file name.
@@ -486,6 +488,8 @@ To generate a scenario configuration file and launch scripts:
 
 #. Close the browser and press :kbd:`CTRL` + :kbd:`C` to terminate the
    ``acrn_configurator.py`` program running in the terminal window.
+
+.. _gsg_build:
 
 .. rst-class:: numbered-step
 

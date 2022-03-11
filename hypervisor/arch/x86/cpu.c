@@ -158,6 +158,9 @@ void init_pcpu_pre(bool is_bsp)
 
 		init_e820();
 
+		/* reserve ppt buffer from e820 */
+		allocate_ppt_pages();
+
 		/* Initialize the hypervisor paging */
 		init_paging();
 
@@ -283,10 +286,7 @@ void init_pcpu_post(uint16_t pcpu_id)
 		 */
 		reserve_buffer_for_ept_pages();
 
-		/*
-		 * Reserve memory from platform E820 for shadow EPT 4K pages
-		 */
-		reserve_buffer_for_sept_pages();
+		init_vept();
 
 		pcpu_sync = ALL_CPUS_MASK;
 		/* Start all secondary cores */

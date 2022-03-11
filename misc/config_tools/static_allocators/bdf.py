@@ -27,25 +27,20 @@ def find_unused_bdf(used_bdf):
 
 def insert_vuart_to_dev_dict(scenario_etree, devdict, used):
     console_vuart =  scenario_etree.xpath(f"./console_vuart[base != 'INVALID_PCI_BASE']/@id")
-    communication_vuarts = scenario_etree.xpath(f".//communication_vuart[base != 'INVALID_PCI_BASE']/@id")
     for vuart_id in console_vuart:
-        free_bdf = find_unused_bdf(used)
-        devdict[f"{VUART}_{vuart_id}"] = free_bdf
-        used.append(free_bdf)
-    for vuart_id in communication_vuarts:
         free_bdf = find_unused_bdf(used)
         devdict[f"{VUART}_{vuart_id}"] = free_bdf
         used.append(free_bdf)
 
 def insert_ivsheme_to_dev_dict(scenario_etree, devdict, vm_id, used):
-    shmem_regions = lib.lib.get_shmem_regions(scenario_etree)
+    shmem_regions = lib.lib.get_ivshmem_regions_by_tree(scenario_etree)
     if vm_id not in shmem_regions:
         return
     shmems = shmem_regions.get(vm_id)
     for shm in shmems.values():
-        free_bdf = find_unused_bdf(used)
-        devdict[f"{IVSHMEM}_{shm.get('id')}"] = free_bdf
-        used.append(free_bdf)
+        bdf = lib.lib.BusDevFunc.from_str(shm.get('vbdf'))
+        devdict[f"{IVSHMEM}_{shm.get('id')}"] = bdf
+        used.append(bdf)
 
 def insert_pt_devs_to_dev_dict(vm_node_etree, devdict, used):
     """
@@ -95,11 +90,10 @@ def get_devs_bdf_passthrough(scenario_etree):
     return: list of passtrhough devices' bdf.
     """
     dev_list = []
-    for vm_type in lib.lib.PRE_LAUNCHED_VMS_TYPE:
-        pt_devs = scenario_etree.xpath(f"//vm[vm_type = '{vm_type}']/pci_devs/pci_dev/text()")
-        for pt_dev in pt_devs:
-            bdf = lib.lib.BusDevFunc.from_str(pt_dev.split()[0])
-            dev_list.append(bdf)
+    pt_devs = scenario_etree.xpath(f"//vm[load_order = 'PRE_LAUNCHED_VM']/pci_devs/pci_dev/text()")
+    for pt_dev in pt_devs:
+        bdf = lib.lib.BusDevFunc.from_str(pt_dev.split()[0])
+        dev_list.append(bdf)
     return dev_list
 
 def create_device_node(allocation_etree, vm_id, devdict):
@@ -141,11 +135,11 @@ def fn(board_etree, scenario_etree, allocation_etree):
         vm_id = vm_node.get('id')
         devdict = {}
         used = []
-        vm_type = common.get_node("./vm_type/text()", vm_node)
-        if vm_type is not None and lib.lib.is_post_launched_vm(vm_type):
+        load_order = common.get_node("./load_order/text()", vm_node)
+        if load_order is not None and lib.lib.is_post_launched_vm(load_order):
             continue
 
-        if vm_type is not None and lib.lib.is_sos_vm(vm_type):
+        if load_order is not None and lib.lib.is_service_vm(load_order):
             native_used = get_devs_bdf_native(board_etree)
             passthrough_used = get_devs_bdf_passthrough(scenario_etree)
             used = [bdf for bdf in native_used if bdf not in passthrough_used]

@@ -27,20 +27,16 @@
         <CLOS_MASK>0xfffff</CLOS_MASK>
         <CLOS_MASK>0xfffff</CLOS_MASK>
       </RDT>
-      <NVMX_ENABLED>n</NVMX_ENABLED>
       <HYPERV_ENABLED>y</HYPERV_ENABLED>
       <IOMMU_ENFORCE_SNP>n</IOMMU_ENFORCE_SNP>
       <ACPI_PARSE_ENABLED>y</ACPI_PARSE_ENABLED>
       <L1D_VMENTRY_ENABLED>n</L1D_VMENTRY_ENABLED>
       <MCE_ON_PSC_DISABLED>n</MCE_ON_PSC_DISABLED>
       <IVSHMEM>
-        <IVSHMEM_ENABLED>n</IVSHMEM_ENABLED>
-        <IVSHMEM_REGION/>
       </IVSHMEM>
     </FEATURES>
     <MEMORY>
       <STACK_SIZE>0x2000</STACK_SIZE>
-      <PLATFORM_RAM_SIZE>0x400000000</PLATFORM_RAM_SIZE>
     </MEMORY>
     <CAPACITIES>
       <MAX_VM_NUM>16</MAX_VM_NUM>
@@ -55,13 +51,25 @@
     <MISC_CFG>
       <GPU_SBDF>0x00000010</GPU_SBDF>
     </MISC_CFG>
+    <vuart_connections>
+      <vuart_connection>
+        <name>vUART connection 1</name>
+        <type>legacy</type>
+        <endpoint>
+          <vm_name>SAFETY_VM0</vm_name>
+          <io_port>0x2F8</io_port>
+        </endpoint>
+        <endpoint>
+          <vm_name>ACRN_Service_VM</vm_name>
+          <io_port>0x2F8</io_port>
+        </endpoint>
+      </vuart_connection>
+    </vuart_connections>
   </hv>
   <vm id="0">
-    <vm_type>SAFETY_VM</vm_type>
+    <vm_type>STANDARD_VM</vm_type>
+    <load_order>PRE_LAUNCHED_VM</load_order>
     <name>SAFETY_VM0</name>
-    <guest_flags>
-      <guest_flag>0</guest_flag>
-    </guest_flags>
     <cpu_affinity>
       <pcpu_id>3</pcpu_id>
     </cpu_affinity>
@@ -91,21 +99,9 @@
       <base>COM1_BASE</base>
       <irq>COM1_IRQ</irq>
     </legacy_vuart>
-    <legacy_vuart id="1">
-      <type>VUART_LEGACY_PIO</type>
-      <base>COM2_BASE</base>
-      <irq>COM2_IRQ</irq>
-      <target_vm_id>1</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </legacy_vuart>
     <console_vuart id="0">
       <base>INVALID_PCI_BASE</base>
     </console_vuart>
-    <communication_vuart id="1">
-      <base>INVALID_PCI_BASE</base>
-      <target_vm_id>1</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </communication_vuart>
     <pci_devs>
       <pci_dev/>
     </pci_devs>
@@ -115,11 +111,9 @@
     </mmio_resources>
   </vm>
   <vm id="1">
-    <vm_type>SERVICE_VM</vm_type>
+    <vm_type>STANDARD_VM</vm_type>
+    <load_order>SERVICE_VM</load_order>
     <name>ACRN_Service_VM</name>
-    <guest_flags>
-      <guest_flag>0</guest_flag>
-    </guest_flags>
     <cpu_affinity>
       <pcpu_id>0</pcpu_id>
       <pcpu_id>1</pcpu_id>
@@ -138,7 +132,7 @@
       <kern_type>KERNEL_BZIMAGE</kern_type>
       <kern_mod>Linux_bzImage</kern_mod>
       <ramdisk_mod/>
-      <bootargs>root=/dev/nvme0n1p3 rw rootwait console=tty0 consoleblank=0 no_timer_check quiet loglevel=3
+      <bootargs>root=/dev/nvme0n1p3 rw rootwait console=tty0 console=ttyS0 consoleblank=0 no_timer_check quiet loglevel=3
         i915.nuclear_pageflip=1 swiotlb=131072</bootargs>
     </os_config>
     <legacy_vuart id="0">
@@ -146,31 +140,17 @@
       <base>SERVICE_VM_COM1_BASE</base>
       <irq>SERVICE_VM_COM1_IRQ</irq>
     </legacy_vuart>
-    <legacy_vuart id="1">
-      <type>VUART_LEGACY_PIO</type>
-      <base>SERVICE_VM_COM2_BASE</base>
-      <irq>SERVICE_VM_COM2_IRQ</irq>
-      <target_vm_id>0</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </legacy_vuart>
     <console_vuart id="0">
       <base>INVALID_PCI_BASE</base>
     </console_vuart>
-    <communication_vuart id="1">
-      <base>INVALID_PCI_BASE</base>
-      <target_vm_id>1</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </communication_vuart>
     <pci_devs>
       <pci_dev/>
     </pci_devs>
   </vm>
   <vm id="2">
-    <vm_type>POST_STD_VM</vm_type>
+    <vm_type>STANDARD_VM</vm_type>
+    <load_order>POST_LAUNCHED_VM</load_order>
     <name>POST_STD_VM1</name>
-    <guest_flags>
-      <guest_flag>0</guest_flag>
-    </guest_flags>
     <cpu_affinity>
       <pcpu_id>2</pcpu_id>
     </cpu_affinity>
@@ -186,29 +166,15 @@
       <base>COM1_BASE</base>
       <irq>COM1_IRQ</irq>
     </legacy_vuart>
-    <legacy_vuart id="1">
-      <type>VUART_LEGACY_PIO</type>
-      <base>INVALID_COM_BASE</base>
-      <irq>COM2_IRQ</irq>
-      <target_vm_id>0</target_vm_id>
-      <target_uart_id>0</target_uart_id>
-    </legacy_vuart>
     <console_vuart id="0">
       <base>INVALID_PCI_BASE</base>
     </console_vuart>
-    <communication_vuart id="1">
-      <base>INVALID_PCI_BASE</base>
-      <target_vm_id>1</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </communication_vuart>
     <PTM>n</PTM>
   </vm>
   <vm id="3">
-    <vm_type>POST_STD_VM</vm_type>
+    <vm_type>STANDARD_VM</vm_type>
+    <load_order>POST_LAUNCHED_VM</load_order>
     <name>POST_STD_VM2</name>
-    <guest_flags>
-      <guest_flag>0</guest_flag>
-    </guest_flags>
     <cpu_affinity>
       <pcpu_id>2</pcpu_id>
     </cpu_affinity>
@@ -224,21 +190,9 @@
       <base>COM1_BASE</base>
       <irq>COM1_IRQ</irq>
     </legacy_vuart>
-    <legacy_vuart id="1">
-      <type>VUART_LEGACY_PIO</type>
-      <base>INVALID_COM_BASE</base>
-      <irq>COM2_IRQ</irq>
-      <target_vm_id>0</target_vm_id>
-      <target_uart_id>0</target_uart_id>
-    </legacy_vuart>
     <console_vuart id="0">
       <base>INVALID_PCI_BASE</base>
     </console_vuart>
-    <communication_vuart id="1">
-      <base>INVALID_PCI_BASE</base>
-      <target_vm_id>1</target_vm_id>
-      <target_uart_id>1</target_uart_id>
-    </communication_vuart>
     <PTM>n</PTM>
   </vm>
 </acrn-config>

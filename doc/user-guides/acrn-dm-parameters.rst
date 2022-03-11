@@ -218,16 +218,20 @@ Here are descriptions for each of these ``acrn-dm`` command line parameters:
 
 ----
 
-``--acpidev_pt <HID>``
+``--acpidev_pt <HID>[,<UID>]``
    This option is to enable ACPI device passthrough support. The ``HID`` is a
    mandatory parameter for this option which is the Hardware ID of the ACPI
    device.
 
+   The ``UID`` is an option and used to specify a particular instance of the
+   HID device, the default is 00.
+
    Example::
 
-      --acpidev_pt MSFT0101
+      --acpidev_pt MSFT0101,00
 
-   To pass through a TPM (which HID is MSFT0101) ACPI device to a User VM.
+   To pass through a TPM (which HID is MSFT0101 and UID is 00) ACPI device to
+   a User VM.
 
 ----
 
@@ -350,7 +354,7 @@ arguments used for configuration.  Here is a table describing these emulated dev
      - Inter-VM shared memory (ivshmem) virtualized PCI device used specifically
        for shared memory between VMs. Parameters should be added with the format
        ``ivshmem,<shm_name>,<shm_size>``. ``<shm-name>`` specifies a shared memory
-       name, and must be listed in :option:`hv.FEATURES.IVSHMEM.IVSHMEM_REGION`
+       name, and must be listed in ``hv.FEATURES.IVSHMEM.IVSHMEM_REGION``
        as configured using the ACRN configurator tool UI, and needs to start
        with a ``dm:/`` prefix.
 

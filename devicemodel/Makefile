@@ -81,6 +81,7 @@ LIBS += -lpciaccess
 LIBS += -luuid
 LIBS += -lusb-1.0
 LIBS += -lacrn-mngr
+LIBS += -lcjson
 
 # lib
 SRCS += lib/dm_string.c
@@ -108,6 +109,7 @@ SRCS += hw/platform/pty_vuart.c
 SRCS += hw/platform/acpi/acpi.c
 SRCS += hw/platform/vssram/vssram.c
 SRCS += hw/platform/acpi/acpi_pm.c
+SRCS += hw/platform/acpi/acpi_parser.c
 SRCS += hw/platform/rpmb/rpmb_sim.c
 SRCS += hw/platform/rpmb/rpmb_backend.c
 SRCS += hw/platform/rpmb/att_keybox.c
@@ -169,6 +171,10 @@ SRCS += core/main.c
 SRCS += core/hugetlb.c
 SRCS += core/vrpmb.c
 SRCS += core/timer.c
+SRCS += core/cmd_monitor/socket.c
+SRCS += core/cmd_monitor/command.c
+SRCS += core/cmd_monitor/command_handler.c
+SRCS += core/cmd_monitor/cmd_monitor.c
 
 # arch
 SRCS += arch/x86/pm.c

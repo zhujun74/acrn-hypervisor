@@ -236,6 +236,38 @@ static int tcc_driver_init_buffer_fd(void)
 }
 
 /**
+ * @brief  Disable CPU affinity check in TCC driver.
+ *
+ * @param void.
+ *
+ * @return 0 on success and -1 on fail.
+ */
+static int disable_tcc_strict_affinity_check(void)
+{
+#define AFFINITY_CHECK_PARAM "/sys/module/tcc_buffer/parameters/strict_affinity_check"
+	int fd, ret = 0U;
+
+	fd = open(AFFINITY_CHECK_PARAM, O_WRONLY);
+	if (fd < 0) {
+		pr_err("%s: Failed to open %s: %s(%i), please check its availability.\n",
+			__func__, AFFINITY_CHECK_PARAM, strerror(errno), errno);
+		return -1;
+	}
+
+	/* Value of 0 means turning off CPU affinity check. */
+	if (write(fd, "0", 1) < 0) {
+		pr_err("%s: Failed to turn off affinity checking in the TCC driver"
+			"(could not write to: %s: %s(%i)", __func__,
+			AFFINITY_CHECK_PARAM, strerror(errno), errno);
+		ret = -1;
+	}
+
+	close(fd);
+	return ret;
+}
+
+
+/**
  * @brief  Get count of TCC software SRAM regions.
  *
  * @param void.
@@ -422,16 +454,22 @@ static int vssram_ept_map_buffer(struct vmctx *ctx, struct vssram_buf *buf_desc)
 		.len = 0,
 		.attr = ACRN_MEM_ACCESS_RWX
 	};
-
+	int error;
 	memmap.vma_base = buf_desc->vma_base;
 	memmap.user_vm_pa = buf_desc->gpa_base;
 	memmap.len = buf_desc->size;
-	ioctl(ctx->fd, ACRN_IOCTL_UNSET_MEMSEG, &memmap);
-
-	return ioctl(ctx->fd, ACRN_IOCTL_SET_MEMSEG, &memmap);
+	error = ioctl(ctx->fd, ACRN_IOCTL_UNSET_MEMSEG, &memmap);
+	if (error) {
+		pr_err("ACRN_IOCTL_UNSET_MEMSEG ioctl() returned an error: %s\n", errormsg(errno));
+	}
+	error = ioctl(ctx->fd, ACRN_IOCTL_SET_MEMSEG, &memmap);
+	if (error) {
+		pr_err("ACRN_IOCTL_SET_MEMSEG ioctl() returned an error: %s\n", errormsg(errno));
+	}
+	return error;
 };
 
-static int init_guest_lapicid_tbl(struct acrn_platform_info *platform_info, uint64_t guest_pcpu_bitmask)
+static int init_guest_lapicid_tbl(uint64_t guest_pcpu_bitmask)
 {
 	int pcpu_id = 0, vcpu_id = 0;
 	int vcpu_num = bitmap_weight(guest_pcpu_bitmask);
@@ -441,7 +479,7 @@ static int init_guest_lapicid_tbl(struct acrn_platform_info *platform_info, uint
 		if (pcpu_id < 0)
 			return -1;
 
-		guest_lapicid_tbl[vcpu_id] = lapicid_from_pcpuid(platform_info, pcpu_id);
+		guest_lapicid_tbl[vcpu_id] = lapicid_from_pcpuid(pcpu_id);
 	}
 	return 0;
 }
@@ -1169,42 +1207,16 @@ static void init_vssram_gpa_range(void)
  */
 static int init_guest_cpu_info(struct vmctx *ctx)
 {
-	struct acrn_vm_config_header vm_cfg;
-	uint64_t dm_cpu_bitmask, hv_cpu_bitmask, guest_pcpu_bitmask;
-	struct acrn_platform_info platform_info;
+	uint64_t guest_pcpu_bitmask;
 
-	if (vm_get_config(ctx, &vm_cfg, &platform_info)) {
-		pr_err("%s, get VM configuration fail.\n", __func__);
-		return -1;
-	}
-	assert(platform_info.hw.cpu_num <= ACRN_PLATFORM_LAPIC_IDS_MAX);
-
-	/*
-	 * pCPU bitmask of VM is configured in hypervisor by default but can be
-	 * overwritten by '--cpu_affinity' argument of DM if this bitmask is
-	 * the subset of bitmask configured in hypervisor.
-	 *
-	 * FIXME: The cpu_affinity does not only mean the vcpu's pcpu affinity but
-	 * also indicates the maximum vCPU number of guest. Its name should be renamed
-	 * to pu_bitmask to avoid confusing.
-	 */
-	hv_cpu_bitmask = vm_cfg.cpu_affinity;
-	dm_cpu_bitmask = vm_get_cpu_affinity_dm();
-	if ((dm_cpu_bitmask != 0) && ((dm_cpu_bitmask & ~hv_cpu_bitmask) == 0)) {
-		guest_pcpu_bitmask = dm_cpu_bitmask;
-	} else {
-		guest_pcpu_bitmask = hv_cpu_bitmask;
-	}
-
+	guest_pcpu_bitmask = vm_get_cpu_affinity_dm();
 	if (guest_pcpu_bitmask == 0) {
 		pr_err("%s,Err: Invalid guest_pcpu_bitmask.\n", __func__);
 		return -1;
 	}
+	pr_info("%s, guest_cpu_bitmask: 0x%x\n", __func__, guest_pcpu_bitmask);
 
-	pr_info("%s, dm_cpu_bitmask:0x%x, hv_cpu_bitmask:0x%x, guest_cpu_bitmask: 0x%x\n",
-		__func__, dm_cpu_bitmask, hv_cpu_bitmask, guest_pcpu_bitmask);
-
-	if (init_guest_lapicid_tbl(&platform_info, guest_pcpu_bitmask) < 0) {
+	if (init_guest_lapicid_tbl(guest_pcpu_bitmask) < 0) {
 		pr_err("%s,init guest lapicid table fail.\n", __func__);
 		return -1;
 	}
@@ -1256,6 +1268,20 @@ int init_vssram(struct vmctx *ctx)
 		return -1;
 
 	if (tcc_driver_init_buffer_fd() < 0)
+		return -1;
+
+	/*
+	 * By default, pCPU is allowed to request software SRAM buffer
+	 * from given region in TCC buffer driver only if this pCPU is
+	 * set in the target region's CPU affinity configuration.
+	 *
+	 * This check shall be disabled for software SRAM virtualization
+	 * usage in ACRN service VM, because software SRAM buffers are
+	 * requested by ACRN DM on behalf of user VM, but ACRN DM and
+	 * user VM may run on different CPUs while the target software
+	 * SRAM region may be configured only for pCPUs that user VM runs on.
+	 */
+	if (disable_tcc_strict_affinity_check() < 0)
 		return -1;
 
 	if (vssram_init_buffers() < 0) {

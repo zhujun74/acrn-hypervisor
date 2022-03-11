@@ -41,13 +41,12 @@
     <xsl:choose>
       <xsl:when test="$value != ''">
 	<xsl:value-of select="$value" />
-	<xsl:text>&#xa;</xsl:text>
       </xsl:when>
-      <xsl:when test="($value = '') and ($default != '')">
+      <xsl:when test="$default != ''">
 	<xsl:value-of select="$default" />
-	<xsl:text>&#xa;</xsl:text>
       </xsl:when>
     </xsl:choose>
+    <xsl:value-of select="$newline" />
   </xsl:template>
 
   <xsl:template name="boolean-by-key-value">
@@ -55,11 +54,17 @@
     <xsl:param name="value" />
 
     <xsl:choose>
-      <xsl:when test="($value = 'y') or ($key = 'RELEASE')">
+      <xsl:when test="($value = 'true') or ($value = 'y')">
+	<xsl:call-template name="entry-by-key-value">
+	  <xsl:with-param name="key" select="$key" />
+	  <xsl:with-param name="value" select="'y'" />
+        </xsl:call-template>
+      </xsl:when>
+      <xsl:when test="($key = 'RELEASE')">
 	<xsl:call-template name="entry-by-key-value">
 	  <xsl:with-param name="key" select="$key" />
 	  <xsl:with-param name="value" select="$value" />
-	</xsl:call-template>
+        </xsl:call-template>
       </xsl:when>
       <xsl:otherwise>
 	<xsl:text># CONFIG_</xsl:text>
