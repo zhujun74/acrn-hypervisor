@@ -32,8 +32,12 @@
   <xs:restriction base="xs:string">
     <xs:enumeration value="RTVM" />
     <xs:enumeration value="STANDARD_VM" />
-    <xs:enumeration value="TEE_VM" />
-    <xs:enumeration value="REE_VM" />
+    <xs:enumeration value="TEE_VM">
+      <xs:annotation acrn:views="" />
+    </xs:enumeration>
+    <xs:enumeration value="REE_VM">
+      <xs:annotation acrn:views="" />
+    </xs:enumeration>
   </xs:restriction>
 </xs:simpleType>
 
@@ -66,90 +70,70 @@ CLOSID 0 and the second is mapped to virtual CLOSID 1, etc.</xs:documentation>
 </xs:complexType>
 
 <xs:complexType name="EPCSection">
-  <xs:annotation acrn:configurable="n">
-    <xs:documentation>epc section.</xs:documentation>
-  </xs:annotation>
   <xs:sequence>
     <xs:element name="base" type="HexFormat" default="0">
-      <xs:annotation>
-        <xs:documentation>SGX EPC section base, must be page aligned.</xs:documentation>
+      <xs:annotation acrn:title="Intel Software Guard Extensions (SGX) EPC section base" acrn:applicable-vms="pre-launched">
+        <xs:documentation>Specify the enclave page cache (EPC) section base for Intel Software Guard Extensions (SGX). Must be page aligned.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="size" type="HexFormat" default="0">
-      <xs:annotation>
-        <xs:documentation>SGX EPC section size in Bytes, must be page
-aligned.</xs:documentation>
+      <xs:annotation acrn:title="Intel Software Guard Extensions (SGX) EPC section size (bytes)" acrn:applicable-vms="pre-launched">
+        <xs:documentation>Specify the enclave page cache (EPC) section size in bytes for Intel Software Guard Extensions (SGX). Must be page aligned.</xs:documentation>
       </xs:annotation>
     </xs:element>
   </xs:sequence>
 </xs:complexType>
 
 <xs:complexType name="MemoryInfo">
-  <xs:sequence>
+  <xs:all>
+    <xs:element name="whole" type="xs:integer" default="256">
+      <xs:annotation acrn:title="VM physical memory allocation (MB)" acrn:views="basic" acrn:applicable-vms="post-launched">
+	<xs:documentation>Specify the physical memory allocated to this VM in Megabytes.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
     <xs:element name="start_hpa" type="HexFormat" default="0x100000000">
-      <xs:annotation>
-        <xs:documentation>The starting physical address in host for the
-VM.</xs:documentation>
+      <xs:annotation acrn:views="advanced" acrn:applicable-vms="pre-launched, service-vm">
+        <xs:documentation>The starting physical address in host for the VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="size" type="MemorySizeType" default="0x20000000" minOccurs="0">
-      <xs:annotation>
-        <xs:documentation>The memory size in bytes for the VM. Default
-value is ``0x200000000``.</xs:documentation>
+      <xs:annotation acrn:views="advanced" acrn:applicable-vms="pre-launched, service-vm">
+        <xs:documentation>The memory size in bytes for the VM. Default value is ``0x200000000``.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="start_hpa2" type="HexFormat" default="0x0" minOccurs="0">
-      <xs:annotation acrn:configurable="n">
-        <xs:documentation>Start of second HPA for non-contiguous
-allocations in host for the VM.</xs:documentation>
+      <xs:annotation acrn:views="advanced" acrn:applicable-vms="pre-launched, service-vm">
+        <xs:documentation>Start of second HPA for non-contiguous allocations in host for the VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="size_hpa2" type="MemorySizeType" default="0x0" minOccurs="0">
-      <xs:annotation acrn:configurable="n">
-        <xs:documentation>Memory size of second HPA for non-contiguous
-allocations in Bytes for the VM.</xs:documentation>
+      <xs:annotation acrn:views="advanced" acrn:applicable-vms="pre-launched, service-vm">
+        <xs:documentation>Memory size of second HPA for non-contiguous allocations in Bytes for the VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
-  </xs:sequence>
+  </xs:all>
 </xs:complexType>
 
 <xs:complexType name="OSConfigurations">
-  <xs:sequence>
-    <xs:element name="name">
-        <xs:annotation>
-          <xs:documentation>Specify the OS name of VM.
-Is not referenced by the hypervisor code. </xs:documentation>
-        </xs:annotation>
-        <xs:simpleType>
-        <xs:annotation>
-          <xs:documentation>A string with 1 to 32 characters.</xs:documentation>
-        </xs:annotation>
-        <xs:restriction base="xs:string">
-          <xs:minLength value="1" />
-          <xs:maxLength value="32" />
-        </xs:restriction>
-      </xs:simpleType>
-    </xs:element>
+  <xs:all>
     <xs:element name="kern_type" type="VMKernelType">
-      <xs:annotation>
-        <xs:documentation>Specify the kernel image type so the hypervisor can load it correctly.</xs:documentation>
+      <xs:annotation acrn:title="Kernel image type">
+        <xs:documentation>Select the kernel image type so that the hypervisor can load it correctly.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="kern_mod" type="xs:string">
-      <xs:annotation>
-        <xs:documentation>The tag for the kernel image that acts as a multiboot module; it must
-exactly match the module tag in the GRUB multiboot cmdline.</xs:documentation>
+      <xs:annotation acrn:title="Kernel module tag">
+        <xs:documentation>Specify the tag for the kernel image that is used as a multiboot module. The tag's spelling must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentation>
       </xs:annotation>
     </xs:element>
-    <xs:element name="ramdisk_mod" type="xs:string">
-      <xs:annotation>
-        <xs:documentation>The tag for the ramdisk image, which acts as a multiboot module; it
-must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentation>
+    <xs:element name="ramdisk_mod" type="xs:string" minOccurs="0">
+      <xs:annotation acrn:title="RAMdisk module tag">
+        <xs:documentation>Specify the tag for the RAMdisk image that is used as a multiboot module. The tag's spelling must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentation>
       </xs:annotation>
     </xs:element>
-    <xs:element name="bootargs" type="xs:string">
-      <xs:annotation>
-        <xs:documentation>Configurable boot argument for pre-launched VM of hybrid or hybrid_rt mode.</xs:documentation>
+    <xs:element name="bootargs" type="xs:string" minOccurs="0">
+      <xs:annotation acrn:title="Kernel command-line parameters">
+        <xs:documentation>Specify the command-line parameters that will be used to boot the kernel for this VM. See `Linux documentation &lt;https://www.kernel.org/doc/html/latest/admin-guide/kernel-parameters.html&gt;`__ for a list of parameters.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="kern_load_addr" type="KernLoadAddr" minOccurs="0">
@@ -162,7 +146,7 @@ must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentati
         <xs:documentation>The entry address in host memory for the VM kernel.</xs:documentation>
       </xs:annotation>
     </xs:element>
-  </xs:sequence>
+  </xs:all>
 </xs:complexType>
 
 <xs:simpleType name="VMKernelType">
@@ -174,6 +158,17 @@ must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentati
     <xs:enumeration value="KERNEL_BZIMAGE" />
     <xs:enumeration value="KERNEL_RAWIMAGE" />
     <xs:enumeration value="KERNEL_ELF" />
+  </xs:restriction>
+</xs:simpleType>
+
+<xs:simpleType name="ConsoleVuartConfiguration">
+  <xs:restriction base="xs:string">
+    <xs:enumeration value="None" />
+    <xs:enumeration value="COM Port 1" />
+    <xs:enumeration value="COM Port 2" />
+    <xs:enumeration value="COM Port 3" />
+    <xs:enumeration value="COM Port 4" />
+    <xs:enumeration value="PCI" />
   </xs:restriction>
 </xs:simpleType>
 
@@ -209,165 +204,36 @@ must exactly match the module tag in the GRUB multiboot cmdline.</xs:documentati
   </xs:sequence>
 </xs:complexType>
 
-<xs:simpleType name="LegacyVuartType">
-  <xs:annotation acrn:configurable="n">
-    <xs:documentation>vCOM type</xs:documentation>
-  </xs:annotation>
-  <xs:restriction base="xs:string">
-    <xs:enumeration value="VUART_LEGACY_PIO" />
-    <xs:enumeration value="VUART_PCI" />
-  </xs:restriction>
-</xs:simpleType>
-
-<xs:simpleType name="LegacyVuartBase">
-  <xs:annotation>
-    <xs:documentation>A string with either ``SERVICE_VM_COM1_BASE``,
-``SERVICE_VM_COM2_BASE``, ``SERVICE_VM_COM3_BASE``, ``SERVICE_VM_COM4_BASE``,
-``COM1_BASE``, ``COM2_BASE``, ``COM3_BASE``, ``COM4_BASE``,
-``CONFIG_COM_BASE``, or indicating it's disabled with ``INVALID_COM_BASE``.</xs:documentation>
-  </xs:annotation>
-  <xs:restriction base="xs:string">
-    <xs:enumeration value="SERVICE_VM_COM1_BASE" />
-    <xs:enumeration value="SERVICE_VM_COM2_BASE" />
-    <xs:enumeration value="SERVICE_VM_COM3_BASE" />
-    <xs:enumeration value="SERVICE_VM_COM4_BASE" />
-    <xs:enumeration value="COM1_BASE" />
-    <xs:enumeration value="COM2_BASE" />
-    <xs:enumeration value="COM3_BASE" />
-    <xs:enumeration value="COM4_BASE" />
-    <xs:enumeration value="CONFIG_COM_BASE" />
-    <xs:enumeration value="INVALID_COM_BASE" />
-  </xs:restriction>
-</xs:simpleType>
-
-<xs:simpleType name="LegacyVuartIrq">
-  <xs:annotation acrn:configurable="n">
-    <xs:documentation>A string with either ``SERVICE_VM_COM1_IRQ``,
-``SERVICE_VM_COM2_IRQ``, ``SERVICE_VM_COM3_IRQ``, ``SERVICE_VM_COM4_IRQ``,
-``COM1_IRQ``, ``COM2_IRQ``, ``COM3_IRQ``, ``COM4_IRQ``,
-``CONFIG_COM_IRQ`` or ``0``. If ``0`` is set, the vuart will
-use polling mode.</xs:documentation>
-  </xs:annotation>
-  <xs:restriction base="xs:string">
-    <xs:enumeration value="SERVICE_VM_COM1_IRQ" />
-    <xs:enumeration value="SERVICE_VM_COM2_IRQ" />
-    <xs:enumeration value="SERVICE_VM_COM3_IRQ" />
-    <xs:enumeration value="SERVICE_VM_COM4_IRQ" />
-    <xs:enumeration value="COM1_IRQ" />
-    <xs:enumeration value="COM2_IRQ" />
-    <xs:enumeration value="COM3_IRQ" />
-    <xs:enumeration value="COM4_IRQ" />
-    <xs:enumeration value="CONFIG_COM_IRQ" />
-    <xs:enumeration value="0" />
-  </xs:restriction>
-</xs:simpleType>
-
-<xs:complexType name="LegacyVuartConfiguration">
-  <xs:sequence>
-    <xs:element name="type" type="LegacyVuartType" default="VUART_LEGACY_PIO">
-      <xs:annotation>
-        <xs:documentation>vUART (COM) type; only legacy PIO mode is
-supported.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="base" type="LegacyVuartBase">
-      <xs:annotation>
-        <xs:documentation>vUART (COM) enabling switch. Enable by exposing its COM_BASE
-(e.b., ``SERVICE_VM_COM1_BASE`` for Service VM); disable by returning
-``INVALID_COM_BASE``.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="irq" type="LegacyVuartIrq">
-      <xs:annotation>
-        <xs:documentation>vCOM IRQ.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="target_vm_id" type="xs:integer" default="1" minOccurs="0">
-      <xs:annotation>
-        <xs:documentation>COM2 is used for VM communications. When it is enabled, specify which
-target VM the current VM connects to.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="target_uart_id" type="xs:integer" default="1" minOccurs="0">
-      <xs:annotation>
-        <xs:documentation>Target vUART ID to which the vCOM2 connects.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-  </xs:sequence>
-  <xs:attribute name="id" type="xs:integer" use="required"/>
-</xs:complexType>
-
-<xs:simpleType name="PCIVuartBase">
-  <xs:annotation>
-    <xs:documentation>A string with ``PCI_VUART`` or indicating its
-disabled using ``INVALID_PCI_BASE``.</xs:documentation>
-  </xs:annotation>
-  <xs:restriction base="xs:string">
-    <xs:enumeration value="PCI_VUART" />
-    <xs:enumeration value="INVALID_PCI_BASE" />
-  </xs:restriction>
-</xs:simpleType>
-
-<xs:complexType name="ConsoleVuartConfiguration">
-  <xs:sequence>
-    <xs:element name="base" type="PCIVuartBase" default="INVALID_PCI_BASE">
-      <xs:annotation>
-        <xs:documentation>Console vUART (A.K.A PCI based vUART) enabling switch.
-Enable by specifying PCI_VUART; disable by specifying
-``INVALID_PCI_BASE``.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-  </xs:sequence>
-  <xs:attribute name="id" type="xs:integer" use="required" />
-</xs:complexType>
-
-<xs:complexType name="CommunicationVuartConfiguration">
-  <xs:sequence>
-    <xs:element name="base" type="PCIVuartBase" default="INVALID_PCI_BASE">
-      <xs:annotation>
-        <xs:documentation>Communication vUART (A.K.A PCI based vUART) enabling switch.
-Enable by specifying PCI_VUART; disable by specifying
-``INVALID_PCI_BASE``.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="target_vm_id" type="xs:integer">
-      <xs:annotation>
-        <xs:documentation>specify which target VM the current VM connects to.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-    <xs:element name="target_uart_id" type="xs:integer">
-      <xs:annotation>
-        <xs:documentation>Target vUART ID to which the ``communication_vuart`` connects.</xs:documentation>
-      </xs:annotation>
-    </xs:element>
-  </xs:sequence>
-  <xs:attribute name="id" type="xs:integer" use="required" />
-</xs:complexType>
-
 <xs:complexType name="MMIOResourcesConfiguration">
-  <xs:sequence>
+  <xs:all>
     <xs:element name="TPM2" type="Boolean" default="n" minOccurs="0">
-      <xs:annotation>
-        <xs:documentation>Specify TPM2 device to passthrough.</xs:documentation>
+      <xs:annotation acrn:title="Trusted platform module (TPM2) passthrough" acrn:applicable-vms="pre-launched, post-launched">
+        <xs:documentation>Pass through the trusted platform module (TPM2) device to this VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="p2sb" type="Boolean" default="n" minOccurs="0">
-      <xs:annotation>
-        <xs:documentation>Expose the P2SB (Primary-to-Sideband) bridge
-to the pre-launched VM.</xs:documentation>
+      <xs:annotation acrn:title="Primary-to-Sideband bridge passthrough" acrn:applicable-vms="pre-launched">
+        <xs:documentation>Pass through the Primary-to-Sideband (P2SB) bridge register access BAR to this VM.</xs:documentation>
       </xs:annotation>
     </xs:element>
-  </xs:sequence>
+  </xs:all>
 </xs:complexType>
 
 <xs:complexType name="PCIDevsConfiguration">
   <xs:sequence>
-    <xs:element name="pci_dev" type="xs:string" maxOccurs="unbounded">
-      <xs:annotation>
-        <xs:documentation>A passthrough PCI device.</xs:documentation>
+    <xs:element name="pci_dev" type="xs:string" minOccurs="0" maxOccurs="unbounded">
+      <xs:annotation acrn:title="PCI device assignment">
+        <xs:documentation>Select the PCI devices you want to assign to this virtual machine.</xs:documentation>
       </xs:annotation>
     </xs:element>
   </xs:sequence>
 </xs:complexType>
+
+<xs:simpleType name="OSType">
+  <xs:restriction base="xs:string">
+    <xs:enumeration value="Non-Windows OS" />
+    <xs:enumeration value="Windows OS" />
+  </xs:restriction>
+</xs:simpleType>
 
 </xs:schema>

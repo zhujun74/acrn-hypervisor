@@ -92,7 +92,11 @@ ifdef RELEASE
     ifneq ($(RELEASE),$(CONFIG_RELEASE))
       $$(warning The command line sets RELEASE to be '$(RELEASE)', but an existing build is configured with '$(CONFIG_RELEASE)')
       $$(warning The configuration will be modified for RELEASE=$(RELEASE))
-      $$(shell sed -i "s@\(<RELEASE.*>\)[yn]\(</RELEASE>\)@\1$(RELEASE)\2@g" $(HV_SCENARIO_XML))
+      ifeq ($(RELEASE),y)
+        $$(shell sed -i "s@\(<BUILD_TYPE.*>\).*\(</BUILD_TYPE>\)@\1release\2@g" $(HV_SCENARIO_XML))
+      else
+        $$(shell sed -i "s@\(<BUILD_TYPE.*>\).*\(</BUILD_TYPE>\)@\1debug\2@g" $(HV_SCENARIO_XML))
+      endif
     endif
   endif
 else
@@ -111,7 +115,6 @@ HV_UNIFIED_XML_IN := $(BASEDIR)/scripts/makefile/unified.xml.in
 HV_PREDEFINED_DATA_DIR := $(realpath $(BASEDIR)/../misc/config_tools/data)
 HV_CONFIG_TOOL_DIR := $(realpath $(BASEDIR)/../misc/config_tools)
 HV_CONFIG_XFORM_DIR := $(HV_CONFIG_TOOL_DIR)/xforms
-HV_SCENARIO_XSD := $(HV_CONFIG_TOOL_DIR)/schema/config.xsd
 
 # Paths to the outputs:
 HV_CONFIG_DIR := $(HV_OBJDIR)/configs
@@ -200,7 +203,7 @@ $(HV_SCENARIO_XML):
 	  if [ -f $(SCENARIO_FILE) ]; then \
 	    echo "Scenario XML is being fetched from $(realpath $(SCENARIO_FILE))"; \
 	    mkdir -p $(dir $(HV_SCENARIO_XML)); \
-	    python3 $(HV_CONFIG_TOOL_DIR)/scenario_config/default_populator.py $(HV_SCENARIO_XSD) $(SCENARIO_FILE) $(HV_SCENARIO_XML); \
+	    python3 $(HV_CONFIG_TOOL_DIR)/scenario_config/default_populator.py $(SCENARIO_FILE) $(HV_SCENARIO_XML); \
 	  else \
 	    echo "No pre-defined scenario available at $(SCENARIO_FILE)"; \
 	    echo "Try setting another predefined BOARD or SCENARIO or specifying a scenario XML file"; \

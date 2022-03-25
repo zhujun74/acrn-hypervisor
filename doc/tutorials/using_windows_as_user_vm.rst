@@ -62,7 +62,7 @@ Download Win10 Image and Drivers
    - Check **I accept the terms in the license agreement**. Click **Continue**.
    - From the list, right check the item labeled **Oracle VirtIO Drivers
      Version for Microsoft Windows 1.1.x, yy MB**, and then **Save link as
-     ...**.  Currently, it is named ``V982789-01.zip``.
+     ...**. It is named ``V982789-01.zip``.
    - Click **Download**. When the download is complete, unzip the file. You
      will see an ISO named ``winvirtio.iso``.
 
@@ -105,7 +105,7 @@ Prepare the Script to Create an Image
    mem_size=4096M
    acrn-dm -m $mem_size -s 0:0,hostbridge -s 1:0,lpc -l com1,stdio \
      -s 2,passthru,0/2/0 \
-     -s 8,virtio-net,tap0 \
+     -s 8,virtio-net,tap=tap0 \
      -s 4,virtio-blk,/home/acrn/work/win10-ltsc.img
      -s 5,ahci,cd:/home/acrn/work/Windows10.iso \
      -s 6,ahci,cd:/home/acrn/work/winvirtio.iso \
@@ -266,7 +266,7 @@ Explanation for acrn-dm Popular Command Lines
   This is GVT-d to passthrough the VGA controller to Windows.
   You may need to change 0/2/0 to match the bdf of the VGA controller on your platform.
 
-* ``-s 8,virtio-net,tap0``:
+* ``-s 8,virtio-net,tap=tap0``:
   This is for the network virtualization.
 
 * ``-s 3,virtio-input,/dev/input/event4``:
