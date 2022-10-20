@@ -52,7 +52,7 @@ function unbind_device() {
 function create_tap() {
     # create a unique tap device for each VM
     tap=$1
-    tap_exist=$(ip a | grep "$tap" | awk '{print $1}')
+    tap_exist=$(ip a show dev $tap)
     if [ "$tap_exist"x != "x" ]; then
         echo "$tap TAP device already available, reusing it."
     else
@@ -87,8 +87,8 @@ function unmount_partition() {
 # Generators of device model parameters
 
 function add_cpus() {
-    # Each parameter of this function is considered the processor ID (as is reported in /proc/cpuinfo) of a CPU assigned
-    # to a post-launched RTVM.
+    # Each parameter of this function is considered the apicid of processor (as is reported in /proc/cpuinfo) of
+    # a CPU assigned to a post-launched RTVM.
 
     if [ "${vm_type}" = "RTVM" ] || [ "${scheduler}" = "SCHED_NOOP" ]; then
         offline_cpus $*
@@ -129,8 +129,51 @@ function add_virtual_device() {
         # Create the tap device
         if [[ ${options} =~ tap=([^,]+) ]]; then
             tap_conf="${BASH_REMATCH[1]}"
-            create_tap "${tap_conf}" >> /dev/stderr
+            create_tap "${tap_conf}" >&2
         fi
+    fi
+
+    if [ "${kind}" = "virtio-input" ]; then
+        options=$*
+        if [[ "${options}" =~ id:([a-zA-Z0-9_\-]*) ]]; then
+            unique_identifier="${BASH_REMATCH[1]}"
+            options=${options/",id:${unique_identifier}"/''}
+        fi
+
+        if [[ "${options}" =~ (Device name: )(.*),( Device physical path: )(.*) ]]; then
+            device_name="${BASH_REMATCH[2]}"
+            phys_name="${BASH_REMATCH[4]}"
+            local IFS=$'\n'
+            device_name_paths=$(grep -r "${device_name}" /sys/class/input/event*/device/name)
+            phys_paths=$(grep -r "${phys_name}" /sys/class/input/event*/device/phys)
+        fi
+
+        if [ -n "${device_name_paths}" ] && [ -n "${phys_paths}" ]; then
+            for device_path in ${device_name_paths}; do
+                for phys_path in ${phys_paths}; do
+                    if [ "${device_path%/device*}" = "${phys_path%/device*}" ]; then
+                        event_path=${device_path}
+                        if [[ ${event_path} =~ event([0-9]+) ]]; then
+                            event_num="${BASH_REMATCH[1]}"
+                            options="/dev/input/event${event_num}"
+                            break
+                        fi
+                    fi
+                done
+            done
+        fi
+
+        if [[ ${options} =~ event([0-9]+) ]]; then
+            echo "${options} input device path is available in the service vm." >> /dev/stderr
+        else
+            echo "${options} input device path is not found in the service vm." >> /dev/stderr
+            return
+        fi
+
+        if [ -n "${options}" ] && [ -n "${unique_identifier}" ]; then
+            options="${options},${unique_identifier}"
+        fi
+
     fi
 
     echo -n "-s ${slot},${kind}"
@@ -144,7 +187,7 @@ function add_passthrough_device() {
     physical_bdf=$2
     options=$3
 
-    unbind_device $physical_bdf
+    unbind_device ${physical_bdf%,*}
 
     # bus, device and function as decimal integers
     bus_temp=${physical_bdf#*:};     bus=$((16#${bus_temp%:*}))

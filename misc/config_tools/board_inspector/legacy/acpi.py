@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
+# Copyright (C) 2019-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -439,12 +439,12 @@ def store_cx_data(sysnode1, sysnode2, config):
 
             if idle_driver.find("acpi_idle") == -1:
                 logging.info("Failed to collect processor power states because the current CPU idle driver " \
-                "does not expose C-state data. If you need ACPI C-states in post-launched VMs, append 'idle=nomwait' " \
-                "to the kernel command line in GRUB config file.")
+                "does not expose C-state data. If you need ACPI C-states in post-launched VMs, append " \
+                "'intel_idle.max_cstate=0' to the kernel command line in GRUB config file.")
                 if idle_driver.find("intel_idle") == 0:
                     logging.info("Failed to collect processor power states because the current CPU idle driver " \
-                    "does not expose C-state data. If you need ACPI C-states in post-launched VMs, append 'idle=nomwait' " \
-                    "to the kernel command line in GRUB config file.")
+                    "does not expose C-state data. If you need ACPI C-states in post-launched VMs, append " \
+                    "'intel_idle.max_cstate=0' to the kernel command line in GRUB config file.")
                 else:
                     logging.info("Failed to collect processor power states because the platform does not provide " \
                     "C-state data. If you need ACPI C-states in post-launched VMs, enable C-state support in BIOS.")
@@ -656,12 +656,3 @@ def generate_info(board_file):
     # Generate board info
     with open(board_file, 'a+') as config:
         gen_acpi_info(config)
-
-    # get the PTCT/RTCT table from native environment
-    out_dir = os.path.dirname(board_file)
-    if os.path.isfile(SYS_PATH[1] + 'PTCT'):
-        shutil.copy(SYS_PATH[1] + 'PTCT', out_dir if out_dir != "" else "./")
-        logging.info("PTCT table has been saved to {} successfully!".format(os.path.join(out_dir, 'PTCT')))
-    if os.path.isfile(SYS_PATH[1] + 'RTCT'):
-        shutil.copy(SYS_PATH[1] + 'RTCT', out_dir if out_dir != "" else "./")
-        logging.info("RTCT table has been saved to {} successfully!".format(os.path.join(out_dir, 'RTCT')))

@@ -1,5 +1,5 @@
 /*
- * Copyright (C)2021 Intel Corporation
+ * Copyright (C)2021-2022 Intel Corporation.
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #ifndef _UART_H_
@@ -15,7 +15,7 @@
 
 #define SECOND_TO_US 1000000
 #define WAIT_RECV (SECOND_TO_US>>2)
-#define RETRY_RECV_TIMES 20U
+#define RETRY_RECV_TIMES 100U
 
 struct uart_dev {
 	char tty_path[TTY_PATH_MAX]; /**< UART device name */

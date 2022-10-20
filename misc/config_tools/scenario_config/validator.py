@@ -71,7 +71,7 @@ class ScenarioValidator:
     def __init__(self, schema_etree, datachecks_etree):
         """Initialize the validator with preprocessed schemas in ElementTree."""
         self.schema = xmlschema.XMLSchema11(schema_etree)
-        self.datachecks = xmlschema.XMLSchema11(datachecks_etree)
+        self.datachecks = xmlschema.XMLSchema11(datachecks_etree) if datachecks_etree else None
 
     def check_syntax(self, scenario_etree):
         errors = []
@@ -88,20 +88,21 @@ class ScenarioValidator:
     def check_semantics(self, board_etree, scenario_etree):
         errors = []
 
-        unified_node = copy(scenario_etree.getroot())
-        parent_map = {c : p for p in unified_node.iter() for c in p}
-        unified_node.extend(board_etree.getroot())
-        it = self.datachecks.iter_errors(unified_node)
-        for error in it:
-            e = self.format_error(unified_node, parent_map, error)
-            e.log()
-            errors.append(e)
+        if self.datachecks:
+            unified_node = copy(scenario_etree.getroot())
+            parent_map = {c : p for p in unified_node.iter() for c in p}
+            unified_node.extend(board_etree.getroot())
+            it = self.datachecks.iter_errors(unified_node)
+            for error in it:
+                e = self.format_error(unified_node, parent_map, error)
+                e.log()
+                errors.append(e)
 
         return errors
 
     @staticmethod
     def format_paths(unified_node, parent_map, report_on, variables):
-        elems = elementpath.select(unified_node, report_on, variables = variables)
+        elems = elementpath.select(unified_node, report_on, variables = variables, parser = elementpath.XPath2Parser)
         paths = []
         for elem in elems:
             path = []
@@ -156,7 +157,7 @@ class ScenarioValidator:
         expr_regex = re.compile("{[^{}]*}")
         exprs = set(expr_regex.findall(description))
         for expr in exprs:
-            result = elementpath.select(unified_node, expr.strip("{}"), variables = variables)
+            result = elementpath.select(unified_node, expr.strip("{}"), variables = variables, parser = elementpath.XPath2Parser)
             if isinstance(result, list):
                 if len(result) == 1:
                     value = format_node(result[0])
@@ -190,11 +191,14 @@ class ValidatorConstructionByFileStage(PipelineStage):
         obj.set("validator", validator)
 
 class SyntacticValidationStage(PipelineStage):
-    uses = {"validator", "scenario_etree"}
     provides = {"syntactic_errors"}
 
+    def __init__(self, etree_tag = "scenario"):
+        self.etree_tag = f"{etree_tag}_etree"
+        self.uses = {"validator", self.etree_tag}
+
     def run(self, obj):
-        errors = obj.get("validator").check_syntax(obj.get("scenario_etree"))
+        errors = obj.get("validator").check_syntax(obj.get(self.etree_tag))
         obj.set("syntactic_errors", errors)
 
 class SemanticValidationStage(PipelineStage):
@@ -258,7 +262,6 @@ def validate_all(validation_pipeline, pipeline_obj, data_dir):
     return nr_all_errors
 
 def main(args):
-    from xml_loader import XMLLoadStage
     from lxml_loader import LXMLLoadStage
 
     validator_construction_pipeline = PipelineEngine(["schema_path", "datachecks_path"])
@@ -271,8 +274,8 @@ def main(args):
 
     validation_pipeline = PipelineEngine(["board_path", "scenario_path", "schema_etree", "validator"])
     validation_pipeline.add_stages([
-        XMLLoadStage("board"),
-        XMLLoadStage("scenario"),
+        LXMLLoadStage("board"),
+        LXMLLoadStage("scenario"),
         DefaultValuePopulatingStage(),
         SyntacticValidationStage(),
         SemanticValidationStage(),

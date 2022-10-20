@@ -132,6 +132,7 @@
 
 #include "types.h"
 #include "timer.h"
+#include "iothread.h"
 
 /**
  * @brief virtio API
@@ -208,6 +209,7 @@ enum {
 #define	VIRTIO_TYPE_COREU	0xFFF8
 #define	VIRTIO_TYPE_GPIO	0xFFF7
 #define	VIRTIO_TYPE_I2C		0xFFF6
+#define	VIRTIO_TYPE_GPU		0x1100
 
 /*
  * PCI vendor/device IDs
@@ -219,6 +221,9 @@ enum {
 #define	VIRTIO_DEV_BLOCK	0x1001
 #define	VIRTIO_DEV_CONSOLE	0x1003
 #define	VIRTIO_DEV_RANDOM	0x1005
+#define	VIRTIO_DEV_GPU		0x1050
+#define	VIRTIO_DEV_VSOCK	0x1053
+#define VIRTIO_DEV_I2C		0x1062
 
 /*
  * ACRN virtio device IDs
@@ -232,7 +237,6 @@ enum {
 #define	VIRTIO_DEV_HDCP		0x8607
 #define	VIRTIO_DEV_COREU	0x8608
 #define	VIRTIO_DEV_GPIO		0x8609
-#define VIRTIO_DEV_I2C		0x860a
 
 /*
  * VIRTIO_CONFIG_S_NEEDS_RESET is not defined
@@ -342,6 +346,7 @@ struct virtio_vq_info;
 struct virtio_base {
 	struct virtio_ops *vops;	/**< virtio operations */
 	int	flags;			/**< VIRTIO_* flags from above */
+	bool	iothread;
 	pthread_mutex_t *mtx;		/**< POSIX mutex, if any */
 	struct pci_vdev *dev;		/**< PCI device instance */
 	uint64_t negotiated_caps;	/**< negotiated capabilities */
@@ -417,6 +422,15 @@ struct virtio_ops {
  * (but more easily) computable, and this time we'll compute them:
  * they're just XX_ring[N].
  */
+struct virtio_iothread {
+	struct virtio_base *base;
+	int idx;
+	int kick_fd;
+	bool	ioevent_started;
+	struct iothread_mevent iomvt;
+	void (*iothread_run)(void *, struct virtio_vq_info *);
+};
+
 struct virtio_vq_info {
 	uint16_t qsize;		/**< size of this queue (a power of 2) */
 	void	(*notify)(void *, struct virtio_vq_info *);
@@ -432,6 +446,7 @@ struct virtio_vq_info {
 	uint16_t msix_idx;	/**< MSI-X index, or VIRTIO_MSI_NO_VECTOR */
 
 	uint32_t pfn;		/**< PFN of virt queue (not shifted!) */
+	struct virtio_iothread viothrd;
 
 	volatile struct vring_desc *desc;
 				/**< descriptor array */
@@ -743,5 +758,23 @@ int virtio_set_modern_bar(struct virtio_base *base, bool use_notify_pio);
 /**
  * @}
  */
+/* FIXME: Fix the assumption about the zero offset in virtio_pci_cap.
+ * Should not export the internal virtio APIs.
+ */
+void virtio_common_cfg_write(struct pci_vdev *dev,
+		uint64_t offset, int size, uint64_t value);
+void virtio_device_cfg_write(struct pci_vdev *dev,
+		uint64_t offset, int size, uint64_t value);
+void virtio_notify_cfg_write(struct pci_vdev *dev,
+		uint64_t offset, int size, uint64_t value);
+uint32_t virtio_common_cfg_read(
+		struct pci_vdev *dev, uint64_t offset, int size);
+uint32_t virtio_isr_cfg_read(
+		struct pci_vdev *dev, uint64_t offset, int size);
+uint32_t virtio_device_cfg_read(
+		struct pci_vdev *dev, uint64_t offset, int size);
+int virtio_set_modern_pio_bar(
+		struct virtio_base *base, int barnum);
 
+int virtio_register_ioeventfd(struct virtio_base *base, int idx, bool is_register);
 #endif	/* _VIRTIO_H_ */

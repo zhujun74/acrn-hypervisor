@@ -1,5 +1,5 @@
 /*
- * Copyright (C)2021 Intel Corporation
+ * Copyright (C)2021-2022 Intel Corporation.
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include <stdio.h>
@@ -26,10 +26,13 @@ bool get_system_shutdown_flag(void)
 }
 
 bool user_vm_reboot_flag;
-bool get_user_vm_reboot_flag(void)
+bool system_reboot_flag;
+bool system_reboot_request_flag;
+bool get_vm_reboot_flag(void)
 {
-	return user_vm_reboot_flag;
+	return user_vm_reboot_flag | system_reboot_flag;
 }
+
 /**
  * @brief check whether all acrn-dm instance have been exit or not
  *
@@ -65,6 +68,23 @@ static bool wait_post_vms_shutdown(void)
 	} while (check_time > 0);
 	return all_done;
 }
+static void start_system_reboot(void)
+{
+	static bool platform_reboot;
+
+	if (is_uart_channel_connection_list_empty(channel) && (!platform_reboot)) {
+		platform_reboot = true;
+		LOG_WRITE("UART connection list is empty, will trigger system reboot\n");
+		close_socket(sock_server);
+		stop_listen_uart_channel_dev(channel);
+		if (wait_post_vms_shutdown()) {
+			LOG_WRITE("Service VM starts to reboot.\n");
+			system_reboot_flag = true;
+		} else {
+			LOG_WRITE("Some User VMs failed to power off, cancelled the platform reboot process.\n");
+		}
+	}
+}
 static void start_system_shutdown(void)
 {
 	static bool platform_shutdown;
@@ -78,7 +98,7 @@ static void start_system_shutdown(void)
 			LOG_WRITE("Service VM starts to power off.\n");
 			system_shutdown_flag = true;
 		} else {
-			LOG_WRITE("Some User VMs failed to power off, cancelled the platform shut down process.\n");
+			LOG_WRITE("Some User VMs failed to power off, cancelled the platform shutdown process.\n");
 		}
 	}
 }
@@ -185,6 +205,12 @@ static int is_allowed_s5_channel_dev(struct life_mngr_config *conf, struct chann
 					TTY_PATH_MAX);
 }
 
+static int is_allowed_sysreboot_channel_dev(struct life_mngr_config *conf, struct channel_dev *c_dev)
+{
+	return strncmp(get_allow_sysreboot_config(conf), get_uart_dev_path(c_dev->uart_device),
+					TTY_PATH_MAX);
+}
+
 /**
  * @brief The handler of sync command of lifecycle manager in service VM
  *
@@ -207,6 +233,35 @@ int sync_cmd_handler(void *arg, int fd)
 	usleep(2 * WAIT_RECV);
 	return 0;
 }
+int req_reboot_handler(void *arg, int fd)
+{
+	int ret;
+	struct channel_dev *c_dev = NULL;
+	struct uart_channel *c = (struct uart_channel *)arg;
+
+	c_dev = find_uart_channel_dev(c, fd);
+	if (c_dev == NULL)
+		return 0;
+
+	if (is_allowed_sysreboot_channel_dev(&life_conf, c_dev)) {
+		LOG_PRINTF("The user VM (%s) is not allowed to trigger system reboot\n",
+			c_dev->name);
+		return 0;
+	}
+	LOG_PRINTF("Receive reboot request from user VM (%s)\n", c_dev->name);
+	ret = send_message_by_uart(c_dev->uart_device, ACK_REQ_SYS_REBOOT,
+								strlen(ACK_REQ_SYS_REBOOT));
+	if (ret < 0)
+		LOG_WRITE("Sending a reboot acknowledgement message to user VM failed.\n");
+	system_reboot_request_flag = true;
+	usleep(SECOND_TO_US);
+	LOG_PRINTF("Send acked shutdown request message to user VM (%s)\n", c_dev->name);
+	start_all_uart_channel_dev_resend(c, POWEROFF_CMD, VM_SHUTDOWN_RETRY_TIMES);
+	notify_all_connected_uart_channel_dev(c, POWEROFF_CMD);
+	usleep(2 * WAIT_RECV);
+	return ret;
+}
+
 /**
  * @brief The handler of system shutdown request command of lifecycle manager in service VM
  *
@@ -233,7 +288,7 @@ int req_shutdown_handler(void *arg, int fd)
 	ret = send_message_by_uart(c_dev->uart_device, ACK_REQ_SYS_SHUTDOWN,
 								strlen(ACK_REQ_SYS_SHUTDOWN));
 	if (ret < 0)
-		LOG_WRITE("Send acked message to user VM fail\n");
+		LOG_WRITE("Sending a shutdown acknowledgement message to user VM failed.\n");
 	usleep(SECOND_TO_US);
 	LOG_PRINTF("Send acked shutdown request message to user VM (%s)\n", c_dev->name);
 	start_all_uart_channel_dev_resend(c, POWEROFF_CMD, VM_SHUTDOWN_RETRY_TIMES);
@@ -261,7 +316,11 @@ int ack_poweroff_handler(void *arg, int fd)
 	stop_uart_channel_dev_resend(c_dev);
 	disconnect_uart_channel_dev(c_dev, c);
 	usleep(WAIT_USER_VM_POWEROFF);
-	start_system_shutdown();
+	if (system_reboot_request_flag) {
+		start_system_reboot();
+	} else {
+		start_system_shutdown();
+	}
 	return 0;
 }
 /**

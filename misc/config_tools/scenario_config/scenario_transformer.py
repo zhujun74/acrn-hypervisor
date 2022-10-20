@@ -18,6 +18,7 @@ class ScenarioTransformer:
 
     def __init__(self, xsd_etree, visit_optional_node=False):
         self.xsd_etree = xsd_etree
+        self.xml_etree = None
 
         self._visit_optional_node = visit_optional_node
 
@@ -67,7 +68,10 @@ class ScenarioTransformer:
                     self.add_and_transform_missing_node(xsd_element_node, xml_node, new_node_index=index)
             else:
                 while len(children) > 0 and children[0][1].tag == element_name:
-                    self.transform_node(xsd_element_node, children.pop(0)[1])
+                    xml_child_node = children.pop(0)[1]
+                    if self.complex_type_of_element(xsd_element_node, xml_child_node) is None and not xml_child_node.text:
+                        self.fill_empty_node(xsd_element_node, xml_node, xml_child_node)
+                    self.transform_node(xsd_element_node, xml_child_node)
 
     def transform_all(self, xsd_all_node, xml_node):
         for xsd_element_node in xsd_all_node.findall("xs:element", namespaces=self.xpath_ns):
@@ -82,6 +86,8 @@ class ScenarioTransformer:
                     self.add_and_transform_missing_node(xsd_element_node, xml_node)
             else:
                 for xml_child_node in xml_children:
+                    if self.complex_type_of_element(xsd_element_node, xml_child_node) is None and not xml_child_node.text:
+                        self.fill_empty_node(xsd_element_node, xml_node, xml_child_node)
                     self.transform_node(xsd_element_node, xml_child_node)
 
     def add_and_transform_missing_node(self, xsd_element_node, xml_parent_node, new_node_index=None):
@@ -91,8 +97,15 @@ class ScenarioTransformer:
     def add_missing_nodes(self, xsd_element_node, xml_parent_node, new_node_index):
         return []
 
+    def fill_empty_node(self, xsd_element_node, xml_parent_node, xml_empty_node):
+        pass
+
     def transform(self, xml_etree):
+        self.xml_etree = xml_etree
+
         xml_root_node = xml_etree.getroot()
         xsd_root_node = self.get_node(self.xsd_etree, f".//xs:element[@name='{xml_root_node.tag}']")
         if xsd_root_node is not None:
             self.transform_node(xsd_root_node, xml_root_node)
+
+        self.xml_etree = None

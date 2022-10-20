@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2021 Intel Corporation.
+# Copyright (C) 2021-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
 
 import sys, os, re
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'library'))
-import common, lib.error, lib.lib
+import common, lib.error, lib.lib, math
 from collections import namedtuple
 
 # VMSIX devices list
@@ -72,14 +72,13 @@ VMSIX_VBAR_SIZE = 4 * SIZE_K
 
 # Constant for VIRT_ACPI_NVS_ADDR
 """
-VIRT_ACPI_NVS_ADDR, PRE_RTVM_SW_SRAM_BASE_GPA and PRE_RTVM_SW_SRAM_MAX_SIZE
+VIRT_ACPI_NVS_ADDR and PRE_RTVM_SW_SRAM_END_GPA
 need to be consistant with the layout of hypervisor\arch\x86\guest\ve820.c
 """
 VIRT_ACPI_NVS_ADDR = 0x7FF00000
 RESERVED_NVS_AREA = 0xB0000
 
-PRE_RTVM_SW_SRAM_BASE_GPA = 0x7F5FB000
-PRE_RTVM_SW_SRAM_MAX_SIZE = 0x800000
+PRE_RTVM_SW_SRAM_END_GPA = (0x7FDFB000 - 1)
 
 class AddrWindow(namedtuple(
         "AddrWindow", [
@@ -110,15 +109,27 @@ class AddrWindow(namedtuple(
             return False
         return True
 
-def insert_vuart_to_dev_dict(scenario_etree, devdict_32bits):
+    def contains(self, other):
+        if not isinstance(other, AddrWindow):
+            raise TypeError('contains() other must be an AddrWindow: {}'.format(type(other)))
+        if other.start >= self.start and other.end <= self.end:
+            return True
+        return False
+
+def insert_vuart_to_dev_dict(scenario_etree, vm_id, devdict_32bits):
+
     console_vuart =  scenario_etree.xpath(f"./console_vuart[base != 'INVALID_PCI_BASE']/@id")
-    communication_vuarts = scenario_etree.xpath(f".//communication_vuart[base != 'INVALID_PCI_BASE']/@id")
     for vuart_id in console_vuart:
         devdict_32bits[(f"{VUART}_{vuart_id}", "bar0")] = PCI_VUART_VBAR0_SIZE
         devdict_32bits[(f"{VUART}_{vuart_id}", "bar1")] = PCI_VUART_VBAR1_SIZE
-    for vuart_id in communication_vuarts:
-        devdict_32bits[(f"{VUART}_{vuart_id}", "bar0")] = PCI_VUART_VBAR0_SIZE
-        devdict_32bits[(f"{VUART}_{vuart_id}", "bar1")] = PCI_VUART_VBAR1_SIZE
+
+    vm_name = common.get_node(f"//vm[@id = '{vm_id}']/name/text()", scenario_etree)
+    communication_vuarts = scenario_etree.xpath(f"//vuart_connection[endpoint/vm_name/text() = '{vm_name}']")
+    for vuart_id, vuart in enumerate(communication_vuarts, start=1):
+        connection_type = common.get_node(f"./type/text()", vuart)
+        if connection_type == "pci":
+            devdict_32bits[(f"{VUART}_{vuart_id}", "bar0")] = PCI_VUART_VBAR0_SIZE
+            devdict_32bits[(f"{VUART}_{vuart_id}", "bar1")] = PCI_VUART_VBAR1_SIZE
 
 def insert_legacy_vuart_to_dev_dict(vm_node, devdict_io_port):
     legacy_vuart =  vm_node.xpath(f".//legacy_vuart[base = 'CONFIG_COM_BASE']/@id")
@@ -219,18 +230,27 @@ def insert_vmsix_to_dev_dict(pt_dev_node, devdict):
             devdict[(f"{dev_name}", f"bar{next_bar_region}")] = VMSIX_VBAR_SIZE
 
 def get_devs_mem_native(board_etree, mems):
-    nodes = board_etree.xpath(f"//resource[@type = 'memory' and @len != '0x0' and @id and @width]")
+    nodes = board_etree.xpath(f"//resource[@type = 'memory' and @len != '0x0' and @id and @width and @min and @max]")
+    secondary_pci_nodes = board_etree.xpath(f"//resource[../bus[@type = 'pci'] and @type = 'memory' and @len != '0x0' and @min and @max]")
+    secondary_pci_windows = [AddrWindow(int(node.get('min'), 16), int(node.get('max'), 16)) for node in secondary_pci_nodes]
     dev_list = []
+
     for node in nodes:
         start = node.get('min')
         end = node.get('max')
-        if start is not None and end is not None:
-            window = AddrWindow(int(start, 16), int(end, 16))
-            for mem in mems:
-                if window.start >= mem.start and window.end <= mem.end:
-                    dev_list.append(window)
-                    break
-    return sorted(dev_list)
+        node_window = AddrWindow(int(start, 16), int(end, 16))
+        if all(not(w.contains(node_window)) for w in secondary_pci_windows):
+            dev_list.append(node_window)
+
+    # check if there is any nested window
+    for i in range(len(secondary_pci_windows)):
+        secondary_pci_window = secondary_pci_windows[i]
+        if all(not(w.contains(secondary_pci_window)) for w in (secondary_pci_windows[:i] + secondary_pci_windows[i + 1:])):
+            dev_list.append(secondary_pci_window)
+
+    # check if all the mmio window of dev_list fall into pci hole
+    return_dev_list = [d for d in dev_list if any(mem.contains(d) for mem in mems)]
+    return sorted(return_dev_list)
 
 def get_devs_io_port_native(board_etree, io_port_range):
     nodes = board_etree.xpath(f"//device/resource[@type = 'io_port' and @len != '0x0' and @id]")
@@ -410,7 +430,7 @@ def allocate_pci_bar(board_etree, scenario_etree, allocation_etree):
 
         devdict_32bits = {}
         devdict_64bits = {}
-        insert_vuart_to_dev_dict(vm_node, devdict_32bits)
+        insert_vuart_to_dev_dict(scenario_etree, vm_id, devdict_32bits)
         insert_ivsheme_to_dev_dict(scenario_etree, devdict_32bits, devdict_64bits, vm_id)
         insert_pt_devs_to_dev_dict(board_etree, vm_node, devdict_32bits, devdict_64bits)
 
@@ -470,6 +490,7 @@ def allocate_io_port(board_etree, scenario_etree, allocation_etree):
 
 def allocate_ssram_region(board_etree, scenario_etree, allocation_etree):
     # Guest physical address of the SW SRAM allocated to a pre-launched VM
+    ssram_area_max_size = 0
     enabled = common.get_node("//SSRAM_ENABLED/text()", scenario_etree)
     if enabled == "y":
         pre_rt_vms = common.get_node("//vm[load_order = 'PRE_LAUNCHED_VM' and vm_type = 'RTVM']", scenario_etree)
@@ -477,15 +498,22 @@ def allocate_ssram_region(board_etree, scenario_etree, allocation_etree):
             vm_id = pre_rt_vms.get("id")
             l3_sw_sram = board_etree.xpath("//cache[@level='3']/capability[@id='Software SRAM']")
             if l3_sw_sram:
-                start = min(map(lambda x: int(x.find("start").text, 16), l3_sw_sram))
-                end = max(map(lambda x: int(x.find("end").text, 16), l3_sw_sram))
+                # Calculate SSRAM area size. Containing all cache parts
+                top = 0
+                base = 0
+                for ssram in board_etree.xpath("//cache/capability[@id='Software SRAM']"):
+                    entry_base = int(common.get_node("./start/text()", ssram), 16)
+                    entry_size = int(common.get_node("./size/text()", ssram))
+                    top = (entry_base + entry_size) if top < (entry_base + entry_size) else top
+                    base = entry_base if base == 0 or entry_base < base else base
+                ssram_area_max_size = math.ceil((top - base)/0x1000) * 0x1000
 
-                allocation_vm_node = common.get_node(f"/acrn-config/vm[@id = '{vm_id}']", allocation_etree)
-                if allocation_vm_node is None:
-                    allocation_vm_node = common.append_node("/acrn-config/vm", None, allocation_etree, id = vm_id)
-                common.append_node("./ssram/start_gpa", hex(PRE_RTVM_SW_SRAM_BASE_GPA), allocation_vm_node)
-                common.append_node("./ssram/end_gpa", hex(PRE_RTVM_SW_SRAM_BASE_GPA + (end - start)), allocation_vm_node)
-                common.append_node("./ssram/max_size", hex(PRE_RTVM_SW_SRAM_MAX_SIZE), allocation_vm_node)
+            allocation_vm_node = common.get_node(f"/acrn-config/vm[@id = '{vm_id}']", allocation_etree)
+            if allocation_vm_node is None:
+                allocation_vm_node = common.append_node("/acrn-config/vm", None, allocation_etree, id = vm_id)
+            common.append_node("./ssram/start_gpa", hex(PRE_RTVM_SW_SRAM_END_GPA - ssram_area_max_size + 1), allocation_vm_node)
+            common.append_node("./ssram/end_gpa", hex(PRE_RTVM_SW_SRAM_END_GPA), allocation_vm_node)
+            common.append_node("./ssram/max_size", str(ssram_area_max_size), allocation_vm_node)
 
 def allocate_log_area(board_etree, scenario_etree, allocation_etree):
     tpm2_enabled = common.get_node(f"//vm[@id = '0']/mmio_resources/TPM2/text()", scenario_etree)
@@ -523,7 +551,10 @@ def pt_dev_io_port_passthrough(board_etree, scenario_etree, allocation_etree):
 ...                                                ...
  |            TPM2 log area at  0x7FFB0000          |
 ...                                                ...
- |            SSRAM area at  0x7F5FB000             |
+ +--------------------------------------------------+ <--End of SSRAM area, at Offset 0x7FDFB000
+ |            SSRAM area                            |
+ +--------------------------------------------------+ <--Start of SSRAM area
+ |                                                  |    (Depends on the host SSRAM area size)
 ...                                                ...
  |                                                  |
  +--------------------------------------------------+ <--Offset 0

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -128,6 +128,7 @@ struct dmar_drhd_rt {
 
 	uint64_t root_table_addr;
 	uint64_t ir_table_addr;
+	/* MAX_IR_ENTRIES is roundup (to power of 2) of CONFIG_MAX_PT_IRQ_ENTRIES. */
 	uint64_t irte_alloc_bitmap[MAX_IR_ENTRIES / 64U];
 	uint64_t irte_reserved_bitmap[MAX_IR_ENTRIES / 64U];
 	uint64_t qi_queue;
@@ -445,7 +446,7 @@ static int32_t dmar_register_hrhd(struct dmar_drhd_rt *dmar_unit)
 	 * register to control remapping hardware. Global Status Register is the corresponding read-only register to
 	 * report remapping hardware status.
 	 */
-	dmar_unit->gcmd = iommu_read32(dmar_unit, DMAR_GSTS_REG);
+	dmar_unit->gcmd = iommu_read32(dmar_unit, DMAR_GSTS_REG) & 0x96FFFFFFU; // Reset the one-shot bits;
 
 	dmar_unit->cap_msagaw = dmar_unit_get_msagw(dmar_unit);
 

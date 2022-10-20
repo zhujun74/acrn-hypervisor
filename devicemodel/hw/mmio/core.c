@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation. All rights reserved.
+ * Copyright (C) 2020-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -115,11 +115,11 @@ int create_pt_acpidev(char *opt)
  *
  * @pre (name != NULL) && (strlen(name) > 0)
  */
-int get_mmio_hpa_resource(char *name, uint64_t *res_start, uint64_t *res_size)
+bool get_mmio_hpa_resource(char *name, uint64_t *res_start, uint64_t *res_size)
 {
 	FILE *fp;
 	uint64_t start, end;
-	int found = false;
+	bool found = false;
 	char line[128];
 	char *cp;
 
@@ -137,6 +137,9 @@ int get_mmio_hpa_resource(char *name, uint64_t *res_start, uint64_t *res_size)
 					pr_err("Please run acrn-dm with superuser privilege\n");
 					break;
 				}
+			} else {
+				pr_err("Parsing /proc/iomem failed\n");
+				break;
 			}
 
 			*res_start = start;

@@ -1,4 +1,4 @@
-# Copyright (C) 2021 Intel Corporation. All rights reserved.
+# Copyright (C) 2021-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -6,12 +6,14 @@
 """Base classes and infrastructure for CPUID and MSR decoding"""
 
 from __future__ import print_function
+import sys
 import subprocess # nosec
 import re
 import functools
 import inspect
 import operator
 import textwrap
+import logging
 from collections import namedtuple
 
 _wrapper = textwrap.TextWrapper(width=78, initial_indent='  ', subsequent_indent='    ')
@@ -135,15 +137,31 @@ class MSR(object):
         return self.value != other.value
 
     @classmethod
-    def rdmsr(cls, cpu_id):
-        r = cls(bits.rdmsr(cpu_id, cls.addr))
+    def rdmsr(cls, cpu_id: int) -> int:
+        try:
+            with open(f'/dev/cpu/{cpu_id}/msr', 'rb', buffering=0) as msr_reader:
+                msr_reader.seek(cls.addr)
+                r = msr_reader.read(8)
+                r = cls(int.from_bytes(r, 'little'))
+        except FileNotFoundError:
+            logging.critical(f"Missing CPU MSR file at /dev/cpu/{cpu_id}/msr. Check the value of CONFIG_X86_MSR " \
+                             "in the kernel config.  Set it to 'Y' and rebuild the kernel. Then rerun the Board Inspector.")
+            sys.exit(1)
+
         r.cpu_id = cpu_id
         return r
 
     def wrmsr(self, cpu_id=None):
         if cpu_id is None:
             cpu_id = self.cpu_id
-        bits.wrmsr(cpu_id, self.addr, self.value)
+        try:
+            with open(f'/dev/cpu/{cpu_id}/msr', 'wb', buffering=0) as msr_reader:
+                msr_reader.seek(self.addr)
+                r = msr_reader.write(int.to_bytes(self.value, 8, 'little'))
+        except FileNotFoundError:
+            logging.critical(f"Missing CPU MSR file at /dev/cpu/{cpu_id}/msr. Check the value of CONFIG_X86_MSR " \
+                             "in the kernel config.  Set it to 'Y' and rebuild the kernel. Then rerun the Board Inspector.")
+            sys.exit(1)
 
     def __str__(self):
         T = type(self)
@@ -187,6 +205,7 @@ class MSR(object):
         return s
 
 class msrfield(property):
+
     def __init__(self, msb, lsb, doc=None):
         self.msb = msb
         self.lsb = lsb

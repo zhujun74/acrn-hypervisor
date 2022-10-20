@@ -34,8 +34,8 @@ The following table shows ACRN-specific command-line options:
        is ``n``.)
 
    * - ``ASL_COMPILER``
-     - Optional. Use an ``iasl`` compiler that is not in the default path
-       (``/usr/sbin``).
+     - Optional. Specify the path to the ``iasl`` compiler on the development machine.
+       (If not provided, the default value is derived from ``which iasl``.)
 
    * - ``O``
      - Optional. Path to the directory where the built files will be stored.
@@ -156,13 +156,13 @@ type of an existing build:
 
 .. code-block:: none
 
-   $ make BOARD=tgl-rvp SCENARIO=hybrid_rt hypervisor
+   $ make BOARD=~/acrn-work/my_board.xml SCENARIO=~/acrn-work/shared.xml hypervisor
    ...
    $ make hvshowconfig
    Build directory: /path/to/acrn-hypervisor/build/hypervisor
    This build directory is configured with the settings below.
-   - BOARD = tgl-rvp
-   - SCENARIO = hybrid_rt
+   - BOARD = my_board
+   - SCENARIO = shared
    - RELEASE = n
 
 Example of ``hvdefconfig`` to generate the configuration files in the
@@ -181,7 +181,7 @@ Thus, there is no need to duplicate ``BOARD`` and ``SCENARIO`` in the second
 ``make`` above.
 
 While the scenario configuration files can be changed manually, we recommend
-you use the :ref:`ACRN configurator tool <acrn_configurator_tool>`, which
+you use the :ref:`ACRN Configurator tool <acrn_configurator_tool>`, which
 provides valid options and descriptions of the configuration entries.
 
 The targets ``hvdiffconfig`` and ``hvapplydiffconfig`` are provided for users

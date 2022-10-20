@@ -1,7 +1,6 @@
 /*-
 * Copyright (c) 2011 NetApp, Inc.
-* Copyright (c) 2018 Intel Corporation
-* All rights reserved.
+* Copyright (c) 2018-2022 Intel Corporation.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions
@@ -193,9 +192,16 @@ static int32_t vpci_mmio_cfg_access(struct io_request *io_req, void *private_dat
 	bdf.value = (uint16_t)((address - pci_mmcofg_base) >> 12U);
 
 	if (mmio->direction == ACRN_IOREQ_DIR_READ) {
-		ret = vpci_read_cfg(vpci, bdf, reg_num, (uint32_t)mmio->size, (uint32_t *)&mmio->value);
+		uint32_t val = ~0U;
+
+		if (pci_is_valid_access(reg_num, (uint32_t)mmio->size)) {
+			ret = vpci_read_cfg(vpci, bdf, reg_num, (uint32_t)mmio->size, &val);
+		}
+		mmio->value = val;
 	} else {
-		ret = vpci_write_cfg(vpci, bdf, reg_num, (uint32_t)mmio->size, (uint32_t)mmio->value);
+		if (pci_is_valid_access(reg_num, (uint32_t)mmio->size)) {
+			ret = vpci_write_cfg(vpci, bdf, reg_num, (uint32_t)mmio->size, (uint32_t)mmio->value);
+		}
 	}
 
 	return ret;
@@ -430,10 +436,15 @@ static const struct cfg_header_perm cfg_hdr_perm = {
 /*
  * @pre offset + bytes < PCI_CFG_HEADER_LENGTH
  */
-static void read_cfg_header(const struct pci_vdev *vdev,
+static int32_t read_cfg_header(const struct pci_vdev *vdev,
 		uint32_t offset, uint32_t bytes, uint32_t *val)
 {
-	if (vbar_access(vdev, offset)) {
+	int32_t ret = 0;
+
+	if ((offset == PCIR_BIOS) && is_quirk_ptdev(vdev)) {
+		/* the access of PCIR_BIOS is emulated for quirk_ptdev */
+		ret = -ENODEV;
+	} else if (vbar_access(vdev, offset)) {
 		/* bar access must be 4 bytes and offset must also be 4 bytes aligned */
 		if ((bytes == 4U) && ((offset & 0x3U) == 0U)) {
 			*val = pci_vdev_read_vcfg(vdev, offset, bytes);
@@ -454,15 +465,21 @@ static void read_cfg_header(const struct pci_vdev *vdev,
 			*val = pci_vdev_read_vcfg(vdev, offset, bytes);
 		}
 	}
+	return ret;
 }
 
 /*
  * @pre offset + bytes < PCI_CFG_HEADER_LENGTH
  */
-static void write_cfg_header(struct pci_vdev *vdev,
+static int32_t write_cfg_header(struct pci_vdev *vdev,
 		uint32_t offset, uint32_t bytes, uint32_t val)
 {
-	if (vbar_access(vdev, offset)) {
+	int32_t ret = 0;
+
+	if ((offset == PCIR_BIOS) && is_quirk_ptdev(vdev)) {
+		/* the access of PCIR_BIOS is emulated for quirk_ptdev */
+		ret = -ENODEV;
+	} else if (vbar_access(vdev, offset)) {
 		/* bar write access must be 4 bytes and offset must also be 4 bytes aligned */
 		if ((bytes == 4U) && ((offset & 0x3U) == 0U)) {
 			vdev_pt_write_vbar(vdev, pci_bar_index(offset), val);
@@ -498,6 +515,7 @@ static void write_cfg_header(struct pci_vdev *vdev,
 		}
 
 	}
+	return ret;
 }
 
 static int32_t write_pt_dev_cfg(struct pci_vdev *vdev, uint32_t offset,
@@ -506,7 +524,7 @@ static int32_t write_pt_dev_cfg(struct pci_vdev *vdev, uint32_t offset,
 	int32_t ret = 0;
 
 	if (cfg_header_access(offset)) {
-		write_cfg_header(vdev, offset, bytes, val);
+		ret = write_cfg_header(vdev, offset, bytes, val);
 	} else if (msicap_access(vdev, offset)) {
 		write_vmsi_cap_reg(vdev, offset, bytes, val);
 	} else if (msixcap_access(vdev, offset)) {
@@ -533,15 +551,17 @@ static int32_t write_pt_dev_cfg(struct pci_vdev *vdev, uint32_t offset,
 	return ret;
 }
 
-static int32_t read_pt_dev_cfg(const struct pci_vdev *vdev, uint32_t offset,
+static int32_t read_pt_dev_cfg(struct pci_vdev *vdev, uint32_t offset,
 		uint32_t bytes, uint32_t *val)
 {
 	int32_t ret = 0;
 
 	if (cfg_header_access(offset)) {
-		read_cfg_header(vdev, offset, bytes, val);
-	} else if (msicap_access(vdev, offset) || msixcap_access(vdev, offset)) {
+		ret = read_cfg_header(vdev, offset, bytes, val);
+	} else if (msicap_access(vdev, offset)) {
 		*val = pci_vdev_read_vcfg(vdev, offset, bytes);
+	} else if (msixcap_access(vdev, offset)) {
+		read_pt_vmsix_cap_reg(vdev, offset, bytes, val);
 	} else if (sriovcap_access(vdev, offset)) {
 		read_sriov_cap_reg(vdev, offset, bytes, val);
 	} else {

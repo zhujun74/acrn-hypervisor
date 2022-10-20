@@ -69,6 +69,8 @@
 #include "pci_util.h"
 #include "vssram.h"
 #include "cmd_monitor.h"
+#include "vdisplay.h"
+#include "iothread.h"
 
 #define	VM_MAXCPU		16	/* maximum virtual cpus */
 
@@ -98,6 +100,7 @@ bool ssram;
 bool vtpm2;
 bool is_winvm;
 bool skip_pci_mem64bar_workaround = false;
+bool gfx_ui = false;
 
 static int guest_ncpus;
 static int virtio_msix = 1;
@@ -113,6 +116,7 @@ static cpuset_t cpumask;
 static void vm_loop(struct vmctx *ctx);
 
 static char io_request_page[4096] __aligned(4096);
+static char asyncio_page[4096] __aligned(4096);
 
 static struct acrn_io_request *ioreq_buf =
 				(struct acrn_io_request *)&io_request_page;
@@ -144,6 +148,7 @@ usage(int code)
 		"       %*s [-k kernel_image_path]\n"
 		"       %*s [-l lpc] [-m mem] [-r ramdisk_image_path]\n"
 		"       %*s [-s pci] [--ovmf ovmf_file_path]\n"
+		"       %*s [--iasl iasl_compiler_path]\n"
 		"       %*s [--enable_trusty] [--intr_monitor param_setting]\n"
 		"       %*s [--acpidev_pt HID] [--mmiodev_pt MMIO_Regions]\n"
 		"       %*s [--vtpm2 sock_path] [--virtio_poll interval]\n"
@@ -160,6 +165,7 @@ usage(int code)
 		"       -s: <slot,driver,configinfo> PCI slot config\n"
 		"       -v: version\n"
 		"       --ovmf: ovmf file path\n"
+		"       --iasl: iasl compiler path\n"
 		"       --ssram: Congfiure Software SRAM parameters\n"
 		"       --cpu_affinity: list of Service VM vCPUs assigned to this User VM, the vCPUs are"
 		"	     identified by their local APIC IDs.\n"
@@ -183,9 +189,14 @@ usage(int code)
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
 		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "",
-		(int)strnlen(progname, PATH_MAX), "");
+		(int)strnlen(progname, PATH_MAX), "", (int)strnlen(progname, PATH_MAX), "");
 
 	exit(code);
+}
+
+static void outdate(char *msg)
+{
+	pr_warn("The \"%s\" parameter is obsolete and ignored\n", msg);
 }
 
 static void
@@ -755,6 +766,7 @@ sig_handler_term(int signo)
 enum {
 	CMD_OPT_VSBL = 1000,
 	CMD_OPT_OVMF,
+	CMD_OPT_IASL,
 	CMD_OPT_CPU_AFFINITY,
 	CMD_OPT_PART_INFO,
 	CMD_OPT_TRUSTY_ENABLE,
@@ -792,12 +804,14 @@ static struct option long_options[] = {
 	{"version",		no_argument,		0, 'v' },
 	{"gvtargs",		required_argument,	0, 'G' },
 	{"help",		no_argument,		0, 'h' },
+	{"mac_seed",		required_argument,	0, CMD_OPT_MAC_SEED},
 
 	/* Following cmd option only has long option */
 #ifdef CONFIG_VM_CFG
 #endif
 	{"vsbl",		required_argument,	0, CMD_OPT_VSBL},
 	{"ovmf",		required_argument,	0, CMD_OPT_OVMF},
+	{"iasl",		required_argument,	0, CMD_OPT_IASL},
 	{"cpu_affinity",	required_argument,	0, CMD_OPT_CPU_AFFINITY},
 	{"part_info",		required_argument,	0, CMD_OPT_PART_INFO},
 	{"enable_trusty",	no_argument,		0,
@@ -821,6 +835,23 @@ static struct option long_options[] = {
 };
 
 static char optstr[] = "AhYvE:k:r:B:s:m:l:U:G:i:";
+
+int
+vm_init_asyncio(struct vmctx *ctx, uint64_t base)
+{
+	struct shared_buf *sbuf = (struct shared_buf *)base;
+
+	sbuf->magic = SBUF_MAGIC;
+	sbuf->ele_size = sizeof(uint64_t);
+	sbuf->ele_num = (4096 - SBUF_HEAD_SIZE) / sbuf->ele_size;
+	sbuf->size = sbuf->ele_size * sbuf->ele_num;
+	/* set flag to 0 to make sure not overrun! */
+	sbuf->flags = 0;
+	sbuf->overrun_cnt = 0;
+	sbuf->head = 0;
+	sbuf->tail = 0;
+	return vm_setup_sbuf(ctx, ACRN_ASYNCIO, base);
+}
 
 int
 main(int argc, char *argv[])
@@ -866,7 +897,7 @@ main(int argc, char *argv[])
 				break;
 			break;
 		case 'i': /* obsolete parameter */
-			ioc_parse(optarg);
+			outdate("-i, --ioc_node");
 			break;
 
 		case 'l':
@@ -886,7 +917,7 @@ main(int argc, char *argv[])
 				errx(EX_USAGE, "invalid memsize '%s'", optarg);
 			break;
 		case 'Y': /* obsolete parameter */
-			mptgen = 0;
+			outdate("-Y, --mptgen");
 			break;
 		case 'k':
 			if (acrn_parse_kernel(optarg) != 0)
@@ -905,31 +936,29 @@ main(int argc, char *argv[])
 				break;
 			break;
 		case 'G': /* obsolete parameter */
-			if (acrn_parse_gvtargs(optarg) != 0)
-				errx(EX_USAGE, "invalid GVT param %s", optarg);
+			outdate("-G, --gvtargs");
 			break;
 		case 'v':
 			print_version();
 			break;
 		case CMD_OPT_VSBL: /* obsolete parameter */
-			if (high_bios_size() == 0 && acrn_parse_vsbl(optarg) != 0)
-				errx(EX_USAGE, "invalid vsbl param %s", optarg);
+			outdate("--vsbl");
 			break;
 		case CMD_OPT_OVMF:
 			if (!vsbl_file_name && acrn_parse_ovmf(optarg) != 0)
 				errx(EX_USAGE, "invalid ovmf param %s", optarg);
 			skip_pci_mem64bar_workaround = true;
 			break;
+		case CMD_OPT_IASL:
+			if (acrn_parse_iasl(optarg) != 0)
+				errx(EX_USAGE, "invalid iasl param %s", optarg);
+			break;
 		case CMD_OPT_CPU_AFFINITY:
 			if (acrn_parse_cpu_affinity(optarg) != 0)
 				errx(EX_USAGE, "invalid pcpu param %s", optarg);
 			break;
 		case CMD_OPT_PART_INFO: /* obsolete parameter */
-			if (acrn_parse_guest_part_info(optarg) != 0) {
-				errx(EX_USAGE,
-					"invalid guest partition info param %s",
-					optarg);
-			}
+			outdate("--part_info");
 			break;
 		case CMD_OPT_TRUSTY_ENABLE:
 			trusty_enabled = 1;
@@ -940,6 +969,10 @@ main(int argc, char *argv[])
 					"invalid virtio poll interval %s",
 					optarg);
 			}
+			break;
+		case CMD_OPT_MAC_SEED:
+			pr_warn("The \"--mac_seed\" parameter is obsolete\n");
+			pr_warn("Please use the \"virtio-net,<device_type>=<name> mac_seed=<seed_string>\"\n");
 			break;
 		case CMD_OPT_DEBUGEXIT:
 			debugexit_enabled = true;
@@ -997,10 +1030,10 @@ main(int argc, char *argv[])
 					errx(EX_USAGE, "invalid pm_notify_channel: %s", optarg);
 			} else
 				errx(EX_USAGE, "invalid pm_notify_channel: %s", optarg);
+			pr_warn("The \"--pm_notify_channel\" parameter is obsolete\n");
 			break;
 		case CMD_OPT_PM_BY_VUART: /* obsolete parameter */
-			if (parse_pm_by_vuart(optarg) != 0)
-				errx(EX_USAGE, "invalid pm-by-vuart params %s", optarg);
+			outdate("--pm_by_vuart");
 			break;
 		case CMD_OPT_WINDOWS:
 			is_winvm = true;
@@ -1014,6 +1047,19 @@ main(int argc, char *argv[])
 			usage(1);
 		}
 	}
+
+	if (get_iasl_compiler() != 0) {
+		pr_err("Cannot find Intel ACPI ASL compiler tool \"iasl\".\n");
+		exit(1);
+	}
+
+	if (check_iasl_version() != 0) {
+		pr_err("Please install iasl tool with version >= %s from https://www.acpica.org/downloads, "
+			"and provide the path to iasl (by using --iasl) if it's not on the PATH \n",
+			IASL_MIN_VER);
+		exit(1);
+	}
+
 	argc -= optind;
 	argv += optind;
 
@@ -1038,6 +1084,13 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
+	if (gfx_ui) {
+		if(gfx_ui_init()) {
+			pr_err("gfx ui initialize failed\n");
+			exit(1);
+		}
+	}
+
 	for (;;) {
 		pr_notice("vm_create: %s\n", vmname);
 		ctx = vm_create(vmname, (unsigned long)ioreq_buf, &guest_ncpus);
@@ -1058,6 +1111,12 @@ main(int argc, char *argv[])
 			goto fail;
 		}
 
+		pr_notice("vm setup asyncio page\n");
+		error = vm_init_asyncio(ctx, (uint64_t)asyncio_page);
+		if (error) {
+			pr_warn("ASYNIO capability is not supported by kernel or hyperviosr!\n");
+		}
+
 		pr_notice("vm_setup_memory: size=0x%lx\n", memsize);
 		error = vm_setup_memory(ctx, memsize);
 		if (error) {
@@ -1069,6 +1128,12 @@ main(int argc, char *argv[])
 		if (error) {
 			pr_err("Unable to initialize mevent (%d)\n", errno);
 			goto mevent_fail;
+		}
+
+		error = iothread_init();
+		if (error) {
+			pr_err("Unable to initialize iothread (%d)\n", errno);
+			goto iothread_fail;
 		}
 
 		pr_notice("vm_init_vdevs\n");
@@ -1133,6 +1198,7 @@ main(int argc, char *argv[])
 
 		vm_deinit_vdevs(ctx);
 		mevent_deinit();
+		iothread_deinit();
 		vm_unsetup_memory(ctx);
 		vm_destroy(ctx);
 		_ctx = 0;
@@ -1147,6 +1213,8 @@ vm_fail:
 		clean_vssram_configs();
 
 dev_fail:
+	iothread_deinit();
+iothread_fail:
 	mevent_deinit();
 mevent_fail:
 	vm_unsetup_memory(ctx);
@@ -1156,6 +1224,9 @@ fail:
 create_fail:
 	if (cmd_monitor)
 		deinit_cmd_monitor();
+	if (gfx_ui) {
+		gfx_ui_deinit();
+	}
 	uninit_hugetlb();
 	deinit_loggers();
 	exit(ret);

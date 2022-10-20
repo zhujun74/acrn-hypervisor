@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation
- * All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -109,7 +108,7 @@ static int init_tpm2_pt(char *opts, struct mmio_dev *tpm2dev)
 	uint64_t tpm2_buffer_hpa, tpm2_buffer_size;
 	uint32_t base = 0;
 	struct acpi_table_tpm2 tpm2 = { 0 };
-	char *devopts, *vtopts;
+	char *devopts, *vtopts = NULL;
 
 	/* TODO: Currently we did not validate if the opts is a valid one.
 	 * We trust it to be valid as specifying --acpidev_pt is regarded
@@ -120,6 +119,9 @@ static int init_tpm2_pt(char *opts, struct mmio_dev *tpm2dev)
 	}
 
 	devopts = strdup(opts);
+	if (devopts == NULL) {
+		return -EINVAL;
+	}
 	vtopts = strstr(devopts,",");
 
 	/* Check whether user set the uid to identify same hid devices for

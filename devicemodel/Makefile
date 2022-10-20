@@ -39,10 +39,13 @@ CFLAGS += -I$(BASEDIR)/include
 CFLAGS += -I$(BASEDIR)/include/public
 CFLAGS += -I$(DM_OBJDIR)/include
 CFLAGS += -I$(TOOLS_OUT)/services
+CFLAGS += -I$(SYSROOT)/usr/include/pixman-1
+CFLAGS += -I$(SYSROOT)/usr/include/glib-2.0
+CFLAGS += -I$(SYSROOT)/usr/include/SDL2
+CFLAGS += -I$(SYSROOT)/usr/include/EGL
+CFLAGS += -I$(SYSROOT)/usr/include/GLES2
 
-ifneq (, $(DM_ASL_COMPILER))
-CFLAGS += -DASL_COMPILER=\"$(DM_ASL_COMPILER)\"
-endif
+CFLAGS += -DIASL_MIN_VER=\"$(IASL_MIN_VER)\"
 
 GCC_MAJOR=$(shell echo __GNUC__ | $(CC) -E -x c - | tail -n 1)
 GCC_MINOR=$(shell echo __GNUC_MINOR__ | $(CC) -E -x c - | tail -n 1)
@@ -78,10 +81,14 @@ LIBS = -lrt
 LIBS += -lpthread
 LIBS += -lcrypto
 LIBS += -lpciaccess
-LIBS += -luuid
 LIBS += -lusb-1.0
 LIBS += -lacrn-mngr
 LIBS += -lcjson
+LIBS += -lpixman-1
+LIBS += -lSDL2
+LIBS += -lEGL
+LIBS += -lGLESv2
+
 
 # lib
 SRCS += lib/dm_string.c
@@ -90,6 +97,9 @@ SRCS += lib/dm_string.c
 SRCS += hw/block_if.c
 SRCS += hw/usb_core.c
 SRCS += hw/uart_core.c
+SRCS += hw/vdisplay_sdl.c
+SRCS += hw/vga.c
+SRCS += hw/gc.c
 SRCS += hw/pci/virtio/virtio.c
 SRCS += hw/pci/virtio/virtio_kernel.c
 SRCS += hw/pci/virtio/vhost.c
@@ -142,6 +152,8 @@ SRCS += hw/pci/virtio/virtio_coreu.c
 SRCS += hw/pci/virtio/virtio_hdcp.c
 SRCS += hw/pci/virtio/virtio_rpmb.c
 SRCS += hw/pci/virtio/virtio_gpio.c
+SRCS += hw/pci/virtio/virtio_gpu.c
+SRCS += hw/pci/virtio/vhost_vsock.c
 SRCS += hw/pci/irq.c
 SRCS += hw/pci/uart.c
 SRCS += hw/pci/gvt.c
@@ -158,7 +170,7 @@ SRCS += core/sw_load_vsbl.c
 SRCS += core/sw_load_ovmf.c
 SRCS += core/sw_load_elf.c
 SRCS += core/mevent.c
-SRCS += core/gc.c
+SRCS += core/iothread.c
 SRCS += core/pm.c
 SRCS += core/pm_vuart.c
 SRCS += core/console.c
@@ -197,8 +209,6 @@ DISTCLEAN_OBJS := $(shell find $(BASEDIR) -name '*.o')
 PROGRAM := acrn-dm
 
 SAMPLES_NUC := $(wildcard samples/nuc/*)
-SAMPLES_MRB := $(wildcard samples/apl-mrb/*)
-SAMPLES_UP2 := $(wildcard samples/apl-up2/*)
 
 BIOS_BIN := $(wildcard bios/*)
 
@@ -249,19 +259,11 @@ $(DM_OBJDIR)/%.o: %.c $(HEADERS)
 	[ ! -e $@ ] && mkdir -p $(dir $@); \
 	$(CC) $(CFLAGS) -c $< -o $@ -MMD -MT $@
 
-install: $(DM_OBJDIR)/$(PROGRAM) install-samples-nuc install-samples-mrb install-bios install-samples-up2
+install: $(DM_OBJDIR)/$(PROGRAM) install-samples-nuc install-bios
 	install -D --mode=0755 $(DM_OBJDIR)/$(PROGRAM) $(DESTDIR)$(bindir)/$(PROGRAM)
-
-install-samples-up2: $(SAMPLES_UP2)
-	install -D -t $(DESTDIR)$(datadir)/acrn/samples/apl-up2 $^
 
 install-samples-nuc: $(SAMPLES_NUC)
 	install -D -t $(DESTDIR)$(datadir)/acrn/samples/nuc $^
-
-install-samples-mrb: $(SAMPLES_MRB)
-	install -D -t $(DESTDIR)$(datadir)/acrn/samples/apl-mrb $^
-	install -d $(DESTDIR)$(systemd_unitdir)/system/
-	install -p -D -m 0644 ./samples/apl-mrb/acrn_guest.service $(DESTDIR)$(systemd_unitdir)/system
 
 install-bios: $(BIOS_BIN)
 	install -d $(DESTDIR)$(datadir)/acrn/bios

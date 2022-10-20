@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -24,6 +24,7 @@
 #include <version.h>
 #include <asm/vmx.h>
 #include <asm/msr.h>
+#include <asm/host_pm.h>
 #include <ptdev.h>
 #include <logmsg.h>
 #include <asm/rdt.h>
@@ -110,7 +111,7 @@ uint64_t get_active_pcpu_bitmap(void)
 
 static void enable_ac_for_splitlock(void)
 {
-#ifndef CONFIG_ENFORCE_TURNOFF_AC
+#ifdef CONFIG_SPLIT_LOCK_DETECTION_ENABLED
 	uint64_t test_ctl;
 
 	if (has_core_cap(CORE_CAP_SPLIT_LOCK)) {
@@ -118,12 +119,12 @@ static void enable_ac_for_splitlock(void)
 		test_ctl |= MSR_TEST_CTL_AC_SPLITLOCK;
 		msr_write(MSR_TEST_CTL, test_ctl);
 	}
-#endif /*CONFIG_ENFORCE_TURNOFF_AC*/
+#endif /*CONFIG_SPLIT_LOCK_DETECTION_ENABLED*/
 }
 
 static void enable_gp_for_uclock(void)
 {
-#ifndef CONFIG_ENFORCE_TURNOFF_GP
+#ifdef CONFIG_UC_LOCK_DETECTION_ENABLED
 	uint64_t test_ctl;
 
 	if (has_core_cap(CORE_CAP_UC_LOCK)) {
@@ -131,7 +132,7 @@ static void enable_gp_for_uclock(void)
 		test_ctl |= MSR_TEST_CTL_GP_UCLOCK;
 		msr_write(MSR_TEST_CTL, test_ctl);
 	}
-#endif /*CONFIG_ENFORCE_TURNOFF_GP*/
+#endif /*CONFIG_UC_LOCK_DETECTION_ENABLED*/
 }
 
 void init_pcpu_pre(bool is_bsp)
@@ -155,6 +156,8 @@ void init_pcpu_pre(bool is_bsp)
 		init_pcpu_model_name();
 
 		load_pcpu_state_data();
+
+		init_frequency_policy();
 
 		init_e820();
 
@@ -191,10 +194,6 @@ void init_pcpu_pre(bool is_bsp)
 
 #ifdef CONFIG_VCAT_ENABLED
 		init_intercepted_cat_msr_list();
-#endif
-
-#ifdef CONFIG_RDT_ENABLED
-		init_rdt_info();
 #endif
 
 		/* NOTE: this must call after MMCONFIG is parsed in acpi_fixup() and before APs are INIT.
@@ -235,9 +234,16 @@ void init_pcpu_post(uint16_t pcpu_id)
 
 	init_pcpu_xsave();
 
+#ifdef CONFIG_RETPOLINE
+	disable_rrsba();
+#endif
+
 	if (pcpu_id == BSP_CPU_ID) {
 		/* Print Hypervisor Banner */
 		print_hv_banner();
+
+		/* Initialie HPET */
+		hpet_init();
 
 		/* Calibrate TSC Frequency */
 		calibrate_tsc();
@@ -311,6 +317,8 @@ void init_pcpu_post(uint16_t pcpu_id)
 	if (!init_software_sram(pcpu_id == BSP_CPU_ID)) {
 		panic("failed to initialize software SRAM!");
 	}
+
+	apply_frequency_policy();
 
 	init_sched(pcpu_id);
 
@@ -412,7 +420,7 @@ void make_pcpu_offline(uint16_t pcpu_id)
 {
 	bitmap_set_lock(NEED_OFFLINE, &per_cpu(pcpu_flag, pcpu_id));
 	if (get_pcpu_id() != pcpu_id) {
-		send_single_ipi(pcpu_id, NOTIFY_VCPU_VECTOR);
+		kick_pcpu(pcpu_id);
 	}
 }
 

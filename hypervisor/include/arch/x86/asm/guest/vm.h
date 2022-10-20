@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -21,12 +21,14 @@
 #include <vpic.h>
 #include <asm/guest/vmx_io.h>
 #include <vuart.h>
+#include <vrtc.h>
 #include <asm/guest/trusty.h>
 #include <asm/guest/vcpuid.h>
 #include <vpci.h>
 #include <asm/cpu_caps.h>
 #include <asm/e820.h>
 #include <asm/vm_config.h>
+#include <io_req.h>
 #ifdef CONFIG_HYPERV_ENABLED
 #include <asm/guest/hyperv.h>
 #endif
@@ -68,6 +70,7 @@ struct vm_sw_info {
 	struct sw_module_info acpi_info;
 	/* HVA to IO shared page */
 	void *io_shared_page;
+	void *asyncio_sbuf;
 	/* If enable IO completion polling mode */
 	bool is_polling_ioreq;
 };
@@ -142,12 +145,17 @@ struct acrn_vm {
 	uint16_t vm_id;		    /* Virtual machine identifier */
 	enum vm_state state;	/* VM state */
 	struct acrn_vuart vuart[MAX_VUART_NUM_PER_VM];		/* Virtual UART */
+	struct asyncio_desc	aio_desc[ACRN_ASYNCIO_MAX];
+	struct list_head aiodesc_queue;
+	spinlock_t asyncio_lock; /* Spin-lock used to protect asyncio add/remove for a VM */
+
 	enum vpic_wire_mode wire_mode;
 	struct iommu_domain *iommu;	/* iommu domain of this VM */
 	/* vm_state_lock used to protect vm/vcpu state transition,
 	 * the initialization depends on the clear BSS section
 	 */
 	spinlock_t vm_state_lock;
+	spinlock_t wbinvd_lock;		/* Spin-lock used to serialize wbinvd emulation */
 	spinlock_t vlapic_mode_lock;	/* Spin-lock used to protect vlapic_mode modifications for a VM */
 	spinlock_t ept_lock;	/* Spin-lock used to protect ept add/modify/remove for a VM */
 	spinlock_t emul_mmio_lock;	/* Used to protect emulation mmio_node concurrent access for a VM */
@@ -169,7 +177,7 @@ struct acrn_vm {
 	uint32_t vcpuid_entry_nr, vcpuid_level, vcpuid_xlevel;
 	struct vcpuid_entry vcpuid_entries[MAX_VM_VCPUID_ENTRIES];
 	struct acrn_vpci vpci;
-	uint8_t vrtc_offset;
+	struct acrn_vrtc vrtc;
 
 	uint64_t intr_inject_delay_delta; /* delay of intr injection */
 } __aligned(PAGE_SIZE);

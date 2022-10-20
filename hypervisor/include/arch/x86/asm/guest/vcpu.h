@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -105,6 +105,8 @@
  */
 #define ACRN_REQUEST_SPLIT_LOCK			10U
 
+#define ACRN_REQUEST_SMP_CALL			11U
+
 /**
  * @}
  */
@@ -173,7 +175,7 @@ enum reset_mode;
 #define SECURE_WORLD	1
 
 #define NUM_WORLD_MSRS		2U
-#define NUM_COMMON_MSRS		23U
+#define NUM_COMMON_MSRS		24U
 
 #ifdef CONFIG_VCAT_ENABLED
 #define NUM_CAT_L2_MSRS	MAX_CACHE_CLOS_NUM_ENTRIES
@@ -212,15 +214,12 @@ struct msr_store_entry {
 	uint64_t value;
 } __aligned(16);
 
-enum {
-	MSR_AREA_IA32_PQR_ASSOC = 0,
-	MSR_AREA_PERF_CTRL,
-	MSR_AREA_COUNT,
-};
+#define MSR_AREA_COUNT 2 /* the max MSRs in auto load/store area */
 
 struct msr_store_area {
 	struct msr_store_entry guest[MSR_AREA_COUNT];
 	struct msr_store_entry host[MSR_AREA_COUNT];
+	uint32_t index_of_pqr_assoc;
 	uint32_t count;	/* actual count of entries to be loaded/restored during VMEntry/VMExit */
 };
 

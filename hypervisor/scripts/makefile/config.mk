@@ -1,4 +1,4 @@
-# Copyright (C) 2021 Intel Corporation. All rights reserved.
+# Copyright (C) 2021-2022 Intel Corporation.
 # SPDX-License-Identifier: BSD-3-Clause
 
 # usage: check_coexistence <symbol 1> <symbol 2>
@@ -54,7 +54,12 @@ define determine_config =
 ifneq ($($(1)),)
   ifneq ($(realpath $($(1))),)
     override $(1)_FILE := $($(1))
-    override $(1) := $$(shell xmllint --xpath 'string(/acrn-config/@$(shell echo $(1) | tr A-Z a-z))' $$($(1)_FILE))
+    ifneq (SCENARIO, $(1))
+      override $(1) := $$(shell xmllint --xpath 'string(/acrn-config/@$(shell echo $(1) | tr A-Z a-z))' $$($(1)_FILE))
+    else
+      scenario_name := $(subst .xml,,$(notdir $($(1))))
+      override $(1) := $$(if $$(subst scenario,,$$(scenario_name)),$$(scenario_name),$(notdir $(abspath $(dir $($(1))))))
+    endif
   else
     override $(1)_FILE := $(HV_PREDEFINED_DATA_DIR)/$$(BOARD)/$$($(1)).xml
     ifeq ($$(realpath $$($(1)_FILE)),)
@@ -201,9 +206,10 @@ $(HV_BOARD_XML):
 $(HV_SCENARIO_XML):
 	@if [ ! -f $(HV_SCENARIO_XML) ]; then \
 	  if [ -f $(SCENARIO_FILE) ]; then \
-	    echo "Scenario XML is being fetched from $(realpath $(SCENARIO_FILE))"; \
+	    echo "Scenario XML is being fetched from $(abspath $(SCENARIO_FILE))"; \
 	    mkdir -p $(dir $(HV_SCENARIO_XML)); \
 	    python3 $(HV_CONFIG_TOOL_DIR)/scenario_config/default_populator.py $(SCENARIO_FILE) $(HV_SCENARIO_XML); \
+	    sed "s#<acrn-config.*#<acrn-config scenario=\"$(SCENARIO)\" >#g" -i $(HV_SCENARIO_XML); \
 	  else \
 	    echo "No pre-defined scenario available at $(SCENARIO_FILE)"; \
 	    echo "Try setting another predefined BOARD or SCENARIO or specifying a scenario XML file"; \

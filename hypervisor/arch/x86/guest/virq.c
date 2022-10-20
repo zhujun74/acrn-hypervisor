@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -131,12 +131,6 @@ void vcpu_make_request(struct acrn_vcpu *vcpu, uint16_t eventid)
 {
 	bitmap_set_lock(eventid, &vcpu->arch.pending_req);
 	kick_vcpu(vcpu);
-}
-
-/* Return true if an unhandled request is cancelled, false otherwise. */
-bool vcpu_try_cancel_request(struct acrn_vcpu *vcpu, uint16_t eventid)
-{
-	return bitmap_test_and_clear_lock(eventid, &vcpu->arch.pending_req);
 }
 
 /*
@@ -394,6 +388,11 @@ int32_t acrn_handle_pending_request(struct acrn_vcpu *vcpu)
 			if (bitmap_test_and_clear_lock(ACRN_REQUEST_EOI_EXIT_BITMAP_UPDATE, pending_req_bits)) {
 				vcpu_set_vmcs_eoi_exit(vcpu);
 			}
+
+			if (bitmap_test_and_clear_lock(ACRN_REQUEST_SMP_CALL, pending_req_bits)) {
+				handle_smp_call();
+			}
+
 		}
 	}
 

@@ -1,7 +1,6 @@
 /*-
 * Copyright (c) 2011 NetApp, Inc.
-* Copyright (c) 2018 Intel Corporation
-* All rights reserved.
+* Copyright (c) 2018-2022 Intel Corporation.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions
@@ -46,6 +45,21 @@ static inline struct msix_table_entry *get_msix_table_entry(const struct pci_vde
 	void *hva = hpa2hva(vdev->msix.mmio_hpa + vdev->msix.table_offset);
 
 	return ((struct msix_table_entry *)hva + index);
+}
+
+/**
+ * @brief Reading MSI-X Capability Structure
+ *
+ * @pre vdev != NULL
+ * @pre vdev->pdev != NULL
+ */
+void read_pt_vmsix_cap_reg(struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t *val)
+{
+	if (vdev->msix.is_vmsix_on_msi) {
+		*val = pci_vdev_read_vcfg(vdev, offset, bytes);
+	} else {
+		read_vmsix_cap_reg(vdev, offset, bytes, val);
+	}
 }
 
 /**
@@ -568,7 +582,7 @@ void init_vdev_pt(struct pci_vdev *vdev, bool is_pf_vdev)
 			pci_vdev_write_vcfg(vdev, PCIR_VENDOR, 2U, vid);
 			pci_vdev_write_vcfg(vdev, PCIR_DEVICE, 2U, did);
 		} else {
-			/* VF is unassinged  */
+			/* VF is unassinged: when VF was first created, the VF's BARs hasn't been assigned */
 			uint32_t bar_idx;
 
 			for (bar_idx = 0U; bar_idx < vdev->nr_bars; bar_idx++) {

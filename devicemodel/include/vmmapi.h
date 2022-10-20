@@ -30,7 +30,6 @@
 #define	_VMMAPI_H_
 
 #include <sys/param.h>
-#include <uuid/uuid.h>
 #include "types.h"
 #include "macros.h"
 #include "pm.h"
@@ -53,6 +52,7 @@ struct vmctx {
 	uint32_t lowmem_limit;
 	uint64_t highmem_gpa_base;
 	size_t  lowmem;
+	size_t  fbmem;
 	size_t  biosmem;
 	size_t  highmem;
 	char    *baseaddr;
@@ -64,6 +64,7 @@ struct vmctx {
 	void *vpit;
 	void *ioc_dev;
 	void *tpm_dev;
+	void *fb_base;
 
 	/* BSP state. guest loader needs to fill it */
 	struct acrn_vcpu_regs bsp_regs;
@@ -87,6 +88,13 @@ struct vm_isa_irq {
 	int		ioapic_irq;
 };
 
+struct vm_mem_region {
+	uint64_t fd_offset;
+	int fd;
+};
+bool	vm_find_memfd_region(struct vmctx *ctx, vm_paddr_t gpa,
+			     struct vm_mem_region *ret_region);
+bool    vm_allow_dmabuf(struct vmctx *ctx);
 /*
  * Create a device memory segment identified by 'segid'.
  *
@@ -99,6 +107,7 @@ int	vm_create_ioreq_client(struct vmctx *ctx);
 int	vm_destroy_ioreq_client(struct vmctx *ctx);
 int	vm_attach_ioreq_client(struct vmctx *ctx);
 int	vm_notify_request_done(struct vmctx *ctx, int vcpu);
+int	vm_setup_sbuf(struct vmctx *ctx, uint32_t sbuf_type, uint64_t base);
 void	vm_clear_ioreq(struct vmctx *ctx);
 const char *vm_state_to_str(enum vm_suspend_how idx);
 void	vm_set_suspend_mode(enum vm_suspend_how how);

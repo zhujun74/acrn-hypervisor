@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -25,7 +25,7 @@ struct per_cpu_region {
 	uint8_t vmxon_region[PAGE_SIZE];
 	void *vmcs_run;
 #ifdef HV_DEBUG
-	struct shared_buf *sbuf[ACRN_SBUF_ID_MAX];
+	struct shared_buf *sbuf[ACRN_SBUF_PER_PCPU_ID_MAX];
 	char logbuf[LOG_MESSAGE_MAX_SIZE];
 	uint32_t npk_log_ref;
 #endif
@@ -54,6 +54,7 @@ struct per_cpu_region {
 	uint32_t lapic_id;
 	uint32_t lapic_ldr;
 	uint32_t softirq_servicing;
+	uint32_t mode_to_kick_pcpu;
 	struct smp_call_info_data smp_call_info;
 	struct list_head softirq_dev_entry_list;
 #ifdef PROFILING_ON

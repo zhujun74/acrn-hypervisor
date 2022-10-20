@@ -186,6 +186,7 @@ vm_create(const char *name, uint64_t req_buf, int *vcpu_num)
 		create_vm.vm_flag |= GUEST_FLAG_LAPIC_PASSTHROUGH;
 		create_vm.vm_flag |= GUEST_FLAG_RT;
 		create_vm.vm_flag |= GUEST_FLAG_IO_COMPLETION_POLLING;
+		create_vm.vm_flag |= GUEST_FLAG_PMU_PASSTHROUGH;
 	} else {
 		create_vm.vm_flag &= (~GUEST_FLAG_LAPIC_PASSTHROUGH);
 		create_vm.vm_flag &= (~GUEST_FLAG_IO_COMPLETION_POLLING);
@@ -294,6 +295,25 @@ vm_destroy(struct vmctx *ctx)
 }
 
 int
+vm_setup_sbuf(struct vmctx *ctx, uint32_t sbuf_id, uint64_t base)
+{
+	int error;
+	struct acrn_sbuf sbuf_param;
+
+	bzero(&sbuf_param, sizeof(sbuf_param));
+	sbuf_param.sbuf_id = sbuf_id;
+	sbuf_param.base = base;
+
+	error = ioctl(ctx->fd, ACRN_IOCTL_SETUP_SBUF, &sbuf_param);
+
+	if (error) {
+		pr_err("ACRN_IOCTL_SBUF_PAGE ioctl() returned an error: %s\n", errormsg(errno));
+	}
+
+	return error;
+}
+
+int
 vm_parse_memsize(const char *optarg, size_t *ret_memsize)
 {
 	char *endptr;
@@ -356,8 +376,6 @@ vm_map_memseg_vma(struct vmctx *ctx, size_t len, vm_paddr_t gpa,
 int
 vm_setup_memory(struct vmctx *ctx, size_t memsize)
 {
-	int ret;
-
 	/*
 	 * If 'memsize' cannot fit entirely in the 'lowmem' segment then
 	 * create another 'highmem' segment above 4GB for the remainder.
@@ -371,14 +389,9 @@ vm_setup_memory(struct vmctx *ctx, size_t memsize)
 	}
 
 	ctx->biosmem = high_bios_size();
+	ctx->fbmem = (16 * 1024 * 1024);
 
-	ret = hugetlb_setup_memory(ctx);
-	if (ret == 0) {
-		/* mitigate reset attack */
-		bzero((void *)ctx->baseaddr, ctx->lowmem);
-		bzero((void *)(ctx->baseaddr + ctx->highmem_gpa_base), ctx->highmem);
-	}
-	return ret;
+	return hugetlb_setup_memory(ctx);
 }
 
 void

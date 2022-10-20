@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -41,13 +41,6 @@
 #define DMAR_IQA_REG    0x90U    /* Invalidation queue addr register */
 #define DMAR_ICS_REG    0x9cU    /* Invalidation complete status register */
 #define DMAR_IRTA_REG   0xb8U    /* Interrupt remapping table addr register */
-
-/* Make sure all PT IRQs work w/ interrupt remapping or post interrupt */
-#if (CONFIG_MAX_PT_IRQ_ENTRIES <= 256)
-#define MAX_IR_ENTRIES 256
-#else
-#define MAX_IR_ENTRIES  powerof2_roundup(CONFIG_MAX_PT_IRQ_ENTRIES)
-#endif
 
 /* Values for entry_type in ACPI_DMAR_DEVICE_SCOPE - device types */
 enum acpi_dmar_scope_type {

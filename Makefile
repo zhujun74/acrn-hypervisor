@@ -8,7 +8,11 @@ T := $(CURDIR)
 
 # ACRN Version Information
 include VERSION
-export FULL_VERSION=$(MAJOR_VERSION).$(MINOR_VERSION)$(EXTRA_VERSION)
+SCM_VERSION := $(shell [ -d .git ] && git describe --exact-match 1>/dev/null 2>&1 || git describe --dirty)
+ifneq ($(SCM_VERSION),)
+	SCM_VERSION := "-"$(SCM_VERSION)
+endif
+export FULL_VERSION=$(MAJOR_VERSION).$(MINOR_VERSION)$(EXTRA_VERSION)$(SCM_VERSION)
 
 ifdef TARGET_DIR
   $(warning TARGET_DIR is obsoleted because generated configuration files are now stored in the build directory)
@@ -46,7 +50,7 @@ ifneq ($(BOARD_FILE)$(SCENARIO_FILE),)
   endif
 
   override BOARD := $(realpath $(BOARD_FILE))
-  override SCENARIO := $(realpath $(SCENARIO_FILE))
+  override SCENARIO := $(abspath $(SCENARIO_FILE))
 else
   # BOARD/SCENARIO pointing to XML files must be converted to absolute paths before being passed to hypervisor/Makefile
   # because paths relative to acrn-hypervisor/ are typically invalid when relative to acrn-hypervisor/Makefile
@@ -54,7 +58,7 @@ else
     override BOARD := $(realpath $(BOARD))
   endif
   ifneq ($(realpath $(SCENARIO)),)
-    override SCENARIO := $(realpath $(SCENARIO))
+    override SCENARIO := $(abspath $(SCENARIO))
   endif
 endif
 
@@ -80,6 +84,9 @@ HV_CFG_LOG = $(HV_OUT)/cfg.log
 VM_CONFIGS_DIR = $(T)/misc/config_tools
 ASL_COMPILER ?= $(shell which iasl)
 DPKG_BIN ?= $(shell which dpkg)
+YARN_BIN ?= $(shell which yarn)
+CARGO_BIN ?= $(shell which cargo)
+IASL_MIN_VER = "20190703"
 
 .PHONY: all hypervisor devicemodel tools life_mngr doc
 all: hypervisor devicemodel tools
@@ -90,27 +97,20 @@ all: hypervisor devicemodel tools
 	  python3 misc/packaging/gen_acrn_deb.py acrn_all $(ROOT_OUT) --version=$(FULL_VERSION) --board_name="$$DEB_BOARD" --scenario="$$DEB_SCENARIO"; \
 	fi
 
-#help functions to build acrn and install acrn/acrn symbols
-define build_acrn
-	$(MAKE) -C $(T)/hypervisor HV_OBJDIR=$(HV_OUT)/$(1) clean
-	$(MAKE) -C $(T)/hypervisor HV_OBJDIR=$(HV_OUT)/$(1) BOARD=$(1) SCENARIO=$(2) RELEASE=$(RELEASE)
-endef
-
-define install_acrn
-	$(MAKE) -C $(T)/hypervisor HV_OBJDIR=$(HV_OUT)/$(1) BOARD=$(1) SCENARIO=$(2) RELEASE=$(RELEASE) install
-endef
-
-define install_acrn_debug
-	$(MAKE) -C $(T)/hypervisor HV_OBJDIR=$(HV_OUT)/$(1) BOARD=$(1) SCENARIO=$(2) RELEASE=$(RELEASE) install-debug
-endef
-
-HV_MAKEOPTS := -C $(T)/hypervisor BOARD=$(BOARD) SCENARIO=$(SCENARIO) HV_OBJDIR=$(HV_OUT) RELEASE=$(RELEASE)
+HV_MAKEOPTS := -C $(T)/hypervisor BOARD=$(BOARD) SCENARIO=$(SCENARIO) HV_OBJDIR=$(HV_OUT) RELEASE=$(RELEASE) ASL_COMPILER=$(ASL_COMPILER) IASL_MIN_VER=$(IASL_MIN_VER)
 
 board_inspector:
 	@if [ -x "$(DPKG_BIN)" ]; then \
 	  python3 misc/packaging/gen_acrn_deb.py board_inspector $(ROOT_OUT) --version=$(FULL_VERSION); \
 	else \
 	  echo -e "The 'dpkg' utility is not available. Unable to create Debian package for board_inspector."; \
+	fi
+
+configurator:
+	@if [ -x "$(YARN_BIN)" ] && [ -x "$(CARGO_BIN)" ]; then \
+	  python3 misc/packaging/gen_acrn_deb.py configurator $(ROOT_OUT) --version=$(FULL_VERSION); \
+	else \
+	  echo -e "'yarn' or 'cargo' utility is not available. Unable to create Debian package for configurator."; \
 	fi
 
 hypervisor: hvdefconfig
@@ -133,7 +133,7 @@ hvapplydiffconfig:
 	@$(MAKE) applydiffconfig $(HV_MAKEOPTS) PATCH=$(abspath $(PATCH))
 
 devicemodel: tools
-	$(MAKE) -C $(T)/devicemodel DM_OBJDIR=$(DM_OUT) DM_BUILD_VERSION=$(BUILD_VERSION) DM_BUILD_TAG=$(BUILD_TAG) DM_ASL_COMPILER=$(ASL_COMPILER) TOOLS_OUT=$(TOOLS_OUT) RELEASE=$(RELEASE)
+	$(MAKE) -C $(T)/devicemodel DM_OBJDIR=$(DM_OUT) DM_BUILD_VERSION=$(BUILD_VERSION) DM_BUILD_TAG=$(BUILD_TAG) TOOLS_OUT=$(TOOLS_OUT) RELEASE=$(RELEASE) IASL_MIN_VER=$(IASL_MIN_VER)
 
 tools:
 	mkdir -p $(TOOLS_OUT)
@@ -151,6 +151,7 @@ clean:
 	$(MAKE) -C $(T)/misc OUT_DIR=$(TOOLS_OUT) clean
 	$(MAKE) -C $(T)/doc BUILDDIR=$(DOC_OUT) clean
 	rm -rf $(ROOT_OUT)
+	python3 misc/packaging/gen_acrn_deb.py clean $(ROOT_OUT) --version=$(FULL_VERSION);
 
 .PHONY: install life_mngr-install
 install: hypervisor-install devicemodel-install tools-install
@@ -160,30 +161,6 @@ hypervisor-install: hypervisor
 
 hypervisor-install-debug:
 	$(MAKE) $(HV_MAKEOPTS) install-debug
-
-kbl-nuc-i7-industry:
-	$(call build_acrn,nuc7i7dnb,industry)
-apl-up2-hybrid:
-	$(call build_acrn,apl-up2,hybrid)
-
-sbl-hypervisor: kbl-nuc-i7-industry \
-                apl-up2-hybrid
-
-kbl-nuc-i7-industry-install:
-	$(call install_acrn,nuc7i7dnb,industry)
-apl-up2-hybrid-install:
-	$(call install_acrn,apl-up2,hybrid)
-
-sbl-hypervisor-install: kbl-nuc-i7-industry-install \
-                        apl-up2-hybrid-install
-
-kbl-nuc-i7-industry-install-debug:
-	$(call install_acrn_debug,nuc7i7dnb,industry)
-apl-up2-hybrid-install-debug:
-	$(call install_acrn_debug,apl-up2,hybrid)
-
-sbl-hypervisor-install-debug: kbl-nuc-i7-industry-install-debug \
-			      apl-up2-hybrid-install-debug
 
 devicemodel-install: tools-install devicemodel
 	$(MAKE) -C $(T)/devicemodel DM_OBJDIR=$(DM_OUT) install

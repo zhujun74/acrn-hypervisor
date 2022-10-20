@@ -1,5 +1,5 @@
 /*
- * Copyright (C)2019 Intel Corporation
+ * Copyright (C)2019-2022 Intel Corporation.
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
@@ -20,17 +20,19 @@
 #define ACK_USER_VM_SHUTDOWN "ack_user_vm_shutdown"
 #define USER_VM_REBOOT  "user_vm_reboot"
 #define ACK_USER_VM_REBOOT "ack_user_vm_reboot"
+#define REQ_SYS_REBOOT "req_sys_reboot"
+#define ACK_REQ_SYS_REBOOT "ack_req_sys_reboot"
 #define SYNC_FMT	"sync:%s"
 #define S5_REJECTED	"system shutdown request is rejected"
 
-#define BUFF_SIZE       (32U)
-#define MSG_SIZE        (8U)
+#define BUFF_SIZE	(32U)
+#define MSG_SIZE	(8U)
 #define VM_NAME_LEN	(sizeof(WIN_VM_NAME))
 #define UVM_SOCKET_PORT (0x2001U)
 #define READ_INTERVAL	(100U) /* The time unit is microsecond */
 #define MIN_RESEND_TIME (3U)
-#define MS_TO_SECOND	(1000U)
-#define RETRY_RECV_TIMES	(8U)
+#define SECOND_TO_MS	(1000U)
+#define RETRY_RECV_TIMES	(100U)
 
 HANDLE hCom2;
 unsigned int resend_time;
@@ -58,6 +60,23 @@ void stop_uart_resend(void)
 	memset(resend_buf, 0x0, BUFF_SIZE);
 	resend_time = 0U;
 }
+void handle_socket_request(SOCKET sClient, char *req_message)
+{
+	char ack_message[BUFF_SIZE];
+
+	snprintf(ack_message, sizeof(ack_message), "ack_%s", req_message);
+	/**
+	 * The lifecycle manager in Service VM checks sync message every 5 seconds
+	 * during listening phase, delay 6 seconds to wait Service VM to receive the
+	 * sync message, then start to send message to Service VM.
+	 */
+	Sleep(6U * SECOND_TO_MS);
+	send(sClient, ack_message, sizeof(ack_message), 0);
+	start_uart_resend(req_message, MIN_RESEND_TIME);
+	send_message_by_uart(hCom2, req_message, strnlen(req_message, BUFF_SIZE));
+	Sleep(2U * READ_INTERVAL);
+	return;
+}
 DWORD WINAPI open_socket_server(LPVOID lpParam)
 {
 	WORD sockVersion = MAKEWORD(2, 2);
@@ -67,7 +86,6 @@ DWORD WINAPI open_socket_server(LPVOID lpParam)
 	SOCKET sClient;
 	struct sockaddr_in remoteAddr;
 	int nAddrlen = sizeof(remoteAddr);
-	char *sendData = ACK_REQ_SYS_SHUTDOWN;
 	int ret;
 
 	ret = WSAStartup(sockVersion, &wsaData);
@@ -107,12 +125,15 @@ DWORD WINAPI open_socket_server(LPVOID lpParam)
 			printf(revData);
 		}
 		Sleep(READ_INTERVAL);
-	} while (strncmp(revData, REQ_SYS_SHUTDOWN, sizeof(REQ_SYS_SHUTDOWN)) != 0);
-	Sleep(6U * MS_TO_SECOND);
-	send(sClient, sendData, strlen(sendData), 0);
-	start_uart_resend(REQ_SYS_SHUTDOWN, MIN_RESEND_TIME);
-	send_message_by_uart(hCom2, REQ_SYS_SHUTDOWN, sizeof(REQ_SYS_SHUTDOWN));
-	Sleep(2 * READ_INTERVAL);
+		if (strncmp(revData, REQ_SYS_SHUTDOWN, sizeof(REQ_SYS_SHUTDOWN)) == 0) {
+			handle_socket_request(sClient, REQ_SYS_SHUTDOWN);
+			break;
+		}
+		if (strncmp(revData, REQ_SYS_REBOOT, sizeof(REQ_SYS_REBOOT)) == 0) {
+			handle_socket_request(sClient, REQ_SYS_REBOOT);
+			break;
+		}
+	} while (1);
 	closesocket(sClient);
 sock_exit:
 	closesocket(slisten);
@@ -187,7 +208,7 @@ int main()
 	 * during listening phase, delay 5 seconds to wait Service VM to receive the
 	 * sync message, then start to read ack message from Service VM.
 	 */
-	Sleep(5U * MS_TO_SECOND);
+	Sleep(5U * SECOND_TO_MS);
 	do {
 		do {
 			retry_times = RETRY_RECV_TIMES;
@@ -199,7 +220,7 @@ int main()
 			} while ((recvsize < MSG_SIZE) && (retry_times > 0));
 			if (recvsize < MSG_SIZE) {
 				if (resend_time > 1U) {
-					Sleep(6U * MS_TO_SECOND);
+					Sleep(6U * SECOND_TO_MS);
 					printf("Resend command (%s) service VM\n", resend_buf);
 					send_message_by_uart(hCom2, resend_buf, strlen(resend_buf));
 					resend_time--;
@@ -224,6 +245,9 @@ int main()
 		} else if (strncmp(recvbuf, ACK_REQ_SYS_SHUTDOWN, sizeof(ACK_REQ_SYS_SHUTDOWN)) == 0) {
 			stop_uart_resend();
 			printf("Received acked system shutdown request from service VM\n");
+		} else if (strncmp(recvbuf, ACK_REQ_SYS_REBOOT, sizeof(ACK_REQ_SYS_REBOOT)) == 0) {
+			stop_uart_resend();
+			printf("Received acked system reboot request from service VM\n");
 		} else if (strncmp(recvbuf, POWEROFF_CMD, sizeof(POWEROFF_CMD)) == 0) {
 			printf("Received system shutdown message from service VM\n");
 			send_message_by_uart(hCom2, ACK_POWEROFF, sizeof(ACK_POWEROFF));

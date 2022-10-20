@@ -1,6 +1,6 @@
 <?xml version='1.0' encoding='utf-8'?>
 
-<!-- Copyright (C) 2021 Intel Corporation. -->
+<!-- Copyright (C) 2021-2022 Intel Corporation. -->
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 
 <xsl:stylesheet
@@ -331,8 +331,13 @@
           </xsl:otherwise>
         </xsl:choose>
       </xsl:variable>
+
       <xsl:variable name="console_vuart" select="count(./console_vuart/base[text() = 'PCI_VUART'])" />
-      <xsl:variable name="communication_vuart" select="count(./communication_vuart/base[text() = 'PCI_VUART'])" />
+      <xsl:variable name="vm_name" select="./name" />
+      <xsl:variable name="communication_vuart">
+        <xsl:value-of select="count(//vuart_connection[type = 'pci']/endpoint[vm_name/text() = $vm_name])" />
+      </xsl:variable>
+
       <xsl:variable name="pci_devs" select="count(./pci_devs/pci_dev[text() != ''])" />
       <xsl:variable name="pci_hostbridge" select="1" />
       <xsl:variable name="virtual_root_port">
@@ -369,6 +374,9 @@
       <!-- apl-up2 hidden devices list: [00:0d:0] -->
       <xsl:when test="//@board = 'apl-up2'">
         <func:result select="1" />
+      </xsl:when>
+      <xsl:when test="count(//HIDDEN_PDEV/text()) > 0">
+        <func:result select="count(//HIDDEN_PDEV/text())" />
       </xsl:when>
       <xsl:otherwise>
         <func:result select="0" />
@@ -536,6 +544,29 @@
     <func:result select="$unique_mapping" />
   </func:function>
 
+  <func:function name="acrn:binary-bdf">
+      <xsl:param name="bdf" />
+      <xsl:variable name="bus" select="substring-before($bdf, ':')" />
+      <xsl:variable name="device" select="substring-before(substring-after($bdf, ':'), '.')" />
+      <xsl:variable name="function" select="substring-after($bdf, '.')" />
+      <xsl:variable name="serial_bdf">
+        <xsl:text>0b</xsl:text>
+        <xsl:call-template name="hex-to-bin">
+          <xsl:with-param name="s" select="$bus" />
+          <xsl:with-param name="width" select="4" />
+        </xsl:call-template>
+        <xsl:call-template name="hex-to-bin">
+          <xsl:with-param name="s" select="$device" />
+          <xsl:with-param name="width" select="1" />
+        </xsl:call-template>
+        <xsl:call-template name="hex-to-bin">
+          <xsl:with-param name="s" select="$function" />
+          <xsl:with-param name="width" select="3" />
+        </xsl:call-template>
+      </xsl:variable>
+      <func:result select="$serial_bdf" />
+  </func:function>
+
   <func:function name="acrn:get-vbdf">
     <xsl:param name="vmid" />
     <xsl:param name="name" />
@@ -564,12 +595,12 @@
 
   <!-- Board-specific functions-->
   <func:function name="acrn:get-normalized-closinfo-rdt-res-str">
-    <xsl:variable name="rdt_resource" select="translate(substring-before(substring-after(//CLOS_INFO, 'rdt resources supported:'), 'rdt resource clos max:'), $whitespaces, '')" />
+    <xsl:variable name="rdt_resource" select="acrn:string-join(//cache[capability/@id='CAT']/@level, ', ', 'L', '')" />
     <func:result select="$rdt_resource" />
   </func:function>
 
   <func:function name="acrn:get-normalized-closinfo-rdt-clos-max-str">
-    <xsl:variable name="rdt_res_clos_max" select="translate(substring-before(substring-after(//CLOS_INFO, 'rdt resource clos max:'), 'rdt resource mask max:'), $whitespaces, '')" />
+    <xsl:variable name="rdt_res_clos_max" select="acrn:string-join(//cache[capability/@id='CAT']/capability/clos_number, ', ', '', '')"/>
     <func:result select="$rdt_res_clos_max" />
   </func:function>
 

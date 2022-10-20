@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Intel Corporation. All rights reserved.
+ * Copyright (C) 2021-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -24,7 +24,10 @@
  */
 bool is_l2_vcat_configured(const struct acrn_vm *vm)
 {
-	return is_vcat_configured(vm) && (get_rdt_res_cap_info(RDT_RESOURCE_L2)->num_closids > 0U);
+	uint16_t pcpu = ffs64(vm->hw.cpu_affinity);
+	const struct rdt_ins *ins = get_rdt_res_ins(RDT_RESOURCE_L2, pcpu);
+
+	return is_vcat_configured(vm) && ins != NULL && (ins->num_closids > 0U);
 }
 
 /**
@@ -32,7 +35,10 @@ bool is_l2_vcat_configured(const struct acrn_vm *vm)
  */
 bool is_l3_vcat_configured(const struct acrn_vm *vm)
 {
-	return is_vcat_configured(vm) && (get_rdt_res_cap_info(RDT_RESOURCE_L3)->num_closids > 0U);
+	uint16_t pcpu = ffs64(vm->hw.cpu_affinity);
+	const struct rdt_ins *ins = get_rdt_res_ins(RDT_RESOURCE_L3, pcpu);
+
+	return is_vcat_configured(vm) && ins != NULL && (ins->num_closids > 0U);
 }
 
 /**
@@ -175,7 +181,7 @@ static bool is_l2_vcbm_msr(const struct acrn_vm *vm, uint32_t vmsr)
 	/* num_vcbm_msrs = num_vclosids */
 	uint16_t num_vcbm_msrs = vcat_get_num_vclosids(vm);
 
-	return ((get_rdt_res_cap_info(RDT_RESOURCE_L2)->num_closids > 0U)
+	return (is_l2_vcat_configured(vm)
 		&& (vmsr >= MSR_IA32_L2_MASK_BASE) && (vmsr < (MSR_IA32_L2_MASK_BASE + num_vcbm_msrs)));
 }
 
@@ -187,7 +193,7 @@ static bool is_l3_vcbm_msr(const struct acrn_vm *vm, uint32_t vmsr)
 	/* num_vcbm_msrs = num_vclosids */
 	uint16_t num_vcbm_msrs = vcat_get_num_vclosids(vm);
 
-	return ((get_rdt_res_cap_info(RDT_RESOURCE_L3)->num_closids > 0U)
+	return (is_l3_vcat_configured(vm)
 		&& (vmsr >= MSR_IA32_L3_MASK_BASE) && (vmsr < (MSR_IA32_L3_MASK_BASE + num_vcbm_msrs)));
 }
 
@@ -409,10 +415,10 @@ int32_t write_vclosid(struct acrn_vcpu *vcpu, uint64_t val)
 			 * Write the new pCLOSID value to the guest msr area
 			 *
 			 * The prepare_auto_msr_area() function has already initialized the vcpu->arch.msr_area.
-			 * Here we only need to update the vcpu->arch.msr_area.guest[MSR_AREA_IA32_PQR_ASSOC].value field,
+			 * Here we only need to update the vcpu->arch.msr_area.guest[].value field for IA32_PQR_ASSOC,
 			 * all other vcpu->arch.msr_area fields remains unchanged at runtime.
 			 */
-			vcpu->arch.msr_area.guest[MSR_AREA_IA32_PQR_ASSOC].value = clos2pqr_msr(pclosid);
+			vcpu->arch.msr_area.guest[vcpu->arch.msr_area.index_of_pqr_assoc].value = clos2pqr_msr(pclosid);
 
 			ret = 0;
 		}

@@ -1,7 +1,6 @@
 /*-
  * Copyright (c) 2011 NetApp, Inc.
- * Copyright (c) 2017 Intel Corporation
- * All rights reserved.
+ * Copyright (c) 2017-2022 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -81,19 +80,15 @@ static inline void ppt_clflush_pagewalk(const void* entry __attribute__((unused)
 {
 }
 
-static inline uint64_t ppt_pgentry_present(uint64_t pte)
-{
-	return pte & PAGE_PRESENT;
-}
 
 static inline void ppt_nop_tweak_exe_right(uint64_t *entry __attribute__((unused))) {}
 static inline void ppt_nop_recover_exe_right(uint64_t *entry __attribute__((unused))) {}
 
 static const struct pgtable ppt_pgtable = {
 	.default_access_right = (PAGE_PRESENT | PAGE_RW | PAGE_USER),
+	.pgentry_present_mask = PAGE_PRESENT,
 	.pool = &ppt_page_pool,
 	.large_page_support = ppt_large_page_support,
-	.pgentry_present = ppt_pgentry_present,
 	.clflush_pagewalk = ppt_clflush_pagewalk,
 	.tweak_exe_right = ppt_nop_tweak_exe_right,
 	.recover_exe_right = ppt_nop_recover_exe_right,
@@ -294,12 +289,12 @@ void init_paging(void)
 		pgtable_add_map((uint64_t *)ppt_mmu_pml4_addr, high64_min_ram, high64_min_ram,
 				high64_max_ram - high64_min_ram, PAGE_ATTR_USER | PAGE_CACHE_WB, &ppt_pgtable);
 	}
-	/* Map [low32_max_ram, 4G) and [HI_MMIO_START, HI_MMIO_END) MMIO regions as UC attribute */
+	/* Map [low32_max_ram, 4G) and [MMIO64_START, MMIO64_END) MMIO regions as UC attribute */
 	pgtable_add_map((uint64_t *)ppt_mmu_pml4_addr, low32_max_ram, low32_max_ram,
 		MEM_4G - low32_max_ram, PAGE_ATTR_USER | PAGE_CACHE_UC, &ppt_pgtable);
-	if ((HI_MMIO_START != ~0UL) && (HI_MMIO_END != 0UL)) {
-		pgtable_add_map((uint64_t *)ppt_mmu_pml4_addr, HI_MMIO_START, HI_MMIO_START,
-			(HI_MMIO_END - HI_MMIO_START), PAGE_ATTR_USER | PAGE_CACHE_UC, &ppt_pgtable);
+	if ((MMIO64_START != ~0UL) && (MMIO64_END != 0UL)) {
+		pgtable_add_map((uint64_t *)ppt_mmu_pml4_addr, MMIO64_START, MMIO64_START,
+			(MMIO64_END - MMIO64_START), PAGE_ATTR_USER | PAGE_CACHE_UC, &ppt_pgtable);
 	}
 
 	/*
@@ -321,9 +316,9 @@ void init_paging(void)
 	pgtable_modify_or_del_map((uint64_t *)ppt_mmu_pml4_addr, round_pde_down(hv_hva),
 			round_pde_up((uint64_t)&ld_text_end) - round_pde_down(hv_hva), 0UL,
 			PAGE_NX, &ppt_pgtable, MR_MODIFY);
-#if (SERVICE_VM_NUM == 1)
+#if ((SERVICE_VM_NUM == 1) && (MAX_TRUSTY_VM_NUM > 0))
 	pgtable_modify_or_del_map((uint64_t *)ppt_mmu_pml4_addr, (uint64_t)get_sworld_memory_base(),
-			TRUSTY_RAM_SIZE * MAX_POST_VM_NUM, PAGE_USER, 0UL, &ppt_pgtable, MR_MODIFY);
+			TRUSTY_RAM_SIZE * MAX_TRUSTY_VM_NUM, PAGE_USER, 0UL, &ppt_pgtable, MR_MODIFY);
 #endif
 
 	/* Enable paging */

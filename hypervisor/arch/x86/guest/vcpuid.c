@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -115,6 +115,13 @@ static void init_vcpuid_entry(uint32_t leaf, uint32_t subleaf,
 	entry->flags = flags;
 
 	switch (leaf) {
+
+	case 0x06U:
+		cpuid_subleaf(leaf, subleaf, &entry->eax, &entry->ebx, &entry->ecx, &entry->edx);
+		entry->eax &= ~(CPUID_EAX_HWP | CPUID_EAX_HWP_N | CPUID_EAX_HWP_AW | CPUID_EAX_HWP_EPP | CPUID_EAX_HWP_PLR);
+		entry->ecx &= ~CPUID_ECX_HCFC;
+		break;
+
 	case 0x07U:
 		if (subleaf == 0U) {
 			uint64_t cr4_reserved_mask = get_cr4_reserved_bits();
@@ -490,6 +497,11 @@ static int32_t set_vcpuid_extended_function(struct acrn_vm *vm)
 	return result;
 }
 
+static inline bool is_percpu_related(uint32_t leaf)
+{
+	return ((leaf == 0x1U) || (leaf == 0xbU) || (leaf == 0xdU) || (leaf == 0x19U) || (leaf == 0x80000001U) || (leaf == 0x2U) || (leaf == 0x1aU));
+}
+
 int32_t set_vcpuid_entries(struct acrn_vm *vm)
 {
 	int32_t result;
@@ -509,8 +521,7 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 		vm->vcpuid_level = limit;
 
 		for (i = 1U; i <= limit; i++) {
-			/* cpuid 1/0xb is percpu related */
-			if ((i == 1U) || (i == 0xbU) || (i == 0xdU) || (i == 0x19U)) {
+			if (is_percpu_related(i)) {
 				continue;
 			}
 
@@ -604,11 +615,6 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 	return result;
 }
 
-static inline bool is_percpu_related(uint32_t leaf)
-{
-	return ((leaf == 0x1U) || (leaf == 0xbU) || (leaf == 0xdU) || (leaf == 0x19U) || (leaf == 0x80000001U));
-}
-
 static void guest_cpuid_01h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
 	uint32_t apicid = vlapic_get_apicid(vcpu_vlapic(vcpu));
@@ -627,6 +633,8 @@ static void guest_cpuid_01h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx
 
 	/* mask Safer Mode Extension */
 	*ecx &= ~CPUID_ECX_SMX;
+
+	*ecx &= ~CPUID_ECX_EST;
 
 	/* mask SDBG for silicon debug */
 	*ecx &= ~CPUID_ECX_SDBG;
@@ -850,11 +858,11 @@ void guest_cpuid(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t 
 
 		default:
 			/*
-			 * In this switch statement, leaf shall either be 0x01U or 0x0bU
-			 * or 0x0dU or 0x80000001U. All the other cases have been handled properly
-			 * before this switch statement.
-			 * Gracefully return if prior case clauses have not been met.
+			 * In this switch statement, leaf 0x01/0x0b/0x0d/0x19/0x80000001
+			 * shall be handled specifically. All the other cases
+			 * just return physical value.
 			 */
+			cpuid_subleaf(leaf, *ecx, eax, ebx, ecx, edx);
 			break;
 		}
 	}

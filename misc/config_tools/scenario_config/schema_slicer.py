@@ -236,8 +236,10 @@ def main(args):
 
     print(f"Sliced schema written to {args.out}")
 
+
 if __name__ == "__main__":
-    config_tools_dir = os.path.join(os.path.dirname(__file__), "..")
+    # abs __file__ path to ignore `__file__ == 'schema_slicer.py'` issue
+    config_tools_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
     schema_dir = os.path.join(config_tools_dir, "schema")
 
     parser = argparse.ArgumentParser(description="Slice a given scenario schema by VM types and views")

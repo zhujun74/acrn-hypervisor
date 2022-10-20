@@ -72,11 +72,11 @@ using LAPIC passthrough. A few exceptions exist:
 
 - NMI - ACRN uses NMI for system-level notification.
 
-You should avoid VM-exits triggered by operations initiated by the
-vCPU. Refer to the `Intel Software Developer Manuals (SDM)
-<https://software.intel.com/en-us/articles/intel-sdm>`_ "Instructions
-Cause VM-exits Unconditionally" (SDM V3, 25.1.2) and "Instructions That
-Cause VM-exits Conditionally" (SDM V3, 25.1.3).
+You should avoid VM-exits triggered by operations initiated by the vCPU. Refer
+to the `Intel 64 and IA-32 Architectures Software Developer's Manual (SDM)
+<https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html>`_
+"Instructions That Cause VM Exits Unconditionally" (SDM V3, 25.1.2) and
+"Instructions That Cause VM Exits Conditionally" (SDM V3, 25.1.3).
 
 Tip: Do not use CPUID in a real-time critical section.
    The CPUID instruction causes VM-exits unconditionally. You should
@@ -189,8 +189,9 @@ Tip: Disable the software workaround for Machine Check Error on Page Size Change
    By default, the software workaround for Machine Check Error on Page Size
    Change is conditionally applied to the models that may be affected by the
    issue. However, the software workaround has a negative impact on
-   performance. If all guest OS kernels are trusted, the
-   :option:`hv.FEATURES.MCE_ON_PSC_DISABLED` option could be set for performance.
+   performance. If all guest OS kernels are trusted, you can disable the
+   software workaround (by deselecting the :term:`Enable MCE workaround` option
+   in the ACRN Configurator tool) for performance.
 
 .. note::
    The tips for preempt-RT Linux are mostly applicable to the Linux-based RTOS as well, such as Xenomai.

@@ -47,6 +47,7 @@
 #include "lpc.h"
 #include "sw_load.h"
 #include "log.h"
+#include "vdisplay.h"
 
 #define CONF1_ADDR_PORT    0x0cf8
 #define CONF1_DATA_PORT    0x0cfc
@@ -91,6 +92,7 @@ static uint64_t pci_emul_membase32;
 static uint64_t pci_emul_membase64;
 
 extern bool skip_pci_mem64bar_workaround;
+extern bool gfx_ui;
 
 struct io_rsvd_rgn reserved_bar_regions[REGION_NUMS];
 
@@ -308,6 +310,12 @@ pci_parse_slot(char *opt)
 		goto done;
 	}
 
+	if ((strcmp("pci-gvt", emul) == 0) || (strcmp("virtio-hdcp", emul) == 0)
+			|| (strcmp("npk", emul) == 0) || (strcmp("virtio-coreu", emul) == 0)) {
+		pr_warn("The \"%s\" parameter is obsolete and ignored\n", emul);
+		goto done;
+	}
+
 	/* <bus>:<slot>:<func> */
 	if (parse_bdf(str, &bnum, &snum, &fnum, 10) != 0)
 		snum = -1;
@@ -350,6 +358,13 @@ pci_parse_slot(char *opt)
 			(strchr(b, 'b') != NULL)) {
 			vsbl_set_bdf(bnum, snum, fnum);
 		}
+	}
+
+	if ((strcmp("virtio-gpu", emul) == 0)) {
+		pr_info("%s: virtio-gpu device found, activating virtual display.\n",
+				__func__);
+		gfx_ui = true;
+		vdpy_parse_cmd_option(config);
 	}
 done:
 	if (error)
@@ -769,6 +784,23 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 			size = 16;
 	}
 
+	if (idx > PCI_ROMBAR) {
+		pr_err("%s: invalid bar number %d for PCI bar type\n", __func__, idx);
+		return -1;
+	}
+	if (idx == PCI_ROMBAR) {
+		/*
+		 * It needs to pass the PCIBAR_ROM for PCI_ROMBAR idx. But as it
+		 * is allocated from PCI_EMUL_MEM32 type, the internal type is
+		 * changed to PCIBAR_MEM32
+		 */
+		if (type != PCIBAR_ROM) {
+			pr_err("%s: invalid bar type %d for PCI ROM\n",
+				__func__, type);
+			return -1;
+		}
+		type = PCIBAR_MEM32;
+	}
 	switch (type) {
 	case PCIBAR_NONE:
 		baseptr = NULL;
@@ -838,13 +870,20 @@ pci_emul_alloc_pbar(struct pci_vdev *pdi, int idx, uint64_t hostbase,
 	pdi->bar[idx].addr = addr;
 	pdi->bar[idx].size = size;
 
-	/* Initialize the BAR register in config space */
-	bar = (addr & mask) | lobits;
-	pci_set_cfgdata32(pdi, PCIR_BAR(idx), bar);
+	if (idx == PCI_ROMBAR) {
+		mask = PCIM_BIOS_ADDR_MASK;
+		bar = addr & mask;
+		/* enable flag will be configured later */
+		pci_set_cfgdata32(pdi, PCIR_BIOS, bar);
+	} else {
+		/* Initialize the BAR register in config space */
+		bar = (addr & mask) | lobits;
+		pci_set_cfgdata32(pdi, PCIR_BAR(idx), bar);
 
-	if (type == PCIBAR_MEM64) {
-		pdi->bar[idx + 1].type = PCIBAR_MEMHI64;
-		pci_set_cfgdata32(pdi, PCIR_BAR(idx + 1), bar >> 32);
+		if (type == PCIBAR_MEM64) {
+			pdi->bar[idx + 1].type = PCIBAR_MEMHI64;
+			pci_set_cfgdata32(pdi, PCIR_BAR(idx + 1), bar >> 32);
+		}
 	}
 
 	error = register_bar(pdi, idx);
@@ -946,7 +985,7 @@ pci_emul_add_capability(struct pci_vdev *dev, u_char *capdata, int caplen)
 int
 pci_emul_find_capability(struct pci_vdev *dev, uint8_t capid, int *p_capoff)
 {
-	int coff;
+	int coff = 0;
 	uint16_t sts;
 
 	sts = pci_get_cfgdata16(dev, PCIR_STATUS);
@@ -1050,6 +1089,77 @@ pci_emul_deinit(struct vmctx *ctx, struct pci_vdev_ops *ops, int bus, int slot,
 	}
 }
 
+static int
+pci_access_msi(struct pci_vdev *dev, int msi_cap, uint32_t *val, bool is_write)
+{
+	uint16_t msgctrl;
+	int rc, offset = 0;
+
+	if (msi_cap > PCIR_MSI_PENDING) {
+		pr_err("%s: Msi capability length is out of msi length!\n", __func__);
+		return -1;
+	}
+	rc = pci_emul_find_capability(dev, PCIY_MSI, &offset);
+	if (rc)
+		return -1;
+
+	msgctrl = pci_get_cfgdata16(dev, offset + PCIR_MSI_CTRL);
+	if (msgctrl & PCIM_MSICTRL_64BIT)
+		offset = offset + msi_cap;
+	else
+		offset = offset + msi_cap - 0x04;
+
+	if (is_write)
+		pci_set_cfgdata32(dev, offset, *val);
+	else
+		*val = pci_get_cfgdata32(dev, offset);
+	return 0;
+}
+
+static bool
+pci_is_msi_masked(struct pci_vdev *dev, uint32_t index)
+{
+	uint32_t val = 0;
+	int rc;
+
+	rc = pci_access_msi(dev, PCIR_MSI_MASK, &val, false);
+	if (rc)
+		return 0;
+	return val & (1 << index);
+}
+
+static bool
+pci_is_msi_pending(struct pci_vdev *dev, uint32_t index)
+{
+	uint32_t val = 0;
+	int rc;
+
+	rc = pci_access_msi(dev, PCIR_MSI_PENDING, &val, false);
+	if (rc)
+		return 0;
+	return val & (1 << index);
+}
+
+static void
+pci_set_msi_pending(struct pci_vdev *dev, uint32_t index, bool set)
+{
+	uint32_t val;
+	int rc;
+
+	rc = pci_access_msi(dev, PCIR_MSI_PENDING,
+			&val, false);
+	if (rc) {
+		pr_err("%s: Pci access msi capability failed!\n", __func__);
+		return;
+	}
+
+	if (set)
+		val = (1 << index) | val;
+	else
+		val = (~(1 << index)) & val;
+	pci_access_msi(dev, PCIR_MSI_PENDING, &val, true);
+}
+
 int
 pci_populate_msicap(struct msicap *msicap, int msgnum, int nextptr)
 {
@@ -1065,7 +1175,7 @@ pci_populate_msicap(struct msicap *msicap, int msgnum, int nextptr)
 	bzero(msicap, sizeof(struct msicap));
 	msicap->capid = PCIY_MSI;
 	msicap->nextptr = nextptr;
-	msicap->msgctrl = PCIM_MSICTRL_64BIT | (mmc << 1);
+	msicap->msgctrl = PCIM_MSICTRL_64BIT | PCIM_MSICTRL_PVMC | (mmc << 1);
 
 	return 0;
 }
@@ -1073,7 +1183,7 @@ pci_populate_msicap(struct msicap *msicap, int msgnum, int nextptr)
 int
 pci_emul_add_msicap(struct pci_vdev *dev, int msgnum)
 {
-	struct msicap msicap;
+	struct msicap msicap = {0};
 
 	return pci_populate_msicap(&msicap, msgnum, 0) ||
 		pci_emul_add_capability(dev, (u_char *)&msicap, sizeof(msicap));
@@ -1199,6 +1309,7 @@ msicap_cfgwrite(struct pci_vdev *dev, int capoff, int offset,
 {
 	uint16_t msgctrl, rwmask, msgdata, mme;
 	uint32_t addrlo;
+	int i;
 
 	/*
 	 * If guest is writing to the message control register make sure
@@ -1230,6 +1341,14 @@ msicap_cfgwrite(struct pci_vdev *dev, int capoff, int offset,
 	}
 
 	CFGWRITE(dev, offset, val, bytes);
+	if (dev->msi.enabled) {
+		for (i = 0; i < dev->msi.maxmsgnum; i++) {
+			if (!pci_is_msi_masked(dev, i)
+				&& pci_is_msi_pending(dev, i)) {
+				pci_generate_msi(dev, i);
+			}
+		}
+	}
 }
 
 void
@@ -1929,8 +2048,13 @@ void
 pci_generate_msi(struct pci_vdev *dev, int index)
 {
 	if (pci_msi_enabled(dev) && index < pci_msi_maxmsgnum(dev)) {
+		if (pci_is_msi_masked(dev, index)) {
+			pci_set_msi_pending(dev, index, true);
+			return;
+		}
 		vm_lapic_msi(dev->vmctx, dev->msi.addr,
 			     dev->msi.msg_data + index);
+		pci_set_msi_pending(dev, index, false);
 	}
 }
 

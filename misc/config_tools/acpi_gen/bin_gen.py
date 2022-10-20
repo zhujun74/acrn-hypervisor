@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation.
+# Copyright (C) 2019-2022 Intel Corporation.
 # SPDX-License-Identifier: BSD-3-Clause
 
 """the tool to generate ACPI binary for Pre-launched VMs.
@@ -26,10 +26,8 @@ def move_rtct_ssram_and_bin_entries(rtct, new_base_addr, new_area_max_size):
     '''
     if rtct.version == 1:
         expect_ssram_type = acpiparser.rtct.ACPI_RTCT_V1_TYPE_SoftwareSRAM
-        expect_bin_type = acpiparser.rtct.ACPI_RTCT_V1_TYPE_CRL_Binary
     elif rtct.version == 2:
         expect_ssram_type = acpiparser.rtct.ACPI_RTCT_V2_TYPE_SoftwareSRAM
-        expect_bin_type = acpiparser.rtct.ACPI_RTCT_V2_TYPE_CRL_Binary
     else:
         raise Exception("RTCT version error! ", rtct.version)
     top = 0
@@ -38,22 +36,17 @@ def move_rtct_ssram_and_bin_entries(rtct, new_base_addr, new_area_max_size):
         if entry.type == expect_ssram_type:
             top = (entry.base + entry.size) if top < (entry.base + entry.size) else top
             base = entry.base if base == 0 or entry.base < base else base
-        elif entry.type == expect_bin_type:
-            top = (entry.address + entry.size) if top < (entry.address + entry.size) else top
-            base = entry.address if base == 0 or entry.address < base else base
     if new_area_max_size < (top - base):
         raise Exception("not enough space in guest VE820 SSRAM area!")
     rtct_move_offset = new_base_addr - base
     for entry in rtct.entries:
         if entry.type == expect_ssram_type:
             entry.base += rtct_move_offset
-        elif entry.type == expect_bin_type:
-            entry.address += rtct_move_offset
     # re-calculate checksum
     rtct.header.checksum = 0
     rtct.header.checksum = 0 - sum(bytes(rtct))
 
-def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocation_etree):
+def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocation_etree, iasl_path):
     '''
     compile asl code of ACPI table to aml code.
     :param dest_vm_acpi_path: the path of the asl code of ACPI tables
@@ -68,7 +61,7 @@ def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocat
     for acpi_table in ACPI_TABLE_LIST:
         if acpi_table[0] == 'tpm2.asl':
             if 'tpm2.asl' in os.listdir(dest_vm_acpi_path):
-                rc = exec_command('iasl {}'.format(acpi_table[0]))
+                rc = exec_command('{} {}'.format(iasl_path, acpi_table[0]))
                 if rc == 0 and os.path.isfile(os.path.join(dest_vm_acpi_path, acpi_table[1])):
                     shutil.move(os.path.join(dest_vm_acpi_path, acpi_table[1]),
                                 os.path.join(dest_vm_acpi_bin_path, acpi_table[1]))
@@ -77,7 +70,7 @@ def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocat
                         os.remove(os.path.join(dest_vm_acpi_path, acpi_table[1]))
                     rmsg = 'failed to compile {}'.format(acpi_table[0])
                     break
-        elif acpi_table[0] in ['PTCT', 'RTCT']:
+        elif acpi_table[0] in ['ptct.aml', 'rtct.aml']:
             if acpi_table[0] in os.listdir(dest_vm_acpi_path):
                 rtct = acpiparser.rtct.RTCT(os.path.join(dest_vm_acpi_path, acpi_table[0]))
                 outfile = os.path.join(dest_vm_acpi_bin_path, acpi_table[1])
@@ -93,7 +86,7 @@ def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocat
                 fp.close()
         else:
             if acpi_table[0].endswith(".asl"):
-                rc = exec_command('iasl {}'.format(acpi_table[0]))
+                rc = exec_command('{} {}'.format(iasl_path, acpi_table[0]))
                 if rc == 0 and os.path.isfile(os.path.join(dest_vm_acpi_path, acpi_table[1])):
                     shutil.move(os.path.join(dest_vm_acpi_path, acpi_table[1]),
                                 os.path.join(dest_vm_acpi_bin_path, acpi_table[1]))
@@ -102,7 +95,7 @@ def asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocat
                         os.remove(os.path.join(dest_vm_acpi_path, acpi_table[1]))
                     rmsg = 'failed to compile {}'.format(acpi_table[0])
                     break
-            elif acpi_table[0].endswith(".aml"):
+            elif acpi_table[0].endswith(".aml") and acpi_table[0] in os.listdir(dest_vm_acpi_path):
                 shutil.copy(os.path.join(dest_vm_acpi_path, acpi_table[0]),
                             os.path.join(dest_vm_acpi_bin_path, acpi_table[1]))
 
@@ -178,11 +171,11 @@ def aml_to_bin(dest_vm_acpi_path, dest_vm_acpi_bin_path, acpi_bin_name, board_et
         with open(os.path.join(dest_vm_acpi_bin_path, ACPI_TABLE_LIST[6][1]), 'rb') as asl:
             acpi_bin.write(asl.read())
 
-        if 'PTCT' in os.listdir(dest_vm_acpi_path):
+        if ACPI_TABLE_LIST[7][1] in os.listdir(dest_vm_acpi_path):
             acpi_bin.seek(ACPI_RTCT_ADDR_OFFSET)
             with open(os.path.join(dest_vm_acpi_bin_path, ACPI_TABLE_LIST[7][1]), 'rb') as asl:
                 acpi_bin.write(asl.read())
-        elif 'RTCT' in os.listdir(dest_vm_acpi_path):
+        elif ACPI_TABLE_LIST[8][1] in os.listdir(dest_vm_acpi_path):
             acpi_bin.seek(ACPI_RTCT_ADDR_OFFSET)
             with open(os.path.join(dest_vm_acpi_bin_path, ACPI_TABLE_LIST[8][1]), 'rb') as asl:
                 acpi_bin.write(asl.read())
@@ -225,20 +218,21 @@ def exec_command(cmd):
     return rc
 
 
-def check_iasl():
+def check_iasl(iasl_path, iasl_min_ver):
     '''
     check iasl installed
     :return: True if iasl installed.
     '''
     try:
         p_version = 'ASL+ Optimizing Compiler/Disassembler version'
-        min_version = 20190703
-        output = subprocess.check_output(['iasl', '-v']).decode('utf8')
+        min_version = int(iasl_min_ver)
+        output = subprocess.check_output([iasl_path, '-v']).decode('utf8')
         if p_version in output:
             try:
                 for line in output.split('\n'):
                     if line.find(p_version) >= 0:
                         version = int(line.split(p_version)[1].strip())
+                        print('iasl version is {}'.format(version))
                         if version >= min_version:
                             return True
             except:
@@ -276,8 +270,9 @@ def main(args):
     if os.path.isdir(DEST_ACPI_BIN_PATH):
         shutil.rmtree(DEST_ACPI_BIN_PATH)
 
-    if not check_iasl():
-        print("Please install iasl tool with version >= 20190703 from https://www.acpica.org/downloads before ACPI generation.")
+    if not check_iasl(args.iasl_path, args.iasl_min_ver):
+        print('Please install iasl tool with version >= {} from https://www.acpica.org/downloads '
+              'before ACPI generation.'.format(args.iasl_min_ver))
         return 1
 
     for config in os.listdir(DEST_ACPI_PATH):
@@ -286,7 +281,7 @@ def main(args):
             dest_vm_acpi_path = os.path.join(DEST_ACPI_PATH, config)
             dest_vm_acpi_bin_path = os.path.join(DEST_ACPI_BIN_PATH, config)
             os.makedirs(dest_vm_acpi_bin_path)
-            if asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocation_etree):
+            if asl_to_aml(dest_vm_acpi_path, dest_vm_acpi_bin_path, scenario_etree, allocation_etree, args.iasl_path):
                 return 1
             aml_to_bin(dest_vm_acpi_path, dest_vm_acpi_bin_path, config+'.bin', board_etree, scenario_etree, allocation_etree)
 
@@ -294,11 +289,15 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(usage="python3 bin_gen.py --board [board] --scenario [scenario]"
+                                           " --iasl_path [the path to the iasl compiler]"
+                                           " --iasl_min_ver [the minimum iasl version]"
                                            "[ --out [output dir of acpi ASL code]]",
                                      description="the tool to generate ACPI binary for Pre-launched VMs")
     parser.add_argument("--board", required=True, help="the XML file summarizing characteristics of the target board")
     parser.add_argument("--scenario", required=True, help="the XML file specifying the scenario to be set up")
     parser.add_argument("--asl", default=None, help="the input folder to store the ACPI ASL code. ")
+    parser.add_argument("--iasl_path", default=None, help="the path to the iasl compiler.")
+    parser.add_argument("--iasl_min_ver", default=None, help="the minimum iasl version.")
     parser.add_argument("--out", default=None, help="the output folder to store the ACPI binary code. "
                                                     "If not specified, the path for the binary code is"
                                                     "build/hypervisor/acpi/")

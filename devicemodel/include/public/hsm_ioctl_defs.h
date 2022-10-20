@@ -4,7 +4,7 @@
  *
  * GPL LICENSE SUMMARY
  *
- * Copyright (c) 2017 Intel Corporation. All rights reserved.
+ * Copyright (c) 2017-2022 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -17,7 +17,7 @@
  *
  * BSD LICENSE
  *
- * Copyright (C) 2017 Intel Corporation. All rights reserved.
+ * Copyright (C) 2017-2022 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -107,6 +107,8 @@
 	_IOW(ACRN_IOCTL_TYPE, 0x41, struct acrn_vm_memmap)
 #define ACRN_IOCTL_UNSET_MEMSEG		\
 	_IOW(ACRN_IOCTL_TYPE, 0x42, struct acrn_vm_memmap)
+#define ACRN_IOCTL_SETUP_SBUF	\
+	_IOW(ACRN_IOCTL_TYPE, 0x43, struct acrn_sbuf)
 
 /* PCI assignment*/
 #define ACRN_IOCTL_SET_PTDEV_INTR	\
@@ -224,6 +226,7 @@ struct acrn_ioeventfd {
 #define ACRN_IOEVENTFD_FLAG_PIO		0x01
 #define ACRN_IOEVENTFD_FLAG_DATAMATCH	0x02
 #define ACRN_IOEVENTFD_FLAG_DEASSIGN	0x04
+#define ACRN_IOEVENTFD_FLAG_ASYNCIO	0x08
        /** file descriptor of the eventfd of this ioeventfd */
        int32_t fd;
        /** flag for ioeventfd ioctl */
@@ -245,5 +248,15 @@ struct acrn_irqfd {
        uint32_t flags;
        /** MSI interrupt to be injected */
        struct acrn_msi_entry msi;
+};
+
+/**
+ * @brief data structure to register a share buffer by ioctl
+ */
+struct acrn_sbuf {
+	/** Type of the sbuf. */
+	uint32_t sbuf_id;
+	/** Base address of the sbuf. */
+	uint64_t base;
 };
 #endif /* VHM_IOCTL_DEFS_H */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021 Intel Corporation.
+ * Copyright (c) 2021-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -76,7 +76,7 @@ static void deinit_vrp(__unused struct pci_vdev *vdev)
 	vdev->user = NULL;
 }
 
-static int32_t read_vrp_cfg(const struct pci_vdev *vdev, uint32_t offset,
+static int32_t read_vrp_cfg(struct pci_vdev *vdev, uint32_t offset,
 	uint32_t bytes, uint32_t *val)
 {
 	*val = pci_vdev_read_vcfg(vdev, offset, bytes);

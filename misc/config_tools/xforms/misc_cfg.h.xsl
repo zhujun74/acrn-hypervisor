@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<!-- Copyright (C) 2021 Intel Corporation. All rights reserved. -->
+<!-- Copyright (C) 2021-2022 Intel Corporation. -->
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 
 <xsl:stylesheet
@@ -24,7 +24,7 @@
     <xsl:apply-templates select="board-data/acrn-config" />
     <xsl:apply-templates select="config-data/acrn-config" />
 
-    <xsl:apply-templates select="allocation-data//ssram" />
+    <xsl:apply-templates select="allocation-data/acrn-config" />
 
     <xsl:value-of select="acrn:include-guard-end('MISC_CFG_H')" />
   </xsl:template>
@@ -44,10 +44,15 @@
     <xsl:call-template name="vm_boot_args" />
   </xsl:template>
 
-  <xsl:template match="allocation-data//ssram">
-    <xsl:value-of select="acrn:define('PRE_RTVM_SW_SRAM_ENABLED', 1, '')" />
-    <xsl:value-of select="acrn:define('PRE_RTVM_SW_SRAM_BASE_GPA', start_gpa, 'UL')" />
-    <xsl:value-of select="acrn:define('PRE_RTVM_SW_SRAM_END_GPA', end_gpa, 'UL')" />
+  <xsl:template match="allocation-data/acrn-config">
+    <xsl:choose>
+      <xsl:when test="//ssram">
+        <xsl:value-of select="acrn:define('PRE_RTVM_SW_SRAM_MAX_SIZE', //ssram/max_size, 'UL')" />
+      </xsl:when>
+      <xsl:otherwise>
+        <xsl:value-of select="acrn:define('PRE_RTVM_SW_SRAM_MAX_SIZE', 0, 'UL')" />
+      </xsl:otherwise>
+    </xsl:choose>
   </xsl:template>
 
   <xsl:template match="BLOCK_DEVICE_INFO">
@@ -75,8 +80,7 @@
   </xsl:for-each>
   </xsl:variable>
   <xsl:variable name="sos_bootargs" select="normalize-space(str:replace(//vm[acrn:is-service-vm(load_order)]/os_config/bootargs[text()], $sos_rootfs, ''))" />
-  <xsl:variable name="maxcpunum" select="count(//vm[acrn:is-service-vm(load_order)]/cpu_affinity/pcpu_id)" />
-  <xsl:variable name="hugepages" select="round(number(substring-before(//board-data//TOTAL_MEM_INFO, 'kB')) div (1024 * 1024)) - 3" />
+  <xsl:variable name="maxcpunum" select="count(//vm[acrn:is-service-vm(load_order)]/cpu_affinity//pcpu_id)" />
   <xsl:variable name="maxcpus">
     <xsl:choose>
       <xsl:when test="$maxcpunum != 0">
@@ -89,21 +93,22 @@
   </xsl:variable>
   <xsl:variable name="hugepage_kernelstring">
     <xsl:if test="//board-data//processors//capability[@id='gbyte_pages']">
-      <xsl:value-of select="concat('hugepagesz=1G hugepages=', $hugepages)" />
+      <xsl:value-of select="concat('hugepagesz=1G hugepages=', //allocation-data//vm[acrn:is-service-vm(load_order)]/hugepages/gb)" />
     </xsl:if>
   </xsl:variable>
   <xsl:value-of select="acrn:define('SERVICE_VM_ROOTFS', concat($quot, $sos_rootfs, ' ', $quot), '')" />
   <xsl:value-of select="acrn:define('SERVICE_VM_BOOTARGS_DIFF', concat($quot, $sos_bootargs, ' ', $maxcpus, ' ', $hugepage_kernelstring, ' ', $quot), '')" />
+  <xsl:value-of select="acrn:define('SERVICE_VM_BOOTARGS_MISC', concat($quot, 'udmabuf.list_limit=8192 ', $quot), '')" />
 </xsl:template>
 
 <xsl:template name="cpu_affinity">
   <xsl:for-each select="vm">
     <xsl:choose>
       <xsl:when test="acrn:is-service-vm(load_order)">
-        <xsl:value-of select="acrn:define('SERVICE_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-service-vm(load_order)]/cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
+        <xsl:value-of select="acrn:define('SERVICE_VM_CONFIG_CPU_AFFINITY', concat('(', acrn:string-join(//vm[acrn:is-service-vm(load_order)]/cpu_affinity//pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
       </xsl:when>
       <xsl:otherwise>
-        <xsl:value-of select="acrn:define(concat('VM', @id, '_CONFIG_CPU_AFFINITY'), concat('(', acrn:string-join(cpu_affinity/pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
+        <xsl:value-of select="acrn:define(concat('VM', @id, '_CONFIG_CPU_AFFINITY'), concat('(', acrn:string-join(cpu_affinity//pcpu_id, '|', 'AFFINITY_CPU(', 'U)'),')'), '')" />
       </xsl:otherwise>
     </xsl:choose>
   </xsl:for-each>
@@ -147,12 +152,6 @@
     </xsl:otherwise>
   </xsl:choose>
   <xsl:if test="acrn:is-rdt-supported()">
-    <xsl:for-each select="hv/FEATURES/RDT/MBA_DELAY">
-      <xsl:value-of select="acrn:define(concat('MBA_MASK_', position() - 1), current(), 'U')" />
-    </xsl:for-each>
-    <xsl:for-each select="hv/FEATURES/RDT/CLOS_MASK">
-      <xsl:value-of select="acrn:define(concat('CLOS_MASK_', position() - 1), current(), 'U')" />
-    </xsl:for-each>
     <xsl:value-of select="$endif" />
   </xsl:if>
 </xsl:template>

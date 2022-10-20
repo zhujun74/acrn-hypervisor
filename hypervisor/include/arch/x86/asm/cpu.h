@@ -1,8 +1,7 @@
 /*-
  * Copyright (c) 1989, 1990 William F. Jolitz
  * Copyright (c) 1990 The Regents of the University of California.
- * Copyright (c) 2017 Intel Corporation
- * All rights reserved.
+ * Copyright (c) 2017-2022 Intel Corporation.
  *
  * This code is derived from software contributed to Berkeley by
  * William Jolitz.
@@ -483,16 +482,16 @@ void wait_sync_change(volatile const uint64_t *sync, uint64_t wake_sync);
 			: "r"(value));				\
 }
 
-#define CPU_XMM_READ(xmm, result_ptr)						\
+#define CPU_XMM_READ(xmm, result_m128i_p)						\
 {										\
-	asm volatile ("movdqu %%" STRINGIFY(xmm) ", %0": "=m" (*(result_ptr)));	\
+	asm volatile ("movdqu %%" STRINGIFY(xmm) ", %0": "=m" (*(result_m128i_p)));	\
 }
 
-#define CPU_XMM_WRITE(xmm, value)					\
+#define CPU_XMM_WRITE(xmm, input_m128i_p)					\
 {								\
 	asm volatile ("movdqu %0, %%" STRINGIFY(xmm)		\
 			: /* No output */			\
-			: "m"(value));				\
+			: "m"(*(input_m128i_p)));				\
 }
 
 static inline uint64_t sgdt(void)
@@ -750,11 +749,11 @@ static inline void read_xmm_0_2(uint64_t *xmm0_addr, uint64_t *xmm1_addr, uint64
 	CPU_XMM_READ(xmm2, xmm2_addr);
 }
 
-static inline void write_xmm_0_2(uint64_t xmm0_val, uint64_t xmm1_val, uint64_t xmm2_val)
+static inline void write_xmm_0_2(uint64_t *xmm0_addr, uint64_t *xmm1_addr, uint64_t *xmm2_addr)
 {
-	CPU_XMM_WRITE(xmm0, xmm0_val);
-	CPU_XMM_WRITE(xmm1, xmm1_val);
-	CPU_XMM_WRITE(xmm2, xmm2_val);
+	CPU_XMM_WRITE(xmm0, xmm0_addr);
+	CPU_XMM_WRITE(xmm1, xmm1_addr);
+	CPU_XMM_WRITE(xmm2, xmm2_addr);
 }
 
 /*

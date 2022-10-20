@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -58,6 +58,10 @@ static const struct hc_dispatch hc_dispatch_table[] = {
 		.handler = hcall_inject_msi},
 	[HC_IDX(HC_SET_IOREQ_BUFFER)] = {
 		.handler = hcall_set_ioreq_buffer},
+	[HC_IDX(HC_ASYNCIO_ASSIGN)] = {
+		.handler = hcall_asyncio_assign},
+	[HC_IDX(HC_ASYNCIO_DEASSIGN)] = {
+		.handler = hcall_asyncio_deassign},
 	[HC_IDX(HC_NOTIFY_REQUEST_FINISH)] = {
 		.handler = hcall_notify_ioreq_finish},
 	[HC_IDX(HC_VM_SET_MEMORY_REGIONS)] = {
@@ -181,7 +185,6 @@ struct acrn_vm *parse_target_vm(struct acrn_vm *service_vm, uint64_t hcall_id, u
 	case HC_GET_API_VERSION:
 	case HC_SERVICE_VM_OFFLINE_CPU:
 	case HC_SET_CALLBACK_VECTOR:
-	case HC_SETUP_SBUF:
 	case HC_SETUP_HV_NPK_LOG:
 	case HC_PROFILING_OPS:
 	case HC_GET_HW_INFO:

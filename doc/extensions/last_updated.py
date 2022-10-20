@@ -65,13 +65,13 @@ def _not_git_repo(dir):
 def _get_last_updated_from_git(file_path, git_repo, doc_root):
 
     rel_path = os.path.relpath(file_path, doc_root)
+    time_format = "%Y-%m-%d"
 
     for git_repo_path in git_repo:
 
         new_path = os.path.join(git_repo_path, rel_path)
         if os.path.isfile(new_path):
             try:
-                    time_format = "%Y-%m-%d"
                     output=subprocess.check_output(
                         f'git --no-pager log -1 --date=format:"{time_format}" --pretty="format:%cd" {new_path}',
                         shell=True, cwd=git_repo_path)
@@ -80,11 +80,20 @@ def _get_last_updated_from_git(file_path, git_repo, doc_root):
                     # folder on the list
                     continue
             else:
+                # we found the .rst file in one of the git_repo paths, either
+                # use the date of the last commit (from git) or today's date if
+                # there is no git history for this file.
+                try:
                     last_updated = datetime.strptime(output.decode('utf-8'), time_format).date()
                     return last_updated
+                except:
+                    return date.today()
         else:
+            # can't find a .rst file on that git_repo path, try the next
             continue
 
+    # falling out of the loop means we can't find that file in any of the
+    # git_repo paths
     return None
 
 
@@ -132,8 +141,9 @@ def on_html_page_context(app, pagename, templatename, context, doctree):
                                                         doc_root=app.srcdir)
         if last_updated_value is None:
             app.logger.warning(f'Could not get the last updated value from git for the following file:\
-                    \n {rst_file_path}\n Ensure that you specified the correct folder in last_updated_git_path.')
-            context['last_updated'] = None
+                    \n {rst_file_path}\n Ensure that you specified the correct folder(s) in last_updated_git_path:\
+                    \n {app.config.last_updated_git_path}\n')
+            context['last_updated'] = context['last_published']
         else:
             context['last_updated'] = last_updated_value.strftime(date_fmt)
 

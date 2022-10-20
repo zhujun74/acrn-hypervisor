@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation. All rights reserved.
+ * Copyright (C) 2020-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -221,7 +221,7 @@ static int32_t ivshmem_mmio_handler(struct io_request *io_req, void *data)
 	return 0;
 }
 
-static int32_t read_ivshmem_vdev_cfg(const struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t *val)
+static int32_t read_ivshmem_vdev_cfg(struct pci_vdev *vdev, uint32_t offset, uint32_t bytes, uint32_t *val)
 {
 	*val = pci_vdev_read_vcfg(vdev, offset, bytes);
 

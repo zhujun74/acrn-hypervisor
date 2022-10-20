@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -33,7 +33,6 @@ static char shell_log_buf[SHELL_LOG_BUF_SIZE];
 /* Input Line Other - Switch to the "other" input line (there are only two
  * input lines total).
  */
-#define SHELL_INPUT_LINE_OTHER(v)	(((v) + 1U) & 0x1U)
 
 static int32_t shell_cmd_help(__unused int32_t argc, __unused char **argv);
 static int32_t shell_version(__unused int32_t argc, __unused char **argv);
@@ -158,6 +157,19 @@ static struct shell_cmd shell_cmds[] = {
 	},
 };
 
+/* for function key: up/down/right/left/home/end and delete key */
+enum function_key {
+	KEY_NONE,
+
+	KEY_DELETE = 0x5B33,
+	KEY_UP = 0x5B41,
+	KEY_DOWN = 0x5B42,
+	KEY_RIGHT = 0x5B43,
+	KEY_LEFT = 0x5B44,
+	KEY_END = 0x5B46,
+	KEY_HOME = 0x5B48,
+};
+
 /* The initial log level*/
 uint16_t console_loglevel = CONFIG_CONSOLE_LOGLEVEL_DEFAULT;
 uint16_t mem_loglevel = CONFIG_MEM_LOGLEVEL_DEFAULT;
@@ -271,14 +283,144 @@ static uint16_t sanitize_vmid(uint16_t vmid)
 	return sanitized_vmid;
 }
 
+static void clear_input_line(uint32_t len)
+{
+	while (len > 0) {
+		len--;
+		shell_puts("\b");
+		shell_puts(" \b");
+	}
+}
+
+static void set_cursor_pos(uint32_t left_offset)
+{
+	while (left_offset > 0) {
+		left_offset--;
+		shell_puts("\b");
+	}
+}
+
+static void handle_delete_key(void)
+{
+	if (p_shell->cursor_offset < p_shell->input_line_len) {
+
+		uint32_t delta = p_shell->input_line_len - p_shell->cursor_offset - 1;
+
+		/* Send a space + backspace sequence to delete character */
+		shell_puts(" \b");
+
+		/* display the left input chars and remove former last one */
+		shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset + 1);
+		shell_puts(" \b");
+
+		set_cursor_pos(delta);
+
+		memcpy_erms(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset,
+			p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset + 1, delta);
+
+		/* Null terminate the last character to erase it */
+		p_shell->buffered_line[p_shell->input_line_active][p_shell->input_line_len - 1] = 0;
+
+		/* Reduce the length of the string by one */
+		p_shell->input_line_len--;
+	}
+}
+
+static void handle_updown_key(enum function_key key_value)
+{
+	int32_t to_select, current_select = p_shell->to_select_index;
+
+	/* update current_select and p_shell->to_select_index as up/down key */
+	if (key_value == KEY_UP) {
+		/* if the ring buffer not full, just decrease one until to 0; if full, need handle overflow case */
+		to_select = p_shell->to_select_index - 1;
+		if (to_select < 0) {
+			to_select += MAX_BUFFERED_CMDS;
+		}
+
+		if (p_shell->buffered_line[to_select][0] != '\0') {
+			current_select = to_select;
+		}
+
+	} else {
+		/* if down key and current is active line, not need update */
+		if (p_shell->to_select_index != p_shell->input_line_active) {
+			current_select = (p_shell->to_select_index + 1) % MAX_BUFFERED_CMDS;
+		}
+	}
+
+	/* go up/down until first buffered cmd or current input line: user will know it is end to select */
+	if (current_select != p_shell->input_line_active) {
+		p_shell->to_select_index = current_select;
+	}
+
+	if (strcmp(p_shell->buffered_line[current_select], p_shell->buffered_line[p_shell->input_line_active]) != 0) {
+		/* reset cursor pos and clear current input line first, then output selected cmd */
+		if (p_shell->cursor_offset < p_shell->input_line_len) {
+			shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset);
+		}
+
+		clear_input_line(p_shell->input_line_len);
+		shell_puts(p_shell->buffered_line[current_select]);
+
+		size_t len = strnlen_s(p_shell->buffered_line[current_select], SHELL_CMD_MAX_LEN);
+
+		memcpy_s(p_shell->buffered_line[p_shell->input_line_active], SHELL_CMD_MAX_LEN,
+			p_shell->buffered_line[current_select], len + 1);
+		p_shell->input_line_len = len;
+		p_shell->cursor_offset = len;
+	}
+}
+
 static void shell_handle_special_char(char ch)
 {
+	enum function_key key_value = KEY_NONE;
+
 	switch (ch) {
-	/* Escape character */
+	/* original function key value: ESC + key (2/3 bytes), so consume the next 2/3 characters */
 	case 0x1b:
-		/* Consume the next 2 characters */
-		(void) shell_getc();
-		(void) shell_getc();
+		key_value = (shell_getc() << 8) | shell_getc();
+		if (key_value == KEY_DELETE) {
+			(void)shell_getc(); /* delete key has one more byte */
+		}
+
+		switch (key_value) {
+		case KEY_DELETE:
+			handle_delete_key();
+			break;
+		case KEY_UP:
+		case KEY_DOWN:
+			handle_updown_key(key_value);
+			break;
+		case KEY_RIGHT:
+			if (p_shell->cursor_offset < p_shell->input_line_len) {
+				shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset);
+				p_shell->cursor_offset++;
+				set_cursor_pos(p_shell->input_line_len - p_shell->cursor_offset);
+			}
+			break;
+		case KEY_LEFT:
+			if (p_shell->cursor_offset > 0) {
+				p_shell->cursor_offset--;
+				shell_puts("\b");
+			}
+			break;
+		case KEY_END:
+			if (p_shell->cursor_offset < p_shell->input_line_len) {
+				shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset);
+				p_shell->cursor_offset = p_shell->input_line_len;
+			}
+			break;
+		case KEY_HOME:
+			if (p_shell->cursor_offset > 0) {
+				set_cursor_pos(p_shell->cursor_offset);
+				p_shell->cursor_offset = 0;
+			}
+			break;
+		default:
+			break;
+		}
+
 		break;
 	default:
 		/*
@@ -289,6 +431,57 @@ static void shell_handle_special_char(char ch)
 		 */
 		break;
 	}
+}
+
+static void handle_backspace_key(void)
+{
+	/* Ensure length is not 0 */
+	if (p_shell->cursor_offset > 0U) {
+		/* Echo backspace */
+		shell_puts("\b");
+		/* Send a space + backspace sequence to delete character */
+		shell_puts(" \b");
+
+		if (p_shell->cursor_offset < p_shell->input_line_len) {
+			uint32_t delta = p_shell->input_line_len - p_shell->cursor_offset;
+
+			/* display the left input-chars and remove the former last one */
+			shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset);
+			shell_puts(" \b");
+
+			set_cursor_pos(delta);
+			memcpy_erms(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset - 1,
+				p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset, delta);
+		}
+
+		/* Null terminate the last character to erase it */
+		p_shell->buffered_line[p_shell->input_line_active][p_shell->input_line_len - 1] = 0;
+
+		/* Reduce the length of the string by one */
+		p_shell->input_line_len--;
+		p_shell->cursor_offset--;
+	}
+}
+
+static void handle_input_char(char ch)
+{
+	uint32_t delta = p_shell->input_line_len - p_shell->cursor_offset;
+
+	/* move the input from cursor offset back first */
+	if (delta > 0) {
+		memcpy_erms_backwards(p_shell->buffered_line[p_shell->input_line_active] + p_shell->input_line_len,
+			p_shell->buffered_line[p_shell->input_line_active] + p_shell->input_line_len - 1, delta);
+	}
+
+	p_shell->buffered_line[p_shell->input_line_active][p_shell->cursor_offset] = ch;
+
+	/* Echo back the input */
+	shell_puts(p_shell->buffered_line[p_shell->input_line_active] + p_shell->cursor_offset);
+	set_cursor_pos(delta);
+
+	/* Move to next character in string */
+	p_shell->input_line_len++;
+	p_shell->cursor_offset++;
 }
 
 static bool shell_input_line(void)
@@ -302,23 +495,7 @@ static bool shell_input_line(void)
 	switch (ch) {
 	/* Backspace */
 	case '\b':
-		/* Ensure length is not 0 */
-		if (p_shell->input_line_len > 0U) {
-			/* Reduce the length of the string by one */
-			p_shell->input_line_len--;
-
-			/* Null terminate the last character to erase it */
-			p_shell->input_line[p_shell->input_line_active]
-					[p_shell->input_line_len] = 0;
-
-			/* Echo backspace */
-			shell_puts("\b");
-
-			/* Send a space + backspace sequence to delete
-			 * character
-			 */
-			shell_puts(" \b");
-		}
+		handle_backspace_key();
 		break;
 
 	/* Carriage-return */
@@ -331,6 +508,7 @@ static bool shell_input_line(void)
 
 		/* Reset command length for next command processing */
 		p_shell->input_line_len = 0U;
+		p_shell->cursor_offset = 0U;
 		break;
 
 	/* Line feed */
@@ -344,16 +522,7 @@ static bool shell_input_line(void)
 		if (p_shell->input_line_len < SHELL_CMD_MAX_LEN) {
 			/* See if a "standard" prINTable ASCII character received */
 			if ((ch >= 32) && (ch <= 126)) {
-				/* Add character to string */
-				p_shell->input_line[p_shell->input_line_active]
-						[p_shell->input_line_len] = ch;
-				/* Echo back the input */
-				shell_puts(&p_shell->input_line
-						[p_shell->input_line_active]
-						[p_shell->input_line_len]);
-
-				/* Move to next character in string */
-				p_shell->input_line_len++;
+				handle_input_char(ch);
 			} else {
 				/* call special character handler */
 				shell_handle_special_char(ch);
@@ -367,7 +536,7 @@ static bool shell_input_line(void)
 
 			/* Reset command length for next command processing */
 			p_shell->input_line_len = 0U;
-
+			p_shell->cursor_offset = 0U;
 		}
 		break;
 	}
@@ -425,33 +594,27 @@ static int32_t shell_process_cmd(const char *p_input_line)
 
 static int32_t shell_process(void)
 {
-	int32_t status;
+	int32_t status, former_index;
 	char *p_input_line;
 
-	/* Check for the repeat command character in active input line.
-	 */
-	if (p_shell->input_line[p_shell->input_line_active][0] == '.') {
-		/* Repeat the last command (using inactive input line).
-		 */
-		p_input_line =
-			&p_shell->input_line[SHELL_INPUT_LINE_OTHER
-				(p_shell->input_line_active)][0];
-	} else {
-		/* Process current command (using active input line). */
-		p_input_line =
-			&p_shell->input_line[p_shell->input_line_active][0];
+	/* Process current command (using active input line). */
+	p_input_line = p_shell->buffered_line[p_shell->input_line_active];
 
-		/* Switch active input line. */
-		p_shell->input_line_active =
-			SHELL_INPUT_LINE_OTHER(p_shell->input_line_active);
+	former_index = (p_shell->input_line_active + MAX_BUFFERED_CMDS - 1) % MAX_BUFFERED_CMDS;
+
+	/* just buffer current cmd if current is not empty and not same with last buffered one */
+	if ((strnlen_s(p_input_line, SHELL_CMD_MAX_LEN) > 0) &&
+		(strcmp(p_input_line, p_shell->buffered_line[former_index]) != 0)) {
+		p_shell->input_line_active = (p_shell->input_line_active + 1) % MAX_BUFFERED_CMDS;
 	}
+
+	p_shell->to_select_index = p_shell->input_line_active;
 
 	/* Process command */
 	status = shell_process_cmd(p_input_line);
 
 	/* Now that the command is processed, zero fill the input buffer */
-	(void)memset((void *) p_shell->input_line[p_shell->input_line_active],
-			0, SHELL_CMD_MAX_LEN + 1U);
+	(void)memset(p_shell->buffered_line[p_shell->input_line_active], 0, SHELL_CMD_MAX_LEN + 1U);
 
 	/* Process command and return result to caller */
 	return status;
@@ -490,9 +653,10 @@ void shell_init(void)
 	p_shell->cmds = shell_cmds;
 	p_shell->cmd_count = ARRAY_SIZE(shell_cmds);
 
+	p_shell->to_select_index = 0;
+
 	/* Zero fill the input buffer */
-	(void)memset((void *)p_shell->input_line[p_shell->input_line_active], 0U,
-			SHELL_CMD_MAX_LEN + 1U);
+	(void)memset(p_shell->buffered_line[p_shell->input_line_active], 0U, SHELL_CMD_MAX_LEN + 1U);
 }
 
 #define SHELL_ROWS	30
@@ -829,12 +993,6 @@ static int32_t shell_vcpu_dumpreg(int32_t argc, char **argv)
 		goto out;
 	}
 
-	if (is_lapic_pt_enabled(vcpu)) {
-		shell_puts("Please switch to vlapic mode for vcpu register dump!\r\n");
-		status = 0;
-		goto out;
-	}
-
 	pcpu_id = pcpuid_from_vcpu(vcpu);
 	dump.vcpu = vcpu;
 	dump.str = shell_log_buf;
@@ -1050,7 +1208,7 @@ static int32_t shell_show_cpu_int(__unused int32_t argc, __unused char **argv)
 
 static void get_entry_info(const struct ptirq_remapping_info *entry, char *type,
 		uint32_t *irq, uint32_t *vector, uint64_t *dest, bool *lvl_tm,
-		uint32_t *pgsi, uint32_t *vgsi, uint32_t *bdf, uint32_t *vbdf)
+		uint32_t *pgsi, uint32_t *vgsi, union pci_bdf *bdf, union pci_bdf *vbdf)
 {
 	if (is_entry_active(entry)) {
 		if (entry->intr_type == PTDEV_INTR_MSI) {
@@ -1063,8 +1221,8 @@ static void get_entry_info(const struct ptirq_remapping_info *entry, char *type,
 			}
 			*pgsi = INVALID_INTERRUPT_PIN;
 			*vgsi = INVALID_INTERRUPT_PIN;
-			*bdf = entry->phys_sid.msi_id.bdf;
-			*vbdf = entry->virt_sid.msi_id.bdf;
+			bdf->value = entry->phys_sid.msi_id.bdf;
+			vbdf->value = entry->virt_sid.msi_id.bdf;
 		} else {
 			uint32_t phys_irq = entry->allocated_pirq;
 			union ioapic_rte rte;
@@ -1083,8 +1241,8 @@ static void get_entry_info(const struct ptirq_remapping_info *entry, char *type,
 			}
 			*pgsi = entry->phys_sid.intx_id.gsi;
 			*vgsi = entry->virt_sid.intx_id.gsi;
-			*bdf = 0U;
-			*vbdf = 0U;
+			bdf->value = 0U;
+			vbdf->value = 0U;
 		}
 		*irq = entry->allocated_pirq;
 		*vector = irq_to_vector(entry->allocated_pirq);
@@ -1096,8 +1254,8 @@ static void get_entry_info(const struct ptirq_remapping_info *entry, char *type,
 		*lvl_tm = 0;
 		*pgsi = ~0U;
 		*vgsi = ~0U;
-		*bdf = 0U;
-		*vbdf = 0U;
+		bdf->value = 0U;
+		vbdf->value = 0U;
 	}
 }
 
@@ -1125,7 +1283,7 @@ static void get_ptdev_info(char *str_arg, size_t str_max)
 		entry = &ptirq_entries[idx];
 		if (is_entry_active(entry)) {
 			get_entry_info(entry, type, &irq, &vector, &dest, &lvl_tm, &pgsi, &vgsi,
-					(uint32_t *)&bdf, (uint32_t *)&vbdf);
+					&bdf, &vbdf);
 			len = snprintf(str, size, "\r\n%d\t%s\t%d\t0x%X\t0x%X",
 					entry->vm->vm_id, type, irq, vector, dest);
 			if (len >= size) {
@@ -1404,9 +1562,13 @@ static int32_t shell_rdmsr(int32_t argc, char **argv)
 	}
 
 	if (ret == 0) {
-		val = msr_read_pcpu(msr_index, pcpu_id);
-		snprintf(str, MAX_STR_SIZE, "rdmsr(0x%x):0x%lx\n", msr_index, val);
-		shell_puts(str);
+		if (pcpu_id < get_pcpu_nums()) {
+			val = msr_read_pcpu(msr_index, pcpu_id);
+			snprintf(str, MAX_STR_SIZE, "rdmsr(0x%x):0x%lx\n", msr_index, val);
+			shell_puts(str);
+		} else {
+			shell_puts("pcpu id is out of range!\n");
+		}
 	}
 
 	return ret;
@@ -1442,7 +1604,11 @@ static int32_t shell_wrmsr(int32_t argc, char **argv)
 	}
 
 	if (ret == 0) {
-		msr_write_pcpu(msr_index, val, pcpu_id);
+		if (pcpu_id < get_pcpu_nums()) {
+			msr_write_pcpu(msr_index, val, pcpu_id);
+		} else {
+			shell_puts("pcpu id is out of range!\n");
+		}
 	}
 
 	return ret;

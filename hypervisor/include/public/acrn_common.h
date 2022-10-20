@@ -1,7 +1,7 @@
 /*
  * common definition
  *
- * Copyright (C) 2017 Intel Corporation. All rights reserved.
+ * Copyright (C) 2017-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -26,6 +26,7 @@
  */
 
 #define ACRN_IO_REQUEST_MAX		16U
+#define ACRN_ASYNCIO_MAX		64U
 
 #define ACRN_IOREQ_STATE_PENDING	0U
 #define ACRN_IOREQ_STATE_COMPLETE	1U
@@ -342,6 +343,12 @@ struct acrn_io_request_buffer {
 	};
 };
 
+struct acrn_asyncio_info {
+	uint32_t type;
+	uint64_t addr;
+	uint64_t fd;
+};
+
 /**
  * @brief Info to create a VM, the parameter for HC_CREATE_VM hypercall
  */
@@ -472,6 +479,7 @@ struct acrn_irqline_ops {
 	uint32_t op;
 };
 
+
 /**
  * @brief Info to inject a MSI interrupt to VM
  *
@@ -520,6 +528,21 @@ struct acrn_pstate_data {
 	uint64_t bus_master_latency;	/* microseconds */
 	uint64_t control;		/* control value */
 	uint64_t status;		/* success indicator */
+};
+
+enum acrn_cpufreq_policy_type {
+	CPUFREQ_POLICY_PERFORMANCE,
+	CPUFREQ_POLICY_NOMINAL,
+};
+
+struct acrn_cpufreq_limits {
+	/* Performance levels for HWP */
+	uint8_t guaranteed_hwp_lvl;
+	uint8_t highest_hwp_lvl;
+	uint8_t lowest_hwp_lvl;
+	/* Index for the p-state table _PSS */
+	uint8_t nominal_pstate;
+	uint8_t performance_pstate;
 };
 
 struct acpi_sx_pkg {
@@ -715,6 +738,57 @@ struct acrn_vdev {
 
 	/** the options for the virtual device, initialized by ACRN-DM. */
 	uint8_t	args[128];
+};
+
+#define ACRN_ASYNCIO_PIO	(0x01U)
+#define ACRN_ASYNCIO_MMIO	(0x02U)
+
+#define SBUF_MAGIC	0x5aa57aa71aa13aa3UL
+#define SBUF_MAX_SIZE	(1UL << 22U)
+#define SBUF_HEAD_SIZE	64U
+
+/* sbuf flags */
+#define OVERRUN_CNT_EN	(1U << 0U) /* whether overrun counting is enabled */
+#define OVERWRITE_EN	(1U << 1U) /* whether overwrite is enabled */
+
+/**
+ * (sbuf) head + buf (store (ele_num - 1) elements at most)
+ * buffer empty: tail == head
+ * buffer full:  (tail + ele_size) % size == head
+ *
+ *             Base of memory for elements
+ *                |
+ *                |
+ * ----------------------------------------------------------------------
+ * | struct shared_buf | raw data (ele_size)| ... | raw data (ele_size) |
+ * ----------------------------------------------------------------------
+ * |
+ * |
+ * struct shared_buf *buf
+ */
+
+enum {
+	ACRN_TRACE = 0U,
+	ACRN_HVLOG,
+	ACRN_SEP,
+	ACRN_SOCWATCH,
+	/* The sbuf with above ids are created each pcpu */
+	ACRN_SBUF_PER_PCPU_ID_MAX,
+	ACRN_ASYNCIO = 64,
+};
+
+/* Make sure sizeof(struct shared_buf) == SBUF_HEAD_SIZE */
+struct shared_buf {
+	uint64_t magic;
+	uint32_t ele_num;	/* number of elements */
+	uint32_t ele_size;	/* sizeof of elements */
+	uint32_t head;		/* offset from base, to read */
+	uint32_t tail;		/* offset from base, to write */
+	uint32_t flags;
+	uint32_t reserved;
+	uint32_t overrun_cnt;	/* count of overrun */
+	uint32_t size;		/* ele_num * ele_size */
+	uint32_t padding[6];
 };
 
 /**

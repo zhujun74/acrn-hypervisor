@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
+# Copyright (C) 2019-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -54,7 +54,7 @@ def check_env():
 
     # check cpu msr file
     cpu_dirs = "/dev/cpu"
-    if check_msr_files(cpu_dirs):
+    if not check_msr_files(cpu_dirs):
         res = subprocess.Popen("modprobe msr",
                             shell=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, close_fds=True)

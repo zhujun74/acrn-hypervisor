@@ -30,12 +30,19 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include "dm.h"
 #include "pci_core.h"
 #include "virtio.h"
 #include "timer.h"
 #include <atomic.h>
+#include "hsm_ioctl_defs.h"
+#include "iothread.h"
+#include "vmmapi.h"
+#include <errno.h>
 
 /*
  * Functions for dealing with generalized "virtual devices" as
@@ -51,6 +58,69 @@
 
 static uint8_t virtio_poll_enabled;
 static size_t virtio_poll_interval;
+
+static
+void iothread_handler(void *arg)
+{
+	struct virtio_iothread *viothrd = arg;
+	struct virtio_base *base = viothrd->base;
+	int idx = viothrd->idx;
+	struct virtio_vq_info *vq = &base->queues[idx];
+
+	if (viothrd->iothread_run) {
+		if (base->mtx)
+			pthread_mutex_lock(base->mtx);
+		(*viothrd->iothread_run)(base, vq);
+		if (base->mtx)
+			pthread_mutex_unlock(base->mtx);
+	}
+}
+
+void
+virtio_set_iothread(struct virtio_base *base,
+			  bool is_register)
+{
+	struct virtio_vq_info *vq;
+	struct virtio_ops *vops;
+	int idx;
+
+	vops = base->vops;
+	for (idx = 0; idx < vops->nvq; idx++) {
+		vq = &base->queues[idx];
+
+		if ((vq->viothrd.ioevent_started && is_register) ||
+			(!vq->viothrd.ioevent_started && !is_register))
+				return;
+		if (is_register) {
+			vq->viothrd.kick_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+
+			if (vops->qnotify)
+				vq->viothrd.iothread_run = vops->qnotify;
+			else if (vq->notify)
+				vq->viothrd.iothread_run = vq->notify;
+			else
+				vq->viothrd.iothread_run = NULL;
+			vq->viothrd.base = base;
+			vq->viothrd.idx = idx;
+			vq->viothrd.iomvt.arg = &vq->viothrd;
+			vq->viothrd.iomvt.run = iothread_handler;
+			vq->viothrd.iomvt.fd = vq->viothrd.kick_fd;
+
+			if (!iothread_add(vq->viothrd.kick_fd, &vq->viothrd.iomvt))
+				if (!virtio_register_ioeventfd(base, idx, true))
+					vq->viothrd.ioevent_started = true;
+		} else {
+			if (!virtio_register_ioeventfd(base, idx, false))
+				if (!iothread_del(vq->viothrd.kick_fd)) {
+					vq->viothrd.ioevent_started = false;
+					if (vq->viothrd.kick_fd) {
+						close(vq->viothrd.kick_fd);
+						vq->viothrd.kick_fd = -1;
+					}
+				}
+		}
+	}
+}
 
 static void
 virtio_start_timer(struct acrn_timer *timer, time_t sec, time_t nsec)
@@ -170,6 +240,8 @@ virtio_reset_dev(struct virtio_base *base)
 
 	acrn_timer_deinit(&base->polling_timer);
 	base->polling_in_progress = 0;
+	if (base->iothread)
+		virtio_set_iothread(base, false);
 
 	nvq = base->vops->nvq;
 	for (vq = base->queues, i = 0; i < nvq; vq++, i++) {
@@ -1021,6 +1093,15 @@ bad:
 			 */
 			virtio_start_timer(&base->polling_timer, 5, 0);
 		}
+		if (!virtio_poll_enabled &&
+			base->backend_type == BACKEND_VBSU &&
+			base->iothread) {
+			if (value & VIRTIO_CONFIG_S_DRIVER_OK) {
+				virtio_set_iothread(base, true);
+			} else {
+				virtio_set_iothread(base, false);
+			}
+		}
 		break;
 	case VIRTIO_MSI_CONFIG_VECTOR:
 		base->msix_cfg_idx = value;
@@ -1167,7 +1248,7 @@ virtio_set_modern_mmio_bar(struct virtio_base *base, int barnum)
 /*
  * Set virtio modern PIO BAR (usually 2) to map notify capability.
  */
-static int
+int
 virtio_set_modern_pio_bar(struct virtio_base *base, int barnum)
 {
 	int rc;
@@ -1264,7 +1345,7 @@ virtio_get_cap_id(uint64_t offset, int size)
 	return rc;
 }
 
-static uint32_t
+uint32_t
 virtio_common_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 {
 	struct virtio_base *base = dev->arg;
@@ -1378,7 +1459,7 @@ virtio_common_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 	return value;
 }
 
-static void
+void
 virtio_common_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 			uint64_t value)
 {
@@ -1387,6 +1468,7 @@ virtio_common_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 	struct virtio_ops *vops;
 	const struct config_reg *cr;
 	const char *name;
+	uint64_t features = 0;
 
 	vops = base->vops;
 	name = vops->name;
@@ -1421,9 +1503,15 @@ virtio_common_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 			break;
 		if (base->driver_feature_select < 2) {
 			value &= 0xffffffff;
-			base->negotiated_caps =
-				(value << (base->driver_feature_select * 32))
-				& base->device_caps;
+			if (base->driver_feature_select == 0) {
+				features = base->device_caps & value;
+				base->negotiated_caps &= ~0xffffffffULL;
+			} else {
+				features = (value << 32)
+					& base->device_caps;
+				base->negotiated_caps &= 0xffffffffULL;
+			}
+			base->negotiated_caps |= features;
 			if (vops->apply_features)
 				(*vops->apply_features)(DEV_STRUCT(base),
 					base->negotiated_caps);
@@ -1438,6 +1526,13 @@ virtio_common_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 			(*vops->set_status)(DEV_STRUCT(base), value);
 		if ((base->status == 0) && (vops->reset))
 			(*vops->reset)(DEV_STRUCT(base));
+		if (base->backend_type == BACKEND_VBSU && base->iothread) {
+			if (value & VIRTIO_CONFIG_S_DRIVER_OK) {
+				virtio_set_iothread(base, true);
+			} else {
+				virtio_set_iothread(base, false);
+			}
+		}
 		/* TODO: virtio poll mode for modern devices */
 		break;
 	case VIRTIO_PCI_COMMON_Q_SELECT:
@@ -1511,7 +1606,7 @@ bad_qindex:
 }
 
 /* ignore driver writes to ISR region, and only support ISR region read */
-static uint32_t
+uint32_t
 virtio_isr_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 {
 	struct virtio_base *base = dev->arg;
@@ -1525,7 +1620,7 @@ virtio_isr_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 	return value;
 }
 
-static uint32_t
+uint32_t
 virtio_device_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 {
 	struct virtio_base *base = dev->arg;
@@ -1558,7 +1653,7 @@ virtio_device_cfg_read(struct pci_vdev *dev, uint64_t offset, int size)
 	return value;
 }
 
-static void
+void
 virtio_device_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 			uint64_t value)
 {
@@ -1590,7 +1685,7 @@ virtio_device_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
  * ignore driver reads from notify region, and only support notify region
  * write
  */
-static void
+void
 virtio_notify_cfg_write(struct pci_vdev *dev, uint64_t offset, int size,
 			uint64_t value)
 {
@@ -1893,5 +1988,73 @@ acrn_parse_virtio_poll_interval(const char *optarg)
 
 	virtio_poll_enabled = 1;
 
+	return 0;
+}
+
+int virtio_register_ioeventfd(struct virtio_base *base, int idx, bool is_register)
+{
+	struct acrn_ioeventfd ioeventfd = {0};
+	struct virtio_vq_info *vq;
+	struct pcibar *bar;
+	int rc = 0;
+
+	if (!is_register)
+		ioeventfd.flags = ACRN_IOEVENTFD_FLAG_DEASSIGN;
+	else
+		/* Enable ASYNCIO by default. If ASYNCIO is not supported by kernel
+		 * or hyperviosr, this flag will be ignored.
+		 */
+		ioeventfd.flags = ACRN_IOEVENTFD_FLAG_ASYNCIO;
+	/* register ioeventfd for kick */
+	if (base->device_caps & (1UL << VIRTIO_F_VERSION_1)) {
+		/*
+		 * in the current implementation, if virtio 1.0 with pio
+		 * notity, its bar idx should be set to non-zero
+		 */
+		if (base->modern_pio_bar_idx) {
+			bar = &base->dev->bar[base->modern_pio_bar_idx];
+			ioeventfd.data = idx;
+			ioeventfd.addr = bar->addr;
+			ioeventfd.len = 2;
+			ioeventfd.flags |= (ACRN_IOEVENTFD_FLAG_DATAMATCH |
+				ACRN_IOEVENTFD_FLAG_PIO);
+		} else if (base->modern_mmio_bar_idx) {
+			bar = &base->dev->bar[base->modern_mmio_bar_idx];
+			ioeventfd.data = 0;
+			ioeventfd.addr = bar->addr + VIRTIO_CAP_NOTIFY_OFFSET
+				+ idx *
+				VIRTIO_MODERN_NOTIFY_OFF_MULT;
+			ioeventfd.len = 2;
+			/* no additional flag bit should be set for MMIO */
+		} else {
+			pr_warn("invalid virtio 1.0 parameters, 0x%lx\n",
+				base->device_caps);
+			return -1;
+		}
+	} else {
+		bar = &base->dev->bar[base->legacy_pio_bar_idx];
+		ioeventfd.data = idx;
+		ioeventfd.addr = bar->addr + VIRTIO_PCI_QUEUE_NOTIFY;
+		ioeventfd.len = 2;
+		ioeventfd.flags |= (ACRN_IOEVENTFD_FLAG_DATAMATCH |
+			ACRN_IOEVENTFD_FLAG_PIO);
+	}
+
+	vq = &base->queues[idx];
+	ioeventfd.fd = vq->viothrd.kick_fd;
+	if (is_register)
+		pr_info("[ioeventfd: %d][0x%lx@%d][flags: 0x%x][data: 0x%lx]\r\n",
+			ioeventfd.fd, ioeventfd.addr, ioeventfd.len,
+			ioeventfd.flags, ioeventfd.data);
+	else
+		pr_info("[ioeventfd: %d][0x%lx@%d] unregister\r\n",
+				ioeventfd.fd, ioeventfd.addr, ioeventfd.len);
+
+	rc = vm_ioeventfd(base->dev->vmctx, &ioeventfd);
+	if (rc < 0) {
+		pr_err("vm_ioeventfd failed rc = %d, errno = %d\n",
+			rc, errno);
+		return -1;
+	}
 	return 0;
 }

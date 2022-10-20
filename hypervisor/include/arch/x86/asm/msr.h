@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -575,7 +575,7 @@
 #define MSR_IA32_MISC_ENABLE_BTS_UNAVAIL	(1UL << 11U)
 #define MSR_IA32_MISC_ENABLE_PEBS_UNAVAIL	(1UL << 12U)
 #define MSR_IA32_MISC_ENABLE_TM2_ENABLE		(1UL << 13U)
-#define MSR_IA32_MISC_ENABLE_EITS		(1UL << 16U)
+#define MSR_IA32_MISC_ENABLE_EIST		(1UL << 16U)
 #define MSR_IA32_MISC_ENABLE_MONITOR_ENA	(1UL << 18U)
 #define MSR_IA32_MISC_ENABLE_LIMIT_CPUID	(1UL << 22U)
 #define MSR_IA32_MISC_ENABLE_xTPR		(1UL << 23U)
@@ -657,6 +657,7 @@ void update_msr_bitmap_x2apic_passthru(struct acrn_vcpu *vcpu);
 /* SPEC & PRED bit */
 #define SPEC_ENABLE_IBRS			(1U << 0U)
 #define SPEC_ENABLE_STIBP			(1U << 1U)
+#define SPEC_RRSBA_DIS_S			(1U << 6U)
 #define PRED_SET_IBPB				(1U << 0U)
 
 /* IA32 ARCH Capabilities bit */
@@ -667,6 +668,7 @@ void update_msr_bitmap_x2apic_passthru(struct acrn_vcpu *vcpu);
 #define IA32_ARCH_CAP_SSB_NO			(1UL << 4U)
 #define IA32_ARCH_CAP_MDS_NO			(1UL << 5U)
 #define IA32_ARCH_CAP_IF_PSCHANGE_MC_NO		(1UL << 6U)
+#define IA32_ARCH_CAP_RESTRICTED_RSBA		(1UL << 19U)
 
 /* Flush L1 D-cache */
 #define IA32_L1D_FLUSH				(1UL << 0U)

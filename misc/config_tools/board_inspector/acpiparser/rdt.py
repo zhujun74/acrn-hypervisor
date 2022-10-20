@@ -1,4 +1,4 @@
-# Copyright (C) 2021 Intel Corporation. All rights reserved.
+# Copyright (C) 2021-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -30,7 +30,7 @@ SMALL_RESOURCE_ITEM_END_TAG                       = 0x0F
 
 # 6.4.2.1 IRQ Descriptor
 
-def SmallResourceItemIRQ_factory(_len):
+def SmallResourceItemIRQ_factory(_len=2):
     class SmallResourceItemIRQ(cdata.Struct):
         _pack_ = 1
         _fields_ = SmallResourceDataTag._fields_ + [

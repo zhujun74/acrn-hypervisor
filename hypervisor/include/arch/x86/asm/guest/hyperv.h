@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Intel Corporation. All rights reserved.
+ * Copyright (C) 2019-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -16,6 +16,8 @@
 
 #define HV_X64_MSR_TIME_REF_COUNT	0x40000020U
 #define HV_X64_MSR_REFERENCE_TSC	0x40000021U
+#define HV_X64_MSR_TSC_FREQUENCY	0x40000022U
+#define HV_X64_MSR_APIC_FREQUENCY	0x40000023U
 
 union hyperv_ref_tsc_page_msr {
 	uint64_t val64;

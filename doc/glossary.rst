@@ -135,13 +135,19 @@ Glossary of Terms
    Scenario
       A collection of hypervisor and VM configuration settings that define an
       ACRN-based application's environment. A scenario configuration is stored
-      in a scenario XML file and edited using the ACRN configurator tool. The
+      in a scenario XML file and edited using the ACRN Configurator tool. The
       scenario configuration, along with the target board configuration, is used
       by the ACRN build system to modify the source code to build tailored
       images of the hypervisor and Service VM for the application. ACRN provides
       example scenarios for shared, partitioned, and hybrid configurations that
       developers can use to define a scenario configuration appropriate for
       their own application.
+
+   Security VM
+      A special :term:`User VM` providing software-based security services
+      within a dynamic virtualized environment. Such security services are
+      application dependent and can include antivirus and malware detection,
+      virtualized firewalls, resource monitoring, and more.
 
    Service VM
       A special VM, directly launched by the hypervisor. The Service VM can
@@ -177,7 +183,6 @@ Glossary of Terms
       post-launched standard, and post-launched real-time.  *(Historically, a
       User VM was also called a User OS, or simply UOS.)*
 
-   VM
    Virtual Machine
      A compute resource that uses software instead of physical hardware to run a
      program. Multiple VMs can run independently on the same physical machine,

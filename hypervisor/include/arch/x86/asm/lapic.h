@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -125,5 +125,7 @@ void send_single_ipi(uint16_t pcpu_id, uint32_t vector);
  * @return None
  */
 void send_single_init(uint16_t pcpu_id);
+
+void kick_pcpu(uint16_t pcpu_id);
 
 #endif /* ARCH_X86_LAPIC_H */

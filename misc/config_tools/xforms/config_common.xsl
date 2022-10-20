@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 
-<!-- Copyright (C) 2021 Intel Corporation. All rights reserved. -->
+<!-- Copyright (C) 2021-2022 Intel Corporation. -->
 <!-- SPDX-License-Identifier: BSD-3-Clause -->
 
 <xsl:stylesheet
@@ -34,6 +34,11 @@
       <xsl:with-param name="value" select="@scenario" />
     </xsl:call-template>
 
+    <xsl:call-template name="boolean-by-key-value">
+      <xsl:with-param name="key" select="'RELEASE'" />
+	  <xsl:with-param name="value" select="hv/BUILD_TYPE = 'release'" />
+    </xsl:call-template>
+
     <xsl:apply-templates select="hv/DEBUG_OPTIONS" />
     <xsl:apply-templates select="hv/FEATURES" />
     <xsl:apply-templates select="hv/MEMORY" />
@@ -43,11 +48,6 @@
   </xsl:template>
 
   <xsl:template match="DEBUG_OPTIONS">
-    <xsl:call-template name="boolean-by-key-value">
-      <xsl:with-param name="key" select="'RELEASE'" />
-      <xsl:with-param name="value" select="BUILD_TYPE = 'release'" />
-    </xsl:call-template>
-
     <xsl:call-template name="integer-by-key-value">
       <xsl:with-param name="key" select="'MEM_LOGLEVEL_DEFAULT'" />
       <xsl:with-param name="value" select="MEM_LOGLEVEL" />
@@ -73,19 +73,11 @@
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key">
-      <xsl:with-param name="key" select="'RELOC'" />
+      <xsl:with-param name="key" select="'SPLIT_LOCK_DETECTION_ENABLED'" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key">
-      <xsl:with-param name="key" select="'MULTIBOOT2'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="boolean-by-key">
-      <xsl:with-param name="key" select="'ENFORCE_TURNOFF_AC'" />
-    </xsl:call-template>
-
-    <xsl:call-template name="boolean-by-key">
-      <xsl:with-param name="key" select="'ENFORCE_TURNOFF_GP'" />
+      <xsl:with-param name="key" select="'UC_LOCK_DETECTION_ENABLED'" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key">
@@ -132,13 +124,23 @@
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key-value">
-      <xsl:with-param name="key" select="'MCE_ON_PSC_WORKAROUND_DISABLED'" />
-      <xsl:with-param name="value" select="MCE_ON_PSC_DISABLED" />
+      <xsl:with-param name="key" select="'MCE_ON_PSC_WORKAROUND_ENABLED'" />
+      <xsl:with-param name="value" select="MCE_ON_PSC_ENABLED" />
+    </xsl:call-template>
+
+    <xsl:call-template name="boolean-by-key-value">
+      <xsl:with-param name="key" select="'RELOC'" />
+      <xsl:with-param name="value" select="RELOC_ENABLED" />
+    </xsl:call-template>
+
+    <xsl:call-template name="boolean-by-key-value">
+      <xsl:with-param name="key" select="'MULTIBOOT2'" />
+      <xsl:with-param name="value" select="MULTIBOOT2_ENABLED" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="'SSRAM_ENABLED'" />
-      <xsl:with-param name="value" select="SSRAM/SSRAM_ENABLED" />
+      <xsl:with-param name="value" select="count(//cache/capability[@id='Software SRAM']) > 0" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key-value">
@@ -151,6 +153,11 @@
     <xsl:call-template name="integer-by-key">
       <xsl:with-param name="key" select="'HV_RAM_START'" />
       <xsl:with-param name="default" select="//allocation-data/acrn-config/hv/MEMORY/HV_RAM_START" />
+    </xsl:call-template>
+
+    <xsl:call-template name="integer-by-key">
+      <xsl:with-param name="key" select="'HV_RAM_SIZE'" />
+      <xsl:with-param name="default" select="//allocation-data/acrn-config/hv/MEMORY/HV_RAM_SIZE" />
     </xsl:call-template>
 
     <xsl:call-template name="integer-by-key">
@@ -198,32 +205,24 @@
 	  <xsl:with-param name="key" select="'SERIAL_PIO_BASE'" />
 	  <xsl:with-param name="value" select="$base" />
 	</xsl:call-template>
+        <xsl:if test="$bdf != ''">
+          <xsl:call-template name="boolean-by-key-value">
+	          <xsl:with-param name="key" select="'SERIAL_PCI'" />
+	          <xsl:with-param name="value" select="'y'" />
+	        </xsl:call-template>
+          <xsl:variable name="serial_bdf" select="acrn:binary-bdf($bdf)" />
+	        <xsl:call-template name="integer-by-key-value">
+	          <xsl:with-param name="key" select="'SERIAL_PCI_BDF'" />
+	          <xsl:with-param name="value" select="$serial_bdf" />
+	        </xsl:call-template>
+        </xsl:if>
       </xsl:when>
       <xsl:when test="($type = 'mmio') and ($bdf != '')">
 	<xsl:call-template name="boolean-by-key-value">
 	  <xsl:with-param name="key" select="'SERIAL_PCI'" />
 	  <xsl:with-param name="value" select="'y'" />
 	</xsl:call-template>
-
-	<xsl:variable name="bus" select="substring-before($bdf, ':')" />
-	<xsl:variable name="device" select="substring-before(substring-after($bdf, ':'), '.')" />
-	<xsl:variable name="function" select="substring-after($bdf, '.')" />
-	<xsl:variable name="serial_bdf">
-	  <xsl:text>0b</xsl:text>
-	  <xsl:call-template name="hex-to-bin">
-	    <xsl:with-param name="s" select="$bus" />
-	    <xsl:with-param name="width" select="4" />
-	  </xsl:call-template>
-	  <xsl:call-template name="hex-to-bin">
-	    <xsl:with-param name="s" select="$device" />
-	    <xsl:with-param name="width" select="1" />
-	  </xsl:call-template>
-	  <xsl:call-template name="hex-to-bin">
-	    <xsl:with-param name="s" select="$function" />
-	    <xsl:with-param name="width" select="3" />
-	  </xsl:call-template>
-	</xsl:variable>
-
+       <xsl:variable name="serial_bdf" select="acrn:binary-bdf($bdf)" />
 	<xsl:call-template name="integer-by-key-value">
 	  <xsl:with-param name="key" select="'SERIAL_PCI_BDF'" />
 	  <xsl:with-param name="value" select="$serial_bdf" />

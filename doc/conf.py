@@ -39,16 +39,22 @@ if "RELEASE" in os.environ:
 sys.path.insert(0, os.path.join(os.path.abspath('.'), 'extensions'))
 extensions = [
    'breathe', 'sphinx.ext.graphviz', 'sphinx.ext.extlinks',
-   'eager_only', 'html_redirects', 'link_roles',
+   'eager_only', 'html_redirects', 'link_roles','sphinx.ext.intersphinx',
    'sphinx_tabs.tabs', 'last_updated'
 ]
 
 # extlinks provides a macro template
 
-extlinks = {'acrn-commit': ('https://github.com/projectacrn/acrn-hypervisor/commit/%s', ''),
-            'acrn-issue': ('https://github.com/projectacrn/acrn-hypervisor/issues/%s', '')
+extlinks = {
+            'acrn-issue': ('https://github.com/projectacrn/acrn-hypervisor/issues/%s', '#')
            }
 
+# use intersphinx linking to link to previous version release notes
+# (We only need to link to an archive that has the older release notes)
+
+intersphinx_mapping = {
+        'v2.7': ('https://projectacrn.github.io/2.7', None),
+        }
 
 graphviz_output_format='png'
 graphviz_dot_args=[
@@ -122,7 +128,7 @@ finally:
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = None
+language = 'en'
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -192,6 +198,8 @@ html_context = {
    'docs_title': docs_title,
    'is_release': is_release,
    'versions': ( ("latest", "/latest/"),
+                 ("3.1", "/3.1/"),
+                 ("3.0", "/3.0/"),
                  ("2.7", "/2.7/"),
                  ("2.6", "/2.6/"),
                  ("2.5", "/2.5/"),
@@ -313,7 +321,7 @@ VerbatimBorderColor={HTML}{00285A}',
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
     (master_doc, 'acrn.tex', u'Project ACRN Documentation',
-     u'Project ACRN', 'manual'),
+     u'Project ACRN', 'manual',True),
 ]
 
 latex_logo = 'images/ACRN_Logo_PrimaryLockup_COLOR-300x300-1.png'

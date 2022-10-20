@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
- * Copyright (c) 2019 Intel Corporation
+ * Copyright (c) 2019-2022 Intel Corporation.
  * Copyright (c) 2013 Tycho Nightingale <tycho.nightingale@pluribusnetworks.com>
  * Copyright (c) 2013 Neel Natu <neel@freebsd.org>
  * All rights reserved.
@@ -846,7 +846,7 @@ vhpet_mmio_read(struct vhpet *vhpet, int vcpuid, uint64_t gpa, uint64_t *rval,
 		int size)
 {
 	int offset, i;
-	uint64_t data;
+	uint64_t data = 0;
 
 	offset = gpa - VHPET_BASE;
 
@@ -858,7 +858,6 @@ vhpet_mmio_read(struct vhpet *vhpet, int vcpuid, uint64_t gpa, uint64_t *rval,
 	if ((size != 4 && size != 8) || (offset & (size - 1))) {
 		WPRINTF(("hpet invalid mmio read: "
 		         "offset 0x%08x, size %d\n", offset, size));
-		data = 0;
 		goto done;
 	}
 
@@ -905,7 +904,6 @@ vhpet_mmio_read(struct vhpet *vhpet, int vcpuid, uint64_t gpa, uint64_t *rval,
 	if (i >= VHPET_NUM_TIMERS) {
 		WPRINTF(("hpet invalid mmio read: "
 		         "offset 0x%08x, size %d\n", offset, size));
-		data = 0;
 	}
 
 done:

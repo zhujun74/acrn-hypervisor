@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -23,6 +23,7 @@ bool check_cpu_security_cap(void);
 void cpu_internal_buffers_clear(void);
 bool is_ept_force_4k_ipage(void);
 uint64_t get_random_value(void);
+void disable_rrsba(void);
 
 #ifdef STACK_PROTECTOR
 struct stack_canary {

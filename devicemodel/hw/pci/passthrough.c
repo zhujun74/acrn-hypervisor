@@ -174,6 +174,113 @@ static inline int ptdev_msix_pba_bar(struct passthru_dev *ptdev)
 	return ptdev->dev->msix.pba_bar;
 }
 
+static void
+load_pci_rombar(struct vmctx *ctx, struct pci_vdev *dev, char *rom_file)
+{
+	FILE *fp;
+	int file_size, rom_size;
+	uint8_t rom_header[4];
+	size_t read_size;
+	char *rom_buffer;
+	struct passthru_dev *ptdev;
+	uint64_t bar_addr;
+
+	/*
+	 * It is unnecessary to check dev & dev->arg again as it is already
+	 * checked in caller.
+	 */
+	ptdev = (struct passthru_dev *) dev->arg;
+	fp = fopen(rom_file, "rb");
+	if (fp == NULL) {
+		pr_warn("Fail to open %s rom_file\n", rom_file);
+		ptdev->need_rombar = false;
+	} else {
+		rom_buffer = NULL;
+		read_size = fread(rom_header, 1, 4, fp);
+		file_size = 0;
+		if (read_size != 4)
+			pr_warn("%s: Fail to read rom_header\n", __func__);
+
+		if ((rom_header[0] == 0x55) && (rom_header[1] == 0xaa)) {
+			/* check file size */
+			fseek(fp, 0, SEEK_END);
+			file_size = ftell(fp);
+			fseek(fp, 0, SEEK_SET);
+			if (file_size > (2048 * 1024)) {
+				pr_warn("Rom file is too big.\n");
+				ptdev->need_rombar = false;
+			}
+		} else {
+			pr_warn("Incorrect Rom file format\n");
+			ptdev->need_rombar = false;
+		}
+		if (ptdev->need_rombar) {
+			rom_size = ALIGN_UP(file_size, 4096);
+			/* round up to a power of 2 */
+			if ((rom_size & (rom_size - 1)) != 0)
+				rom_size = 1UL << fls(rom_size);
+
+			if (posix_memalign((void **)&rom_buffer, 4096, rom_size) == 0) {
+				ptdev->rom_buffer = rom_buffer;
+				read_size = fread(rom_buffer, 1, file_size, fp);
+				if (read_size != file_size) {
+					pr_warn("%s: read size is different with rom_size\n", __func__);
+				}
+				pci_emul_alloc_bar(dev, PCI_ROMBAR, PCIBAR_ROM, rom_size);
+
+				/* Setup the EPT mapping for ROM bar */
+				bar_addr = dev->bar[PCI_ROMBAR].addr;
+				if (vm_map_memseg_vma(ctx, rom_size, bar_addr,
+							(uint64_t)rom_buffer, PROT_READ)) {
+					pr_err("%s: Fail to map ROM bar\n", __func__);
+					free(rom_buffer);
+					ptdev->need_rombar = false;
+					dev->bar[PCI_ROMBAR].addr = 0;
+					dev->bar[PCI_ROMBAR].size = 0;
+				} else {
+					/* Update the enable flag */
+					pci_set_cfgdata32(dev, PCIR_BIOS, (bar_addr | PCIM_BIOS_ENABLE));
+				}
+			} else {
+				ptdev->need_rombar = false;
+				pr_err("Fail to allocate buffer for rom_file\n");
+			}
+		}
+		fclose(fp);
+	}
+	return;
+}
+
+static void
+release_pci_rombar(struct vmctx *ctx, struct pci_vdev *dev)
+{
+	int error;
+	struct acrn_vm_memmap rom_unmap;
+	struct passthru_dev *ptdev;
+
+	/*
+	 * As it is already checked in caller, it is unnecessary to
+	 * check dev and dev->arg again.
+	 */
+	ptdev = (struct passthru_dev *) dev->arg;
+
+	rom_unmap.user_vm_pa = dev->bar[PCI_ROMBAR].addr;
+	rom_unmap.len = dev->bar[PCI_ROMBAR].size;
+	/* remove the EPT mapping for PCI_rombar.
+	 * WA: Use ACRN_MEMMAP_MMIO to del the mapping
+	 */
+	rom_unmap.type = ACRN_MEMMAP_MMIO;
+	error = ioctl(ctx->fd, ACRN_IOCTL_UNSET_MEMSEG, &rom_unmap);
+        if (error) {
+		pr_err("%s: unset_memseg ioctl() returned an error: %s\n",
+			__func__, errormsg(errno));
+	}
+	free(ptdev->rom_buffer);
+	ptdev->rom_buffer = NULL;
+	ptdev->need_rombar = false;
+	return;
+}
+
 static int
 cfginitbar(struct vmctx *ctx, struct passthru_dev *ptdev)
 {
@@ -600,6 +707,8 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	struct acrn_pcidev pcidev = {};
 	uint16_t vendor = 0, device = 0;
 	uint8_t class = 0;
+	char rom_file[256];
+	bool need_rombar = false;
 
 	ptdev = NULL;
 	error = -EINVAL;
@@ -615,6 +724,7 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		return -EINVAL;
 	}
 
+	memset(rom_file, 0, sizeof(rom_file));
 	while ((opt = strsep(&opts, ",")) != NULL) {
 		if (!strncmp(opt, "keep_gsi", 8))
 			keep_gsi = true;
@@ -631,6 +741,10 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		} else if (!strncmp(opt, "enable_ptm", 10)) {
 			pr_notice("<PTM>: opt=enable_ptm.\n");
 			enable_ptm = true;
+		} else if (!strncmp(opt, "romfile=", 8)) {
+			need_rombar = true;
+			opt += 8;
+			strcpy(rom_file, opt);
 		} else
 			pr_warn("Invalid passthru options:%s", opt);
 	}
@@ -711,6 +825,17 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		error = ACRN_PTDEV_IRQ_MSI;
 	}
 
+	ptdev->need_rombar = need_rombar;
+	if (class != 3) {
+		if (ptdev->need_rombar) {
+			pr_warn("Virtual PCI rom is only supported for GPU device\n");
+			ptdev->need_rombar = false;
+		}
+	}
+
+	if (ptdev->need_rombar)
+		load_pci_rombar(ctx, dev, rom_file);
+
 	if (is_intel_graphics_dev(dev)) {
 		if (is_rtvm) {
 			pr_err("%s RTVM doesn't support GVT-D.", __func__);
@@ -722,6 +847,13 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		passthru_gpu_dsm_opregion(ctx, ptdev, &pcidev, device);
 	}
 
+	if (ptdev->need_rombar) {
+		/* When the rombar is enabled, the access to
+		 * pci 0x30 reg will be emulated in DM.
+		 * So this will provide one hint for hypervisor.
+		 */
+		pcidev.type = ACRN_PTDEV_QUIRK_ASSIGN;
+	}
 	pcidev.virt_bdf = PCI_BDF(dev->bus, dev->slot, dev->func);
 	pcidev.phys_bdf = ptdev->phys_bdf;
 	for (idx = 0; idx <= PCI_BARMAX; idx++) {
@@ -805,6 +937,11 @@ passthru_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		vm_reset_ptdev_intx_info(ctx, virt_bdf, ptdev->phys_bdf, dev->lintr.ioapic_irq, false);
 	}
 
+	if (ptdev->need_rombar) {
+		release_pci_rombar(ctx, dev);
+		ptdev->need_rombar = false;
+	}
+
 	if (ptdev)
 		phys_bdf = ptdev->phys_bdf;
 
@@ -871,7 +1008,9 @@ passthru_cfgread(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 {
 	struct passthru_dev *ptdev = dev->arg;
 
-	if (ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff))
+	if (coff == PCIR_BIOS) {
+		*rv = pci_get_cfgdata32(dev, coff);
+	} else if (ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff))
 		*rv = pci_get_cfgdata32(dev, coff);
 	else
 		*rv = read_config(ptdev->phys_dev, coff, bytes);
@@ -884,9 +1023,33 @@ passthru_cfgwrite(struct vmctx *ctx, int vcpu, struct pci_vdev *dev,
 		  int coff, int bytes, uint32_t val)
 {
 	struct passthru_dev *ptdev = dev->arg;
+	uint32_t bios_rom;
 
-	if (!(ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff)))
-		write_config(ptdev->phys_dev, coff, bytes, val);
+	if (coff == PCIR_BIOS) {
+
+		if ((val & PCIM_BIOS_ADDR_MASK) == PCIM_BIOS_ADDR_MASK) {
+			/* size is returned by read after writing 0xFFFFF800.
+			 * And format is ~(size - 1).
+			 */
+			bios_rom = (uint32_t) dev->bar[PCI_ROMBAR].size;
+			bios_rom = ~(bios_rom - 1);
+			pci_set_cfgdata32(dev, PCIR_BIOS, bios_rom);
+		} else if (val == 0) {
+			/* restore the zero if ROM_Bar is not supported */
+			pci_set_cfgdata32(dev, PCIR_BIOS, val);
+		} else {
+			/* restore the original addr into PCI_ROM bar.
+			 * force to update the original addr as remapping is not supported.
+			 */
+			bios_rom = (uint32_t) dev->bar[PCI_ROMBAR].addr;
+			pci_set_cfgdata32(dev, PCIR_BIOS, (bios_rom | PCIR_BIOS));
+			pr_dbg("Restore %x into ROM of %d:%d.%d\n",
+				val, dev->bus, dev->slot, dev->func);
+		}
+	} else {
+		if (!(ptdev->has_virt_pcicfg_regs && ptdev->has_virt_pcicfg_regs(coff)))
+			write_config(ptdev->phys_dev, coff, bytes, val);
+	}
 
 	return 0;
 }

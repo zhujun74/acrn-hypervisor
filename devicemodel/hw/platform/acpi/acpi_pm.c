@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -323,10 +323,10 @@ void pm_write_dsdt(struct vmctx *ctx, int ncpu)
 
 	/* Scope (_PR) */
 	dsdt_line("");
-	dsdt_line("  Scope (_PR)");
+	dsdt_line("  Scope (_SB)");
 	dsdt_line("  {");
 	for (i = 0; i < ncpu; i++) {
-		dsdt_line("    Device (CPU%d)", i);
+		dsdt_line("    Device (PR%02d)", i);
 		dsdt_line("    {");
 		dsdt_line("        Name (_HID, \"ACPI0007\")");
 		dsdt_line("        Name (_UID, 0x%02X)", i);
@@ -337,7 +337,7 @@ void pm_write_dsdt(struct vmctx *ctx, int ncpu)
 
 	/* Scope (_PR.CPU(N)) */
 	for (i = 0; i < ncpu; i++) {
-		dsdt_line("  Scope (_PR.CPU%d)", i);
+		dsdt_line("  Scope (_SB.PR%02d)", i);
 		dsdt_line("  {");
 		dsdt_line("");
 
@@ -353,12 +353,12 @@ void pm_write_dsdt(struct vmctx *ctx, int ncpu)
 			} else {
 				dsdt_line("    Method (_PPC, 0, NotSerialized)");
 				dsdt_line("    {");
-				dsdt_line("      Return (^^CPU0._PPC)");
+				dsdt_line("      Return (^^PR00._PPC)");
 				dsdt_line("    }");
 				dsdt_line("");
 				dsdt_line("    Method (_PCT, 0, NotSerialized)");
 				dsdt_line("    {");
-				dsdt_line("      Return (^^CPU0._PCT)");
+				dsdt_line("      Return (^^PR00._PCT)");
 				dsdt_line("    }");
 				dsdt_line("");
 			}

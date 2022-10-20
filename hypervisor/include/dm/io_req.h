@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Intel Corporation. All rights reserved.
+ * Copyright (C) 2019-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -38,6 +38,13 @@ struct io_request {
 		struct acrn_mmio_request        mmio_request;
 		uint64_t			data[8];
 	} reqs;
+};
+
+struct asyncio_desc {
+	uint32_t type;
+	uint64_t addr;
+	uint64_t fd;
+	struct list_head list;
 };
 
 /**
@@ -291,6 +298,12 @@ void register_mmio_emulation_handler(struct acrn_vm *vm,
 void unregister_mmio_emulation_handler(struct acrn_vm *vm,
 					uint64_t start, uint64_t end);
 void deinit_emul_io(struct acrn_vm *vm);
+
+int init_asyncio(struct acrn_vm *vm, uint64_t *hva);
+
+int add_asyncio(struct acrn_vm *vm, uint32_t type, uint64_t addr, uint64_t fd);
+
+int remove_asyncio(struct acrn_vm *vm, uint32_t type, uint64_t addr, uint64_t fd);
 /**
  * @}
  */

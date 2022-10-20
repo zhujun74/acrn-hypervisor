@@ -12,7 +12,6 @@ Advanced Scenario Tutorials
    :maxdepth: 1
 
    tutorials/using_hybrid_mode_on_nuc
-   tutorials/using_partition_mode_on_nuc
 
 .. _develop_acrn_user_vm:
 
@@ -24,6 +23,8 @@ User VM Tutorials
 .. toctree::
    :maxdepth: 1
 
+   tutorials/user_vm_guide
+   tutorials/using_ubuntu_as_user_vm
    tutorials/using_windows_as_user_vm
    tutorials/using_xenomai_as_user_vm
    tutorials/using_vxworks_as_user_vm
@@ -41,8 +42,8 @@ Configuration Tutorials
    tutorials/acrn_configuration_tool
    tutorials/board_inspector_tool
    tutorials/acrn_configurator_tool
+   tutorials/upgrading_configuration
    reference/config-options
-   reference/config-options-launch
    reference/hv-make-options
    user-guides/hv-parameters
    user-guides/kernel-parameters
@@ -58,25 +59,19 @@ Advanced Features
 .. toctree::
    :maxdepth: 1
 
-   tutorials/sgx_virtualization
-   tutorials/nvmx_virtualization
    tutorials/vuart_configuration
    tutorials/rdt_configuration
-   tutorials/vcat_configuration
    tutorials/waag-secure-boot
    tutorials/enable_s5
    tutorials/cpu_sharing
    tutorials/sriov_virtualization
    tutorials/gpu-passthru
    tutorials/run_kata_containers
-   tutorials/trustyACRN
    tutorials/rtvm_workload_design_guideline
-   tutorials/setup_openstack_libvirt
    tutorials/acrn_on_qemu
    tutorials/using_grub
    tutorials/acrn-secure-boot-with-grub
    tutorials/acrn-secure-boot-with-efi-stub
-   tutorials/pre-launched-rt
    tutorials/enable_ivshmem
    tutorials/inter-vm_communication
 

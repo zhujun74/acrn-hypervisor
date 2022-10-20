@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -519,6 +519,61 @@ int32_t hcall_set_ioreq_buffer(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm
 }
 
 /**
+ * @brief Setup a share buffer for a VM.
+ *
+ * @param vcpu Pointer to vCPU that initiates the hypercall
+ * @param param1 guest physical address. This gpa points to
+ *              struct sbuf_setup_param
+ *
+ * @pre is_service_vm(vcpu->vm)
+ * @return 0 on success, non-zero on error.
+ */
+int32_t hcall_setup_sbuf(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm,
+		__unused uint64_t param1, uint64_t param2)
+{
+	struct acrn_vm *vm = vcpu->vm;
+	struct acrn_sbuf_param asp;
+	uint64_t *hva;
+	int ret = -1;
+
+	if (copy_from_gpa(vm, &asp, param2, sizeof(asp)) == 0) {
+		if (asp.gpa != 0U) {
+			hva = (uint64_t *)gpa2hva(vm, asp.gpa);
+			ret = sbuf_setup_common(target_vm, asp.cpu_id, asp.sbuf_id, hva);
+		}
+	}
+	return ret;
+}
+
+int32_t hcall_asyncio_assign(__unused struct acrn_vcpu *vcpu, struct acrn_vm *target_vm,
+		 __unused uint64_t param1, uint64_t param2)
+{
+	struct acrn_asyncio_info asyncio_info;
+	struct acrn_vm *vm = vcpu->vm;
+	int ret = -1;
+
+	if (copy_from_gpa(vm, &asyncio_info, param2, sizeof(asyncio_info)) == 0) {
+		add_asyncio(target_vm, asyncio_info.type, asyncio_info.addr, asyncio_info.fd);
+		ret = 0;
+	}
+	return ret;
+}
+
+int32_t hcall_asyncio_deassign(__unused struct acrn_vcpu *vcpu, struct acrn_vm *target_vm,
+		 __unused uint64_t param1, uint64_t param2)
+{
+	struct acrn_asyncio_info asyncio_info;
+	struct acrn_vm *vm = vcpu->vm;
+	int ret = -1;
+
+	if (copy_from_gpa(vm, &asyncio_info, param2, sizeof(asyncio_info)) == 0) {
+		remove_asyncio(target_vm, asyncio_info.type, asyncio_info.addr, asyncio_info.fd);
+		ret = 0;
+	}
+	return ret;
+}
+
+/**
  * @brief notify request done
  *
  * Notify the requestor VCPU for the completion of an ioreq.
@@ -1027,6 +1082,12 @@ int32_t hcall_reset_ptdev_intr_info(struct acrn_vcpu *vcpu, struct acrn_vm *targ
 	return ret;
 }
 
+static bool is_pt_pstate(__unused const struct acrn_vm *vm)
+{
+	/* Currently VM's CPU frequency is managed in hypervisor. So no pass through for all VMs. */
+	return false;
+}
+
 /**
  * @brief Get VCPU Power state.
  *
@@ -1047,12 +1108,20 @@ int32_t hcall_get_cpu_pm_state(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm
 	if (is_created_vm(target_vm)) {
 		switch (cmd & PMCMD_TYPE_MASK) {
 		case ACRN_PMCMD_GET_PX_CNT: {
+			if (!is_pt_pstate(target_vm)) {
+				break;
+			}
+
 			ret = copy_to_gpa(vm, &(target_vm->pm.px_cnt), param2, sizeof(target_vm->pm.px_cnt));
 			break;
 		}
 		case ACRN_PMCMD_GET_PX_DATA: {
 			uint8_t pn;
 			struct acrn_pstate_data *px_data;
+
+			if (!is_pt_pstate(target_vm)) {
+				break;
+			}
 
 			/* For now we put px data as per-vm,
 			 * If it is stored as per-cpu in the future,

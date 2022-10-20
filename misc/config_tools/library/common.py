@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
+# Copyright (C) 2019-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -45,7 +45,8 @@ MAX_VM_NUM = 16
 MAX_VUART_NUM = 8
 
 HV_BASE_RAM_SIZE = 0x1400000
-POST_LAUNCHED_VM_RAM_SIZE = 0x1000000
+VM_RAM_SIZE = 0x400000
+TRUSTY_RAM_SIZE = 0x1000000
 
 class MultiItem():
 
@@ -246,17 +247,6 @@ def get_scenario_name():
     """
     (err_dic, scenario) = get_xml_attrib(SCENARIO_INFO_FILE, "scenario")
     return (err_dic, scenario)
-
-
-def is_config_file_match():
-
-    (err_dic, scenario_for_board) = get_xml_attrib(SCENARIO_INFO_FILE, "board")
-    (err_dic, board_name) = get_xml_attrib(BOARD_INFO_FILE, "board")
-
-    if scenario_for_board == board_name:
-        return (err_dic, True)
-    else:
-        return (err_dic, False)
 
 
 def find_tmp_flag(flag):

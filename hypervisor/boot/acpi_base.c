@@ -2,8 +2,7 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2003 John Baldwin <jhb@FreeBSD.org>
- * Copyright (c) 2018 Intel Corporation
- * All rights reserved.
+ * Copyright (c) 2018-2022 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -244,4 +243,16 @@ uint8_t parse_madt_ioapic(struct ioapic_info *ioapic_id_array)
 	}
 
 	return ioapic_idx;
+}
+
+void *parse_hpet(void)
+{
+	const struct acpi_table_hpet *hpet = (const struct acpi_table_hpet *)get_acpi_tbl(ACPI_SIG_HPET);
+	uint64_t addr = 0UL;
+
+	if (hpet != NULL) {
+		addr = hpet->address.address;
+	}
+
+	return hpa2hva(addr);
 }

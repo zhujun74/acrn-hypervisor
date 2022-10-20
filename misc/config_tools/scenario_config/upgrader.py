@@ -209,7 +209,7 @@ class SharedMemoryRegions:
         """Parse IVSHMEM_REGION nodes in either v2.x and v3.x format."""
 
         if len(ivshmem_region_node) == 0:
-            if ivshmem_region_node.tag == "IVSHMEM_REGION":
+            if ivshmem_region_node.tag == "IVSHMEM_REGION" and ivshmem_region_node.text is not None:
                 # ACRN v2.x scenario XML format
                 region = self.SharedMemoryRegion.from_encoding(ivshmem_region_node.text, self.old_xml_etree)
                 self.regions[region.name] = region
@@ -231,6 +231,107 @@ class SharedMemoryRegions:
         for region in self.regions.values():
             node.append(region.format_xml_element())
         return node
+
+class VirtioDevices(object):
+    def __init__(self, old_xml_etree):
+        self.gpus = []
+        self.blocks = []
+        self.inputs = []
+        self.networks = []
+        self.consoles = []
+
+    def console_encoding(self, console):
+        if console.text is not None:
+            use_type = "Virtio console" if console.text.startswith("@") else "Virtio serial port"
+            backend_type = console.text.split(":")[0].replace("@", "")
+            file_path = console.text.split("=")[1].split(":")[0] if "=" in console.text else None
+        else:
+            use_type = console.xpath("./use_type")[0].text if console.xpath("./use_type") else None
+            backend_type = console.xpath("./backend_type")[0].text if console.xpath("./backend_type") else None
+            file_path = console.xpath("./file_path")[0].text if console.xpath("./file_path") else None
+        self.consoles.append((use_type, backend_type, file_path))
+
+    def format_console_element(self, console):
+        node = etree.Element("console")
+        if console[0] is not None:
+            etree.SubElement(node, "use_type").text = console[0]
+        if console[1] is not None:
+            etree.SubElement(node, "backend_type").text = console[1]
+        if console[1] == "socket":
+            etree.SubElement(node, "sock_file_path").text = console[2]
+        if console[1] == "tty":
+            etree.SubElement(node, "tty_device_path").text = console[2]
+        if console[1] == "file":
+            etree.SubElement(node, "output_file_path").text = console[2]
+        return node
+
+    def format_network_element(self, network):
+        node = etree.Element("network")
+        if network[0] is not None:
+            etree.SubElement(node, "virtio_framework").text = network[0]
+        if network[1] is not None:
+            etree.SubElement(node, "interface_name").text = network[1]
+        return node
+
+    def format_input_element(self, input):
+        node = etree.Element("input")
+        if input[0] is not None:
+            etree.SubElement(node, "backend_device_file").text = input[0]
+        if input[1] is not None:
+            etree.SubElement(node, "id").text = input[1]
+        return node
+
+    def format_block_element(self, block):
+        node = etree.Element("block")
+        node.text = block
+        return node
+
+    def format_gpu_element(self, gpu):
+        if gpu is not None:
+            node = etree.Element("gpu")
+            node.text = gpu
+        return node
+
+    def format_xml_element(self):
+        node = etree.Element("virtio_devices")
+        for console in self.consoles:
+            node.append(self.format_console_element(console))
+        for network in self.networks:
+            node.append(self.format_network_element(network))
+        for input in self.inputs:
+            node.append(self.format_input_element(input))
+        for block in self.blocks:
+            node.append(self.format_block_element(block))
+        for gpu in self.gpus:
+            node.append(self.format_gpu_element(gpu))
+        return node
+
+    def add_virtio_devices(self, virtio_device_node):
+        if virtio_device_node.xpath("./network")[0].text is not None:
+            for network in virtio_device_node.xpath("./network"):
+                self.networks.append((None, network.text))
+        else:
+            for network in virtio_device_node.xpath("./network"):
+                virtio_framework = network.xpath("./virtio_framework")[0].text if network.xpath("./virtio_framework") else None
+                interface_name = network.xpath("./interface_name")[0].text if network.xpath("./interface_name") else None
+                self.networks.append((virtio_framework, interface_name))
+
+        if len(virtio_device_node.xpath("./input")) > 0:
+            if virtio_device_node.xpath("./input")[0].text is not None:
+                for input in virtio_device_node.xpath("./input"):
+                    self.inputs.append((None, input.text))
+            else:
+                for input in virtio_device_node.xpath("./input"):
+                    backend_device_file = input.xpath("./backend_device_file")[0].text if input.xpath("./backend_device_file") else None
+                    id = input.xpath("./id")[0].text if input.xpath("./id") else None
+                    self.inputs.append((backend_device_file, id))
+
+        for console in virtio_device_node.xpath("./console"):
+            self.console_encoding(console)
+        for block in virtio_device_node.xpath("./block"):
+            self.blocks.append(block.text)
+        for gpu in virtio_device_node.xpath("./gpu"):
+            self.gpus.append(gpu.text)
 
 class ScenarioUpgrader(ScenarioTransformer):
     @classmethod
@@ -293,6 +394,73 @@ class ScenarioUpgrader(ScenarioTransformer):
             self.old_data_nodes.discard(old_data_node)
         else:
             self.move_data_by_xpath(".//BUILD_TYPE", xsd_element_node, xml_parent_node, new_nodes)
+        return False
+
+    def move_virtio_devices(self, xsd_element_node, xml_parent_node, new_nodes):
+        virtio = VirtioDevices(self.old_xml_etree)
+        try:
+            old_data_virtio = self.get_from_old_data(xml_parent_node, ".//virtio_devices").pop()
+        except IndexError as e:
+            logging.debug(e)
+            return
+
+        virtio.add_virtio_devices(old_data_virtio)
+        for child in old_data_virtio.iter():
+            self.old_data_nodes.discard(child)
+        new_nodes.append(virtio.format_xml_element())
+        return False
+
+    def move_memory(self, xsd_element_node, xml_parent_node, new_nodes):
+        new_node = etree.Element(xsd_element_node.get("name"))
+        memory_node = self.hv_vm_node_map[xml_parent_node].xpath("./memory")
+        old_data_start_hpa = []
+        old_data_size_hpa = []
+        old_data_whole = []
+        if len(memory_node) != 0:
+            for element in memory_node[0]:
+                if "start_hpa" in element.tag:
+                    old_data_start_hpa.append(element)
+                elif "size" in element.tag:
+                    if "0x" in element.text:
+                        element.text = str(int(element.text, 16) // 1024 // 1024)
+                    old_data_size_hpa.append(element)
+                elif "whole" in element.tag:
+                    old_data_whole.append(element)
+                elif "hpa_region" in element.tag:
+                    for subelement in element:
+                        if "start_hpa" in subelement.tag:
+                            old_data_start_hpa.append(subelement)
+                        elif "size" in subelement.tag:
+                            old_data_size_hpa.append(subelement)
+                        elif "whole" in subelement.tag:
+                            old_data_whole.append(subelement)
+
+        if len(old_data_start_hpa) != 0 and len(old_data_size_hpa) != 0:
+            for i in range(len(old_data_start_hpa)):
+                if int(old_data_start_hpa[i].text, 16) != 0 and int(old_data_size_hpa[i].text, 16) != 0:
+                    hpa_region_node = etree.SubElement(new_node, 'hpa_region')
+                    old_data_size_hpa[i].tag = "size_hpa"
+                    hpa_region_node.append(old_data_start_hpa[i])
+                    hpa_region_node.append(old_data_size_hpa[i])
+        elif len(old_data_whole) != 0 or (len(old_data_start_hpa) == 0 and len(old_data_size_hpa) != 0):
+            if len(old_data_whole) != 0:
+                for i in range(len(old_data_whole)):
+                    old_data_whole[i].tag = "size"
+                    new_node.append(old_data_whole[i])
+            else:
+                for i in range(len(old_data_size_hpa)):
+                    old_data_size_hpa[i].tag = "size"
+                    new_node.append(old_data_size_hpa[i])
+
+        new_nodes.append(new_node)
+
+        for n in old_data_start_hpa:
+            self.old_data_nodes.discard(n)
+        for n in old_data_size_hpa:
+            self.old_data_nodes.discard(n)
+        for n in old_data_whole:
+            self.old_data_nodes.discard(n)
+
         return False
 
     def move_console_vuart(self, xsd_element_node, xml_parent_node, new_nodes):
@@ -393,7 +561,11 @@ class ScenarioUpgrader(ScenarioTransformer):
         return False
 
     def move_vm_type(self, xsd_element_node, xml_parent_node, new_nodes):
-        old_vm_type_node = self.get_from_old_data(xml_parent_node, ".//vm_type").pop()
+        try:
+            old_vm_type_node = self.get_from_old_data(xml_parent_node, ".//vm_type").pop()
+        except IndexError as e:
+            logging.debug(e)
+            return
         old_guest_flag_nodes = self.get_from_old_data(xml_parent_node, ".//guest_flag[text() = 'GUEST_FLAG_RT']")
         old_rtos_type_nodes = self.get_from_old_launch_data(xml_parent_node, ".//rtos_type")
 
@@ -402,7 +574,7 @@ class ScenarioUpgrader(ScenarioTransformer):
            old_guest_flag_nodes or \
            (old_rtos_type_nodes and old_rtos_type_nodes[0].text in ["Soft RT", "Hard RT"]):
             new_node.text = "RTVM"
-        elif old_vm_type_node.text in ["SAFETY_VM", "PRE_STD_VM", "POST_STD_VM", "SERVICE_VM"]:
+        elif old_vm_type_node.text in ["SAFETY_VM", "PRE_STD_VM", "POST_STD_VM", "SERVICE_VM", "SOS_VM"]:
             new_node.text = "STANDARD_VM"
         else:
             new_node.text = old_vm_type_node.text
@@ -412,6 +584,29 @@ class ScenarioUpgrader(ScenarioTransformer):
             self.old_data_nodes.discard(n)
         for n in old_rtos_type_nodes:
             self.old_data_nodes.discard(n)
+
+        return False
+
+    def move_pcpu(self, xsd_element_node, xml_parent_node, new_nodes):
+        vm_type = self.get_node(xml_parent_node, "parent::vm/vm_type/text()")
+
+        pcpus = self.get_from_old_launch_data(xml_parent_node, "cpu_affinity/pcpu_id[text() != '']")
+        if not pcpus:
+            pcpus = self.get_from_old_data(xml_parent_node, "cpu_affinity/pcpu_id[text() != '']")
+
+        if pcpus:
+            for n in pcpus:
+                new_node = etree.Element(xsd_element_node.get("name"))
+                etree.SubElement(new_node, "pcpu_id").text = n.text
+                if vm_type == "RTVM":
+                    etree.SubElement(new_node, "real_time_vcpu").text = "y"
+                new_nodes.append(new_node)
+                self.old_data_nodes.discard(n)
+        else:
+            for n in self.get_from_old_data(xml_parent_node, "cpu_affinity/pcpu"):
+                new_nodes.append(n)
+                for child in n.iter():
+                    self.old_data_nodes.discard(child)
 
         return False
 
@@ -457,14 +652,21 @@ class ScenarioUpgrader(ScenarioTransformer):
 
         return False
 
-    def move_enablement(self, xpath, xsd_element_node, xml_parent_node, new_nodes, values_as_enabled = ["y"], values_as_disabled = ["n"]):
+    def move_enablement(self, xpath, xsd_element_node, xml_parent_node, new_nodes, values_as_enabled = ["Enable"], values_as_disabled = ["Disable"]):
         ret = self.move_data_by_xpath(xpath, xsd_element_node, xml_parent_node, new_nodes)
         for n in new_nodes:
             if n.text in values_as_enabled:
-                n.text = "Enable"
+                n.text = "y"
             elif n.text in values_as_disabled:
-                n.text = "Disable"
+                n.text = "n"
         return ret
+
+    def move_hierarchy(self, xsd_element_node, xml_parent_node, new_nodes):
+        element_tag = xsd_element_node.get("name")
+        for n in self.get_from_old_data(xml_parent_node, f"//{element_tag}"):
+            new_nodes.append(n)
+            for child in n.iter():
+                self.old_data_nodes.discard(child)
 
     def move_data_by_xpath(self, xpath, xsd_element_node, xml_parent_node, new_nodes, scenario_xml_only = False, launch_xml_only = False):
         element_tag = xsd_element_node.get("name")
@@ -501,6 +703,8 @@ class ScenarioUpgrader(ScenarioTransformer):
             # single node, as there is no way for the default data movers to migrate multiple pieces of data of the same
             # type to the new XML.
             if old_data_nodes:
+                if old_data_nodes[0].tag == "usb_xhci":
+                    old_data_nodes[0].attrib.clear()
                 new_node = etree.Element(element_tag)
                 for k, v in old_data_nodes[0].items():
                     new_node.set(k, v)
@@ -544,6 +748,7 @@ class ScenarioUpgrader(ScenarioTransformer):
 
     data_movers = {
         "vm/name": partialmethod(move_data_from_either_xml, "name", "vm_name"),
+        "pcpu": move_pcpu,
         "pcpu_id": partialmethod(move_data_from_either_xml, "cpu_affinity/pcpu_id[text() != '']", "cpu_affinity/pcpu_id[text() != '']"),
         "pci_dev": partialmethod(move_data_from_both_xmls, ".//pci_devs/pci_dev[text()]", "passthrough_devices/*[text()] | sriov/*[text()]"),
         "PTM": partialmethod(move_data_from_either_xml, ".//PTM", "enable_ptm"),
@@ -554,7 +759,6 @@ class ScenarioUpgrader(ScenarioTransformer):
         "console_vuart/base": partialmethod(move_data_by_xpath, ".//console_vuart/base"),
         "epc_section/size": partialmethod(move_data_by_xpath, ".//epc_section/size"),
         "memory/size": partialmethod(move_data_by_xpath, ".//memory/size"),
-        "virtio_devices/network": partialmethod(move_data_by_xpath, ".//virtio_devices/network"),
 
         # Guest flags
         "lapic_passthrough": move_lapic_passthrough,
@@ -567,19 +771,26 @@ class ScenarioUpgrader(ScenarioTransformer):
 
         # Feature enabling or disabling
         "vuart0": partialmethod(move_enablement, ".//vuart0"),
-        "vbootloader": partialmethod(move_enablement, ".//vbootloader", values_as_enabled = ["ovmf"], values_as_disabled = ["no"]),
+        "vbootloader": partialmethod(move_enablement, ".//vbootloader", values_as_enabled = ["ovmf", "Enable"], values_as_disabled = ["no", "Disable"]),
+        "MCE_ON_PSC_ENABLED": partialmethod(move_enablement, ".//MCE_ON_PSC_DISABLED", values_as_enabled = ["n"], values_as_disabled = ["y"]),
+        "SPLIT_LOCK_DETECTION_ENABLED": partialmethod(move_enablement, ".//ENFORCE_TURNOFF_AC", values_as_enabled = ["n"], values_as_disabled = ["y"]),
+        "UC_LOCK_DETECTION_ENABLED": partialmethod(move_enablement, ".//ENFORCE_TURNOFF_GP", values_as_enabled = ["n"], values_as_disabled = ["y"]),
 
         # Intermediate nodes
-        "memory": partialmethod(create_node_if, ".//memory", ".//mem_size"),
         "pci_devs": partialmethod(create_node_if, ".//pci_devs", ".//passthrough_devices/*[text() != ''] | .//sriov/*[text() != '']"),
 
         "BUILD_TYPE": move_build_type,
+        "RELOC_ENABLED": partialmethod(rename_data, "FEATURES/RELOC", "FEATURES/RELOC_ENABLED"),
+        "MULTIBOOT2_ENABLED": partialmethod(rename_data, "FEATURES/MULTIBOOT2", "FEATURES/MULTIBOOT2_ENABLED"),
         "console_vuart": move_console_vuart,
         "vuart_connections": move_vuart_connections,
         "IVSHMEM": move_ivshmem,
         "vm_type": move_vm_type,
         "os_type": move_os_type,
-        "memory/whole": partialmethod(rename_data, "memory/whole", ".//mem_size"),
+        "virtio_devices": move_virtio_devices,
+        "memory": move_memory,
+
+        "CACHE_REGION": move_hierarchy,
 
         "default": move_data_by_same_tag,
     }
@@ -587,7 +798,12 @@ class ScenarioUpgrader(ScenarioTransformer):
     def add_missing_nodes(self, xsd_element_node, xml_parent_node, xml_anchor_node):
         new_nodes = []
         def call_mover(mover):
-            if isinstance(mover, partialmethod):
+            if isinstance(mover, list):
+                ret = False
+                for fn in mover:
+                    ret = call_mover(fn)
+                return ret
+            elif isinstance(mover, partialmethod):
                 return mover.__get__(self, type(self))(xsd_element_node, xml_parent_node, new_nodes)
             else:
                 return mover(self, xsd_element_node, xml_parent_node, new_nodes)
@@ -619,8 +835,6 @@ class ScenarioUpgrader(ScenarioTransformer):
     def upgraded_etree(self):
         new_xml_etree = etree.ElementTree(etree.Element(self.old_xml_etree.getroot().tag))
         root_node = new_xml_etree.getroot()
-        for k, v in self.old_xml_etree.getroot().items():
-            new_xml_etree.getroot().set(k, v)
 
         # Migrate the HV and VM nodes, which are needed to kick off a thorough traversal of the existing scenario.
         for old_node in self.old_xml_etree.getroot():
@@ -687,6 +901,7 @@ class UpgradingScenarioStage(PipelineStage):
         DiscardedDataFilter("hv/CAPACITIES/IOMMU_BUS_NUM", None, "The maximum bus number to be supported by ACRN IOMMU configuration is now inferred from board data."),
         DiscardedDataFilter("hv/MISC_CFG/UEFI_OS_LOADER_NAME", None, None),
         DiscardedDataFilter("vm/guest_flags/guest_flag", "0", None),
+        DiscardedDataFilter("vm/clos/vcpu_clos", None, "clos nodes are no longer needed in scenario definitions."),
         DiscardedDataFilter("vm/epc_section/base", "0", "Post-launched VMs cannot have EPC sections."),
         DiscardedDataFilter("vm/epc_section/size", "0", "Post-launched VMs cannot have EPC sections."),
         DiscardedDataFilter("vm/os_config/name", None, "Guest OS names are no longer needed in scenario definitions."),

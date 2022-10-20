@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation. All rights reserved.
+ * Copyright (C) 2020-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -27,7 +27,7 @@ struct acpi_dev_pt_ops {
 #define DEFINE_ACPI_PT_DEV(x) DATA_SET(acpi_dev_pt_ops_set, x);
 
 struct mmio_dev *get_mmiodev(char *name);
-int get_mmio_hpa_resource(char *name, uint64_t *res_start, uint64_t *res_size);
+bool get_mmio_hpa_resource(char *name, uint64_t *res_start, uint64_t *res_size);
 int get_more_acpi_dev_info(char *hid, uint32_t instance, struct acpi_dev_pt_ops *ops);
 void acpi_dev_write_dsdt(struct vmctx *ctx);
 

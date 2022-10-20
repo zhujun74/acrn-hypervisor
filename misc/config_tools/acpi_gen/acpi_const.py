@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation.
+# Copyright (C) 2019-2022 Intel Corporation.
 # SPDX-License-Identifier: BSD-3-Clause
 
 """constant for offline ACPI generator.
@@ -15,7 +15,7 @@ TEMPLATE_ACPI_PATH = os.path.join(VM_CONFIGS_PATH, 'acpi_template', 'template')
 
 ACPI_TABLE_LIST = [('rsdp.asl', 'rsdp.aml'), ('xsdt.asl', 'xsdt.aml'), ('facp.asl', 'facp.aml'),
                    ('mcfg.asl', 'mcfg.aml'), ('apic.asl', 'apic.aml'), ('tpm2.asl', 'tpm2.aml'),
-                   ('dsdt.aml', 'dsdt.aml'), ('PTCT', 'ptct.aml'), ('RTCT', 'rtct.aml')]
+                   ('dsdt.aml', 'dsdt.aml'), ('ptct.aml', 'ptct.aml'), ('rtct.aml', 'rtct.aml')]
 
 ACPI_BASE = 0x7fe00000
 
@@ -49,5 +49,3 @@ ACPI_MADT_TYPE_LOCAL_APIC_NMI = 4
 TSN_DEVICE_LIST = ['8086:4ba0',
                    '8086:4bb0',
                    '8086:4b32']
-
-RTCT = ['RTCT', 'PTCT']

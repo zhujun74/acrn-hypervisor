@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2021 Intel Corporation.
+# Copyright (C) 2021-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -119,7 +119,7 @@ def create_igd_sbdf(board_etree, allocation_etree):
     doesn't exist.
     """
     bus = "0x0"
-    device_node = common.get_node(f"//bus[@type='pci' and @address='{bus}']/device[vendor='0x8086' and class='0x030000']", board_etree)
+    device_node = common.get_node(f"//bus[@type='pci' and @address='{bus}']/device[@address='0x20000' and vendor='0x8086' and class='0x030000']", board_etree)
     if device_node is None:
         common.append_node("/acrn-config/hv/MISC_CFG/IGD_SBDF", '0xFFFF', allocation_etree)
     else:

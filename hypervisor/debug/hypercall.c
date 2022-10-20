@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -68,36 +68,6 @@ int32_t hcall_profiling_ops(struct acrn_vcpu *vcpu, __unused struct acrn_vm *tar
  	return ret;
 }
 #endif /* PROFILING_ON */
-
-/**
- * @brief Setup a share buffer for a VM.
- *
- * @param vcpu Pointer to vCPU that initiates the hypercall
- * @param param1 guest physical address. This gpa points to
- *              struct sbuf_setup_param
- *
- * @pre is_service_vm(vcpu->vm)
- * @return 0 on success, non-zero on error.
- */
-int32_t hcall_setup_sbuf(struct acrn_vcpu *vcpu, __unused struct acrn_vm *target_vm,
-		uint64_t param1, __unused uint64_t param2)
-{
-	struct acrn_vm *vm = vcpu->vm;
-	struct sbuf_setup_param ssp;
-	uint64_t *hva;
-
-	if (copy_from_gpa(vm, &ssp, param1, sizeof(ssp)) != 0) {
-		return -1;
-	}
-
-	if (ssp.gpa != 0U) {
-		hva = (uint64_t *)gpa2hva(vm, ssp.gpa);
-	} else {
-		hva = (uint64_t *)NULL;
-	}
-
-	return sbuf_share_setup(ssp.pcpu_id, ssp.sbuf_id, hva);
-}
 
 /**
  * @brief Setup the hypervisor NPK log.

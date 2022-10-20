@@ -1,7 +1,6 @@
 /*
  * Copyright (c) 2011 NetApp, Inc.
- * Copyright (c) 2019 Intel Corporation
- * All rights reserved.
+ * Copyright (c) 2019-2022 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -81,7 +80,7 @@ static void deinit_vpci_bridge(__unused struct pci_vdev *vdev)
 	vdev->user = NULL;
 }
 
-static int32_t read_vpci_bridge_cfg(const struct pci_vdev *vdev, uint32_t offset,
+static int32_t read_vpci_bridge_cfg(struct pci_vdev *vdev, uint32_t offset,
 	uint32_t bytes, uint32_t *val)
 {
 	if ((offset + bytes) <= 0x100U) {

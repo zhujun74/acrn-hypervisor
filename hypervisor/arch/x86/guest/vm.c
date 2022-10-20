@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -48,7 +48,7 @@
 /* Local variables */
 
 /* pre-assumption: TRUSTY_RAM_SIZE is 2M aligned */
-static struct page post_user_vm_sworld_memory[MAX_POST_VM_NUM][TRUSTY_RAM_SIZE >> PAGE_SHIFT] __aligned(MEM_2M);
+static struct page post_user_vm_sworld_memory[MAX_TRUSTY_VM_NUM][TRUSTY_RAM_SIZE >> PAGE_SHIFT] __aligned(MEM_2M);
 
 static struct acrn_vm vm_array[CONFIG_MAX_VM_NUM] __aligned(PAGE_SIZE);
 
@@ -306,13 +306,20 @@ static inline uint16_t get_configured_bsp_pcpu_id(const struct acrn_vm_config *v
  */
 static void prepare_prelaunched_vm_memmap(struct acrn_vm *vm, const struct acrn_vm_config *vm_config)
 {
-	bool is_hpa1 = true;
-	uint64_t base_hpa = vm_config->memory.start_hpa;
-	uint64_t remaining_hpa_size = vm_config->memory.size;
+	uint64_t base_hpa;
+	uint64_t base_gpa;
+	uint64_t remaining_entry_size;
+	uint32_t hpa_index;
+	uint64_t base_size;
 	uint32_t i;
+	struct vm_hpa_regions tmp_vm_hpa;
+	const struct e820_entry *entry;
+
+	hpa_index = 0U;
+	tmp_vm_hpa = vm_config->memory.host_regions[0];
 
 	for (i = 0U; i < vm->e820_entry_num; i++) {
-		const struct e820_entry *entry = &(vm->e820_entries[i]);
+		entry = &(vm->e820_entries[i]);
 
 		if (entry->length == 0UL) {
 			continue;
@@ -327,33 +334,39 @@ static void prepare_prelaunched_vm_memmap(struct acrn_vm *vm, const struct acrn_
 			}
 		}
 
-		if (remaining_hpa_size >= entry->length) {
-			/* Do EPT mapping for GPAs that are backed by physical memory */
-			if ((entry->type == E820_TYPE_RAM) || (entry->type == E820_TYPE_ACPI_RECLAIM)
-					|| (entry->type == E820_TYPE_ACPI_NVS)) {
-				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
-					entry->length, EPT_RWX | EPT_WB);
-				base_hpa += entry->length;
-				remaining_hpa_size -= entry->length;
-			}
-
-			/* GPAs under 1MB are always backed by physical memory */
-			if ((entry->type != E820_TYPE_RAM) && (entry->baseaddr < (uint64_t)MEM_1M)) {
-				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, entry->baseaddr,
-					entry->length, EPT_RWX | EPT_UNCACHED);
-				base_hpa += entry->length;
-				remaining_hpa_size -= entry->length;
-			}
-		} else {
-			if (entry->type == E820_TYPE_RAM) {
-				pr_warn("%s: HPA size incorrectly configured in v820\n", __func__);
-			}
+		if ((entry->type == E820_TYPE_RESERVED) && (entry->baseaddr > MEM_1M)) {
+			continue;
 		}
 
-		if ((remaining_hpa_size == 0UL) && (is_hpa1)) {
-			is_hpa1 = false;
-			base_hpa = vm_config->memory.start_hpa2;
-			remaining_hpa_size = vm_config->memory.size_hpa2;
+		base_gpa = entry->baseaddr;
+		remaining_entry_size = entry->length;
+
+		while ((hpa_index < vm_config->memory.region_num) && (remaining_entry_size > 0)) {
+
+			base_hpa = tmp_vm_hpa.start_hpa;
+			base_size = min(remaining_entry_size, tmp_vm_hpa.size_hpa);
+
+			if (tmp_vm_hpa.size_hpa > remaining_entry_size) {
+				/* from low to high */
+				tmp_vm_hpa.start_hpa  += base_size;
+				tmp_vm_hpa.size_hpa -= base_size;
+			} else {
+				hpa_index++;
+				if (hpa_index < vm_config->memory.region_num) {
+					tmp_vm_hpa = vm_config->memory.host_regions[hpa_index];
+				}
+			}
+
+			if (entry->type != E820_TYPE_RESERVED) {
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, base_gpa,
+						base_size, EPT_RWX | EPT_WB);
+			} else {
+				/* GPAs under 1MB are always backed by physical memory */
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, base_hpa, base_gpa,
+						base_size, EPT_RWX | EPT_UNCACHED);
+			}
+			remaining_entry_size -= base_size;
+			base_gpa += base_size;
 		}
 	}
 
@@ -504,7 +517,9 @@ static void prepare_service_vm_memmap(struct acrn_vm *vm)
 	for (vm_id = 0U; vm_id < CONFIG_MAX_VM_NUM; vm_id++) {
 		vm_config = get_vm_config(vm_id);
 		if (vm_config->load_order == PRE_LAUNCHED_VM) {
-			ept_del_mr(vm, pml4_page, vm_config->memory.start_hpa, vm_config->memory.size);
+			for (i = 0; i < vm_config->memory.region_num; i++){
+				ept_del_mr(vm, pml4_page, vm_config->memory.host_regions[i].start_hpa, vm_config->memory.host_regions[i].size_hpa);
+			}
 			/* Remove MMIO/IO bars of pre-launched VM's ptdev */
 			deny_pdevs(vm, vm_config->pci_devs, vm_config->pci_dev_num);
 		}
@@ -523,13 +538,34 @@ static void prepare_service_vm_memmap(struct acrn_vm *vm)
 	pci_mmcfg = get_mmcfg_region();
 	ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, pci_mmcfg->address, get_pci_mmcfg_size(pci_mmcfg));
 
-#if defined(PRE_RTVM_SW_SRAM_ENABLED)
-	/* remove Software SRAM region from Service VM EPT, to prevent Service VM from using clflush to
-	 * flush the Software SRAM cache.
-	 * This is applicable to prelaunch RTVM case only, for post-launch RTVM, Service VM is trusted.
-	 */
-	ept_del_mr(vm, pml4_page, PRE_RTVM_SW_SRAM_BASE_GPA, PRE_RTVM_SW_SRAM_END_GPA - PRE_RTVM_SW_SRAM_BASE_GPA);
+	if (is_software_sram_enabled()) {
+		/*
+		 * Native Software SRAM resources shall be assigned to either Pre-launched RTVM
+		 * or Service VM. Software SRAM support for Post-launched RTVM is virtualized
+		 * in Service VM.
+		 *
+		 * 1) Native Software SRAM resources are assigned to Pre-launched RTVM:
+		 *     - Remove Software SRAM regions from Service VM EPT, to prevent
+		 *       Service VM from using clflush to flush the Software SRAM cache.
+		 *     - PRE_RTVM_SW_SRAM_MAX_SIZE is the size of Software SRAM that
+		 *       Pre-launched RTVM uses, presumed to be starting from Software SRAM base.
+		 *       For other cases, PRE_RTVM_SW_SRAM_MAX_SIZE should be defined as 0,
+		 *       and no region will be removed from Service VM EPT.
+		 *
+		 * 2) Native Software SRAM resources are assigned to Service VM:
+		 *     - Software SRAM regions are added to EPT of Service VM by default
+		 *       with memory type UC.
+		 *     - But, Service VM need to access Software SRAM regions
+		 *       when virtualizing them for Post-launched RTVM.
+		 *     - So memory type of Software SRAM regions in EPT shall be updated to EPT_WB.
+		 */
+#if (PRE_RTVM_SW_SRAM_MAX_SIZE > 0U)
+		ept_del_mr(vm, pml4_page, service_vm_hpa2gpa(get_software_sram_base()), PRE_RTVM_SW_SRAM_MAX_SIZE);
+#else
+		ept_modify_mr(vm, pml4_page, service_vm_hpa2gpa(get_software_sram_base()),
+			get_software_sram_size(), EPT_WB, EPT_MT_MASK);
 #endif
+	}
 
 	/* unmap Intel IOMMU register pages for below reason:
 	 * Service VM can detect IOMMU capability in its ACPI table hence it may access
@@ -600,6 +636,34 @@ void prepare_vm_identical_memmap(struct acrn_vm *vm, uint16_t e820_entry_type, u
 }
 
 /**
+ * @pre vm_id < CONFIG_MAX_VM_NUM and should be trusty post-launched VM
+ */
+int32_t get_sworld_vm_index(uint16_t vm_id)
+{
+	int16_t i;
+	int32_t vm_idx = MAX_TRUSTY_VM_NUM;
+	struct acrn_vm_config *vm_config = get_vm_config(vm_id);
+
+	if ((vm_config->guest_flags & GUEST_FLAG_SECURE_WORLD_ENABLED) != 0U) {
+		vm_idx = 0;
+
+		for (i = 0; i < vm_id; i++) {
+			vm_config = get_vm_config(i);
+			if ((vm_config->guest_flags & GUEST_FLAG_SECURE_WORLD_ENABLED) != 0U) {
+				vm_idx += 1;
+			}
+		}
+	}
+
+	if (vm_idx >= (int32_t)MAX_TRUSTY_VM_NUM) {
+		pr_err("Can't find sworld memory for vm id: %d", vm_id);
+		vm_idx = -EINVAL;
+	}
+
+	return vm_idx;
+}
+
+/**
  * @pre vm_id < CONFIG_MAX_VM_NUM && vm_config != NULL && rtn_vm != NULL
  * @pre vm->state == VM_POWERED_OFF
  */
@@ -631,32 +695,38 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 			vm->sworld_control.flag.supported = 1U;
 		}
 		if (vm->sworld_control.flag.supported != 0UL) {
-			uint16_t service_vm_id = (get_service_vm())->vm_id;
-			uint16_t page_idx = vmid_2_rel_vmid(service_vm_id, vm_id) - 1U;
+			int32_t vm_idx = get_sworld_vm_index(vm_id);
 
-			ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp,
-				hva2hpa(post_user_vm_sworld_memory[page_idx]),
-				TRUSTY_EPT_REBASE_GPA, TRUSTY_RAM_SIZE, EPT_WB | EPT_RWX);
-		}
-		if (vm_config->name[0] == '\0') {
-			/* if VM name is not configured, specify with VM ID */
-			snprintf(vm_config->name, 16, "ACRN VM_%d", vm_id);
-		}
-
-		if (vm_config->load_order == PRE_LAUNCHED_VM) {
-			/*
-			 * If a prelaunched VM has the flag GUEST_FLAG_TEE set then it
-			 * is a special prelaunched VM called TEE VM which need special
-			 * memmap, e.g. mapping the REE VM into its space. Otherwise,
-			 * just use the standard preplaunched VM memmap.
-			 */
-			if ((vm_config->guest_flags & GUEST_FLAG_TEE) != 0U) {
-				prepare_tee_vm_memmap(vm, vm_config);
+			if (vm_idx >= 0)
+			{
+				ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp,
+					hva2hpa(post_user_vm_sworld_memory[vm_idx]),
+					TRUSTY_EPT_REBASE_GPA, TRUSTY_RAM_SIZE, EPT_WB | EPT_RWX);
 			} else {
-				create_prelaunched_vm_e820(vm);
-				prepare_prelaunched_vm_memmap(vm, vm_config);
+				status = -EINVAL;
 			}
-			status = init_vm_boot_info(vm);
+		}
+		if (status == 0) {
+			if (vm_config->name[0] == '\0') {
+				/* if VM name is not configured, specify with VM ID */
+				snprintf(vm_config->name, 16, "ACRN VM_%d", vm_id);
+			}
+
+			if (vm_config->load_order == PRE_LAUNCHED_VM) {
+				/*
+				 * If a prelaunched VM has the flag GUEST_FLAG_TEE set then it
+				 * is a special prelaunched VM called TEE VM which need special
+				 * memmap, e.g. mapping the REE VM into its space. Otherwise,
+				 * just use the standard preplaunched VM memmap.
+				 */
+				if ((vm_config->guest_flags & GUEST_FLAG_TEE) != 0U) {
+					prepare_tee_vm_memmap(vm, vm_config);
+				} else {
+					create_prelaunched_vm_e820(vm);
+					prepare_prelaunched_vm_memmap(vm, vm_config);
+				}
+				status = init_vm_boot_info(vm);
+			}
 		}
 	}
 
@@ -722,6 +792,7 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 			/* Populate return VM handle */
 			*rtn_vm = vm;
 			vm->sw.io_shared_page = NULL;
+			vm->sw.asyncio_sbuf = NULL;
 			if ((vm_config->load_order == POST_LAUNCHED_VM)
 				&& ((vm_config->guest_flags & GUEST_FLAG_IO_COMPLETION_POLLING) != 0U)) {
 				/* enable IO completion polling mode per its guest flags in vm_config. */
@@ -1209,7 +1280,7 @@ void make_shutdown_vm_request(uint16_t pcpu_id)
 {
 	bitmap_set_lock(NEED_SHUTDOWN_VM, &per_cpu(pcpu_flag, pcpu_id));
 	if (get_pcpu_id() != pcpu_id) {
-		send_single_ipi(pcpu_id, NOTIFY_VCPU_VECTOR);
+		kick_pcpu(pcpu_id);
 	}
 }
 

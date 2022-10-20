@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
+# Copyright (C) 2019-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -72,11 +72,11 @@ def get_scenario_item_values(board_info, scenario_info):
 
     scenario_item_values["hv,CAPACITIES,MAX_IOAPIC_NUM"] = hv_cfg_lib.get_select_range("CAPACITIES", "IOAPIC_NUM")
 
-    scenario_item_values["hv,FEATURES,MULTIBOOT2"] = hv_cfg_lib.N_Y
+    scenario_item_values["hv,FEATURES,MULTIBOOT2_ENABLED"] = hv_cfg_lib.N_Y
     scenario_item_values["hv,FEATURES,RDT,RDT_ENABLED"] = board_cfg_lib.get_rdt_select_opt()
     scenario_item_values["hv,FEATURES,RDT,CDP_ENABLED"] = board_cfg_lib.get_rdt_select_opt()
     scenario_item_values["hv,FEATURES,SCHEDULER"] = hv_cfg_lib.SCHEDULER_TYPE
-    scenario_item_values["hv,FEATURES,RELOC"] = hv_cfg_lib.N_Y
+    scenario_item_values["hv,FEATURES,RELOC_ENABLED"] = hv_cfg_lib.N_Y
     scenario_item_values["hv,FEATURES,HYPERV_ENABLED"] = hv_cfg_lib.N_Y
     scenario_item_values["hv,FEATURES,ACPI_PARSE_ENABLED"] = hv_cfg_lib.N_Y
     scenario_item_values["hv,FEATURES,L1D_VMENTRY_ENABLED"] = hv_cfg_lib.N_Y
@@ -212,12 +212,6 @@ def main(args):
     if common.VM_COUNT > common.MAX_VM_NUM:
         err_dic['vm count'] = "Number of VMs in scenario xml file should be no greater than hv/CAPACITIES/MAX_VM_NUM ! " \
                               "Now this value is {}.".format(common.MAX_VM_NUM)
-        return err_dic
-
-    # check if this is the scenario config which matches board info
-    (err_dic, status) = common.is_config_file_match()
-    if not status:
-        err_dic['scenario config'] = "The board xml file does not match scenario xml file!"
         return err_dic
 
     if params['--out']:

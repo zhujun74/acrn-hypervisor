@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Intel Corporation. All rights reserved.
+ * Copyright (C) 2020-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -40,6 +40,21 @@ static bool is_inqueue(struct thread_object *obj)
 {
 	struct sched_bvt_data *data = (struct sched_bvt_data *)obj->data;
 	return !list_empty(&data->list);
+}
+
+/*
+ * @pre bvt_ctl != NULL
+ */
+static void update_svt(struct sched_bvt_control *bvt_ctl)
+{
+	struct sched_bvt_data *obj_data;
+	struct thread_object *tmp_obj;
+
+	if (!list_empty(&bvt_ctl->runqueue)) {
+		tmp_obj = get_first_item(&bvt_ctl->runqueue, struct thread_object, data);
+		obj_data = (struct sched_bvt_data *)tmp_obj->data;
+		bvt_ctl->svt = obj_data->avt;
+	}
 }
 
 /*
@@ -102,16 +117,8 @@ static void runqueue_remove(struct thread_object *obj)
 static int64_t get_svt(struct thread_object *obj)
 {
 	struct sched_bvt_control *bvt_ctl = (struct sched_bvt_control *)obj->sched_ctl->priv;
-	struct sched_bvt_data *obj_data;
-	struct thread_object *tmp_obj;
-	int64_t svt = 0;
 
-	if (!list_empty(&bvt_ctl->runqueue)) {
-		tmp_obj = get_first_item(&bvt_ctl->runqueue, struct thread_object, data);
-		obj_data = (struct sched_bvt_data *)tmp_obj->data;
-		svt = obj_data->avt;
-	}
-	return svt;
+	return bvt_ctl->svt;
 }
 
 static void sched_tick_handler(void *param)
@@ -132,11 +139,11 @@ static void sched_tick_handler(void *param)
 		if (!is_idle_thread(current)) {
 			data->run_countdown -= 1U;
 			if (data->run_countdown == 0U) {
-				make_reschedule_request(pcpu_id, DEL_MODE_IPI);
+				make_reschedule_request(pcpu_id);
 			}
 		} else {
 			if (!list_empty(&bvt_ctl->runqueue)) {
-				make_reschedule_request(pcpu_id, DEL_MODE_IPI);
+				make_reschedule_request(pcpu_id);
 			}
 		}
 	}
@@ -236,6 +243,8 @@ static struct thread_object *sched_bvt_pick_next(struct sched_control *ctl)
 	if (!is_idle_thread(current)) {
 		update_vt(current);
 	}
+	/* always align the svt with the avt of the first thread object in runqueue.*/
+	update_svt(bvt_ctl);
 
 	if (!list_empty(&bvt_ctl->runqueue)) {
 		first = bvt_ctl->runqueue.next;

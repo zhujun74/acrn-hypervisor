@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -18,7 +18,6 @@
 
 #define AFFINITY_CPU(n)		(1UL << (n))
 #define MAX_VCPUS_PER_VM	MAX_PCPU_NUM
-#define MAX_VUART_NUM_PER_VM	8U
 #define MAX_VM_OS_NAME_LEN	32U
 #define MAX_MOD_TAG_LEN		32U
 
@@ -70,12 +69,15 @@ enum acrn_vm_severity {
 	SEVERITY_STANDARD_VM = 0x10U,
 };
 
+struct vm_hpa_regions {
+	uint64_t start_hpa;
+	uint64_t size_hpa;
+};
+
 struct acrn_vm_mem_config {
-	uint64_t start_hpa;	/* the start HPA of VM memory configuration, for pre-launched VMs only */
 	uint64_t size;		/* VM memory size configuration */
-	uint64_t start_hpa2;	/* Start of second HPA for non-contiguous allocations in VM memory configuration,
-				   for pre-launched VMs only */
-	uint64_t size_hpa2;	/* Size of second HPA for non-contiguous allocations in VM memory configuration */
+	uint64_t region_num;
+	struct vm_hpa_regions  *host_regions;
 };
 
 struct target_vuart {

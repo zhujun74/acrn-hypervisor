@@ -1836,6 +1836,11 @@ pci_xhci_insert_event(struct pci_xhci_vdev *xdev,
 
 	erdp = rts->intrreg.erdp & ~0xF;
 	erst = &rts->erstba_p[rts->er_enq_seg];
+	if (erst->dwRingSegSize < 16 || erst->dwRingSegSize > 4096) {
+		UPRINTF(LDBG, "xHCI: ERSTSZ is not valiad: %u\n",
+				erst->dwRingSegSize);
+		return -EINVAL;
+	}
 	erdp_idx = (erdp - erst->qwRingSegBase) / sizeof(struct xhci_trb);
 
 	UPRINTF(LDBG, "insert event 0[%lx] 2[%x] 3[%x]\r\n"
@@ -1937,7 +1942,7 @@ pci_xhci_cmd_disable_slot(struct pci_xhci_vdev *xdev, uint32_t slot)
 		if (dev == xdev->devices[i])
 			break;
 
-	if (i <= XHCI_MAX_DEVS && XHCI_PORTREG_PTR(xdev, i)) {
+	if (XHCI_PORTREG_PTR(xdev, i)) {
 		XHCI_PORTREG_PTR(xdev, i)->portsc &= ~(XHCI_PS_CSC |
 				XHCI_PS_CCS | XHCI_PS_PED);
 
@@ -3412,6 +3417,11 @@ pci_xhci_dbregs_write(struct pci_xhci_vdev *xdev,
 
 	if (XHCI_HALTED(xdev)) {
 		UPRINTF(LWRN, "pci_xhci: controller halted\r\n");
+		return;
+	}
+	if (XHCI_DB_TARGET_GET(value) > XHCI_MAX_ENDPOINTS) {
+		UPRINTF(LWRN, "pci_xhci: invalid doorbell target %d!\n",
+						XHCI_DB_TARGET_GET(value));
 		return;
 	}
 

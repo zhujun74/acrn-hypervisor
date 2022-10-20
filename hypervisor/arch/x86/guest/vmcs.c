@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -54,6 +54,8 @@ static void init_guest_vmx(struct acrn_vcpu *vcpu, uint64_t cr0, uint64_t cr3,
 
 	/* init guest ia32_misc_enable value for guest read */
 	vcpu_set_guest_msr(vcpu, MSR_IA32_MISC_ENABLE, msr_read(MSR_IA32_MISC_ENABLE));
+
+	vcpu_set_guest_msr(vcpu, MSR_IA32_PERF_CTL, msr_read(MSR_IA32_PERF_CTL));
 
 	/* fixed values */
 	exec_vmwrite32(VMX_GUEST_IA32_SYSENTER_CS, 0U);
@@ -629,12 +631,6 @@ void switch_apicv_mode_x2apic(struct acrn_vcpu *vcpu)
 
 		update_msr_bitmap_x2apic_passthru(vcpu);
 
-		/*
-		 * After passthroughing lapic to guest, we should use INIT signal to
-		 * notify vcpu thread instead of IPI. Because the IPI will be delivered
-		 * the guest directly without vmexit.
-		 */
-		vcpu->thread_obj.notify_mode = SCHED_NOTIFY_INIT;
 	} else {
 		value32 = exec_vmread32(VMX_PROC_VM_EXEC_CONTROLS2);
 		value32 &= ~VMX_PROCBASED_CTLS2_VAPIC;

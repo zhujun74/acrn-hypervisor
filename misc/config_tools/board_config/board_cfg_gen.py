@@ -1,4 +1,4 @@
-# Copyright (C) 2019 Intel Corporation. All rights reserved.
+# Copyright (C) 2019-2022 Intel Corporation.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 #
@@ -58,12 +58,6 @@ def main(args):
     if err_dic:
         return err_dic
     board_cfg_lib.BOARD_NAME = board
-
-    # check if this is the scenario config which matched board info
-    (err_dic, status) = common.is_config_file_match()
-    if not status:
-        err_dic['board config'] = "The board xml file does not match scenario xml file!"
-        return err_dic
 
     output = ''
     if params['--out']:

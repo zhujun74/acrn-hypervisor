@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Intel Corporation. All rights reserved.
+ * Copyright (C) 2019-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  *
@@ -63,7 +63,7 @@
 static int virtio_i2c_debug=0;
 #define VIRTIO_I2C_PREF "virtio_i2c: "
 #define DPRINTF(fmt, args...) \
-       do { if (virtio_i2c_debug) pr_dbg(VIRTIO_I2C_PREF fmt, ##args); } while (0)
+       do { if (virtio_i2c_debug) pr_info(VIRTIO_I2C_PREF fmt, ##args); } while (0)
 #define WPRINTF(fmt, args...) pr_err(VIRTIO_I2C_PREF fmt, ##args)
 
 #define MAX_NODE_NAME_LEN	20
@@ -72,6 +72,15 @@ static int virtio_i2c_debug=0;
 #define I2C_MSG_OK	0
 #define I2C_MSG_ERR	1
 #define I2C_NO_DEV	2
+
+#define I2C_NO_FLAGS	0
+
+#define VIRTIO_I2C_FLAGS_FAIL_NEXT	1 << 0
+#define VIRTIO_I2C_FLAGS_M_RD		1 << 1
+
+#define VIRTIO_I2C_F_ZERO_LENGTH_REQUEST 0
+#define VIRTIO_I2C_HOSTCAPS   (1UL << VIRTIO_F_VERSION_1) | \
+                              (1UL << VIRTIO_I2C_F_ZERO_LENGTH_REQUEST)
 
 static int acpi_i2c_adapter_num = 0;
 static void acpi_add_i2c_adapter(struct pci_vdev *dev, int i2c_bus);
@@ -93,11 +102,15 @@ static struct acpi_node acpi_node_table[] = {
 	{"default", acpi_add_default},
 };
 
-struct virtio_i2c_hdr {
+struct virtio_i2c_out_hdr {
 	uint16_t addr;      /* client address */
-	uint16_t flags;
-	uint16_t len;       /*msg length*/
-}__attribute__((packed));
+	uint16_t padding;
+	uint32_t flags;
+};
+
+struct virtio_i2c_in_hdr {
+	uint8_t status;
+};
 
 struct native_i2c_adapter {
 	int 		fd;
@@ -404,8 +417,10 @@ native_adapter_proc(struct virtio_i2c *vi2c, struct i2c_msg *msg)
 
 	addr = msg->addr;
 	adapter = native_adapter_find(vi2c, addr);
-	if (!adapter)
-		return I2C_NO_DEV;
+	if (!adapter) {
+		DPRINTF("%s: could not find device for addr %x\n", __func__, msg->addr);
+		return I2C_MSG_ERR;
+	}
 
 	work_queue.nmsgs = 1;
 	work_queue.msgs = msg;
@@ -436,6 +451,7 @@ native_adapter_create(int bus, uint16_t client_addr[], int n_client)
 	struct native_i2c_adapter *native_adapter;
 	char native_path[20];
 	int i;
+	unsigned long funcs;
 
 	if (bus < 0)
 		return NULL;
@@ -452,6 +468,16 @@ native_adapter_create(int bus, uint16_t client_addr[], int n_client)
 	fd = open(native_path, O_RDWR);
 	if (fd < 0) {
 		WPRINTF("virtio_i2c: failed to open %s\n", native_path);
+		goto fail;
+	}
+	if (ioctl(fd, I2C_FUNCS, &funcs) < 0) {
+		WPRINTF("virtio_i2c: failed to get the funcs \n");
+		goto fail;
+	}
+
+	if (!(funcs & I2C_FUNC_I2C)) {
+		WPRINTF("virtio_i2c: this adapter %s doesn't support I2C_FUNC_I2C mode "
+				"(plain i2c-level commands)!\n", native_path);
 		goto fail;
 	}
 	native_adapter->fd = fd;
@@ -513,10 +539,11 @@ virtio_i2c_proc_thread(void *arg)
 	struct virtio_vq_info *vq = &vi2c->vq;
 	struct iovec iov[3];
 	uint16_t idx, flags[3];
-	struct virtio_i2c_hdr *hdr;
 	struct i2c_msg msg;
-	uint8_t *status;
 	int n;
+	bool fail_next = false;
+	struct virtio_i2c_out_hdr *out_hdr;
+	struct virtio_i2c_in_hdr *in_hdr;
 
 	for (;;) {
 		pthread_mutex_lock(&vi2c->req_mtx);
@@ -537,20 +564,48 @@ virtio_i2c_proc_thread(void *arg)
 				WPRINTF("virtio_i2c_proc: failed to get iov from virtqueue\n");
 				continue;
 			}
-			hdr = iov[0].iov_base;
-			msg.addr = hdr->addr;
-			msg.flags = hdr->flags;
-			if (hdr->len) {
+			out_hdr = iov[0].iov_base;
+			/* From v1.2-cs01 virtio spec, 7-bit address is defined as:
+			 * -----------------------------------------------------------
+			 *  Bits 	|15|14|13|12|11|10|9|8|7 |6 |5 |4 |3 |2 |1 |0|
+			 * -------------+--+--+--+--+--+--+-+-+--+--+--+--+--+--+--+-+
+			 * 7-bit address|0 |0 |0 |0 |0 |0 |0|0|A6|A5|A4|A3|A2|A1|A0|0|
+			 * -------------+--+--+--+--+--+--+-+-+--+--+--+--+--+--+--+-+
+			 */
+			msg.addr = out_hdr->addr >> 1;
+			if (out_hdr->flags & VIRTIO_I2C_FLAGS_M_RD)
+				msg.flags = I2C_M_RD;
+			else
+				msg.flags = I2C_NO_FLAGS;
+			if (n == 3) {
 				msg.buf = iov[1].iov_base;
 				msg.len = iov[1].iov_len;
-				status = iov[2].iov_base;
+				in_hdr = iov[2].iov_base;
 			} else {
+				// this is a zero-length request
 				msg.buf = NULL;
 				msg.len = 0;
-				status = iov[1].iov_base;
+				in_hdr = iov[1].iov_base;
 			}
-			*status = native_adapter_proc(vi2c, &msg);
+
+			/*
+			 * From v1.2-cs01 virtio spec:
+			 * VIRTIO_I2C_FLAGS_FAIL_NEXT(0) is used to group the requests. For a group requests,
+			 * a driver clears this bit on the final request and sets it on the other requests.
+			 * If this bit is set and a device fails to process the current request, it needs to
+			 * fail the next request instead of attempting to execute it.
+			 */
+			if (!fail_next) {
+				in_hdr->status = native_adapter_proc(vi2c, &msg);
+				if ((out_hdr->flags & VIRTIO_I2C_FLAGS_FAIL_NEXT) && (in_hdr->status == I2C_MSG_ERR))
+					fail_next = true;
+			} else {
+				in_hdr->status = I2C_MSG_ERR;
+			}
 			vq_relchain(vq, idx, 1);
+
+			if (!(out_hdr->flags & VIRTIO_I2C_FLAGS_FAIL_NEXT))
+				fail_next = false;
 		} while (vq_has_descs(vq));
 		vq_endchains(vq, 0);
 	}
@@ -770,6 +825,7 @@ virtio_i2c_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	/* init virtio struct and virtqueues */
 	virtio_linkup(&vi2c->base, &virtio_i2c_ops, vi2c, dev, &vi2c->vq, BACKEND_VBSU);
 	vi2c->base.mtx = &vi2c->mtx;
+	vi2c->base.device_caps = VIRTIO_I2C_HOSTCAPS;
 	vi2c->vq.qsize = 64;
 	vi2c->native_adapter_num = 0;
 
@@ -798,17 +854,17 @@ virtio_i2c_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 	}
 
 	pci_set_cfgdata16(dev, PCIR_DEVICE, VIRTIO_DEV_I2C);
-	pci_set_cfgdata16(dev, PCIR_VENDOR, INTEL_VENDOR_ID);
-	pci_set_cfgdata8(dev, PCIR_CLASS, PCIC_SERIALBUS);
+	pci_set_cfgdata16(dev, PCIR_VENDOR, VIRTIO_VENDOR);
+	pci_set_cfgdata8(dev, PCIR_CLASS, PCIS_SERIALBUS_SMBUS);
 	pci_set_cfgdata16(dev, PCIR_SUBDEV_0, VIRTIO_TYPE_I2C);
-	pci_set_cfgdata16(dev, PCIR_SUBVEND_0, INTEL_VENDOR_ID);
+	pci_set_cfgdata16(dev, PCIR_SUBVEND_0, VIRTIO_VENDOR);
 
 	if (virtio_interrupt_init(&vi2c->base, virtio_uses_msix())) {
 		WPRINTF("failed to init interrupt");
 		rc = -1;
 		goto fail;
 	}
-	virtio_set_io_bar(&vi2c->base, 0);
+	rc = virtio_set_modern_bar(&vi2c->base, false);
 	vi2c->in_process = 0;
 	vi2c->closing = 0;
 	pthread_mutex_init(&vi2c->req_mtx, NULL);

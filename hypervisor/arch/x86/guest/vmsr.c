@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -51,6 +51,7 @@ static uint32_t emulated_guest_msrs[NUM_EMULATED_MSRS] = {
 	MSR_IA32_BIOS_SIGN_ID,
 	MSR_IA32_TIME_STAMP_COUNTER,
 	MSR_IA32_APIC_BASE,
+	MSR_IA32_PERF_STATUS,
 	MSR_IA32_PERF_CTL,
 	MSR_IA32_FEATURE_CONTROL,
 
@@ -256,6 +257,29 @@ static const uint32_t unsupported_msrs[] = {
 	MSR_IA32_PL2_SSP,
 	MSR_IA32_PL3_SSP,
 	MSR_IA32_INTERRUPT_SSP_TABLE_ADDR,
+
+	/* HWP disabled:
+	 * CPUID.06H.EAX[7]
+	 * CPUID.06H.EAX[9]
+	 * CPUID.06H:EAX[10]
+	 */
+	MSR_IA32_PM_ENABLE,
+	MSR_IA32_HWP_CAPABILITIES,
+	MSR_IA32_HWP_REQUEST,
+	MSR_IA32_HWP_STATUS,
+	/* HWP_Notification disabled:
+	 * CPUID.06H:EAX[8]
+	 */
+	MSR_IA32_HWP_INTERRUPT,
+	/* HWP_package_level disabled:
+	 * CPUID.06H:EAX[11]
+	 */
+	MSR_IA32_HWP_REQUEST_PKG,
+	/* Hardware Coordination Feedback Capability disabled:
+	 * CPUID.06H:ECX[0]
+	 */
+	MSR_IA32_MPERF,
+	MSR_IA32_APERF,
 };
 
 /* emulated_guest_msrs[] shares same indexes with array vcpu->arch->guest_msrs[] */
@@ -333,10 +357,10 @@ static void prepare_auto_msr_area(struct acrn_vcpu *vcpu)
 
 	/* in HV, disable perf/PMC counting, just count in guest VM */
 	if (is_pmu_pt_configured(vcpu->vm)) {
-		vcpu->arch.msr_area.guest[MSR_AREA_PERF_CTRL].msr_index = MSR_IA32_PERF_GLOBAL_CTRL;
-		vcpu->arch.msr_area.guest[MSR_AREA_PERF_CTRL].value = 0;
-		vcpu->arch.msr_area.host[MSR_AREA_PERF_CTRL].msr_index = MSR_IA32_PERF_GLOBAL_CTRL;
-		vcpu->arch.msr_area.host[MSR_AREA_PERF_CTRL].value = 0;
+		vcpu->arch.msr_area.guest[vcpu->arch.msr_area.count].msr_index = MSR_IA32_PERF_GLOBAL_CTRL;
+		vcpu->arch.msr_area.guest[vcpu->arch.msr_area.count].value = 0;
+		vcpu->arch.msr_area.host[vcpu->arch.msr_area.count].msr_index = MSR_IA32_PERF_GLOBAL_CTRL;
+		vcpu->arch.msr_area.host[vcpu->arch.msr_area.count].value = 0;
 		vcpu->arch.msr_area.count++;
 	}
 
@@ -352,16 +376,19 @@ static void prepare_auto_msr_area(struct acrn_vcpu *vcpu)
 		 * vCAT: always load/restore MSR_IA32_PQR_ASSOC
 		 */
 		if (is_vcat_configured(vcpu->vm) || (vcpu_clos != hv_clos)) {
-			vcpu->arch.msr_area.guest[MSR_AREA_IA32_PQR_ASSOC].msr_index = MSR_IA32_PQR_ASSOC;
-			vcpu->arch.msr_area.guest[MSR_AREA_IA32_PQR_ASSOC].value = clos2pqr_msr(vcpu_clos);
-			vcpu->arch.msr_area.host[MSR_AREA_IA32_PQR_ASSOC].msr_index = MSR_IA32_PQR_ASSOC;
-			vcpu->arch.msr_area.host[MSR_AREA_IA32_PQR_ASSOC].value = clos2pqr_msr(hv_clos);
+			vcpu->arch.msr_area.guest[vcpu->arch.msr_area.count].msr_index = MSR_IA32_PQR_ASSOC;
+			vcpu->arch.msr_area.guest[vcpu->arch.msr_area.count].value = clos2pqr_msr(vcpu_clos);
+			vcpu->arch.msr_area.host[vcpu->arch.msr_area.count].msr_index = MSR_IA32_PQR_ASSOC;
+			vcpu->arch.msr_area.host[vcpu->arch.msr_area.count].value = clos2pqr_msr(hv_clos);
+			vcpu->arch.msr_area.index_of_pqr_assoc = vcpu->arch.msr_area.count;
 			vcpu->arch.msr_area.count++;
 
 			pr_acrnlog("switch clos for VM %u vcpu_id %u, host 0x%x, guest 0x%x",
 				vcpu->vm->vm_id, vcpu->vcpu_id, hv_clos, vcpu_clos);
 		}
 	}
+
+	ASSERT(vcpu->arch.msr_area.count <= MSR_AREA_COUNT, "error, please check MSR_AREA_COUNT!");
 }
 
 /**
@@ -386,7 +413,7 @@ void init_emulated_msrs(struct acrn_vcpu *vcpu)
 
 #ifdef CONFIG_VCAT_ENABLED
 	/*
-	 * init_vcat_msrs() will overwrite the vcpu->arch.msr_area.guest[MSR_AREA_IA32_PQR_ASSOC].value
+	 * init_vcat_msrs() will overwrite the vcpu->arch.msr_area.guest[].value for MSR_IA32_PQR_ASSOC
 	 * set by prepare_auto_msr_area()
 	 */
 	init_vcat_msrs(vcpu);
@@ -547,6 +574,26 @@ static int32_t write_pat_msr(struct acrn_vcpu *vcpu, uint64_t value)
 	return ret;
 }
 
+/*
+ * @brief get emulated IA32_PERF_STATUS reg value
+ *
+ * Use the base frequency state of pCPU as the emulated reg field:
+ *   - IA32_PERF_STATUS[15:0] Current performance State Value
+ *
+ * Assuming (base frequency ratio << 8) is a valid state value for all CPU models.
+ */
+static uint64_t get_perf_status(void)
+{
+	uint32_t eax, ecx, unused;
+	/*
+	 * CPUID.16H:eax[15:0] Base CPU Frequency (MHz)
+	 * CPUID.16H:ecx[15:0] Bus Frequency (MHz)
+	 * ratio = CPU_frequency/bus_frequency
+	 */
+	cpuid_subleaf(0x16U, 0U, &eax, &unused, &ecx, &unused);
+	return (uint64_t)(((eax/ecx) & 0xFFU) << 8);
+}
+
 /**
  * @pre vcpu != NULL
  */
@@ -578,6 +625,8 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 	case HV_X64_MSR_VP_INDEX:
 	case HV_X64_MSR_REFERENCE_TSC:
 	case HV_X64_MSR_TIME_REF_COUNT:
+	case HV_X64_MSR_TSC_FREQUENCY:
+	case HV_X64_MSR_APIC_FREQUENCY:
 	{
 		err = hyperv_rdmsr(vcpu, msr, &v);
 		break;
@@ -619,9 +668,14 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 		v = get_microcode_version();
 		break;
 	}
+	case MSR_IA32_PERF_STATUS:
+	{
+		v = get_perf_status();
+		break;
+	}
 	case MSR_IA32_PERF_CTL:
 	{
-		v = msr_read(msr);
+		v = vcpu_get_guest_msr(vcpu, MSR_IA32_PERF_CTL);
 		break;
 	}
 	case MSR_IA32_PAT:
@@ -659,6 +713,8 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 	case MSR_IA32_MISC_ENABLE:
 	{
 		v = vcpu_get_guest_msr(vcpu, MSR_IA32_MISC_ENABLE);
+		/* As CPUID.01H:ECX[7] is removed from guests, guests should not see EIST enable bit. */
+		v &= ~MSR_IA32_MISC_ENABLE_EIST;
 		break;
 	}
 	case MSR_IA32_SGXLEPUBKEYHASH0:
@@ -940,6 +996,8 @@ int32_t wrmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 	case HV_X64_MSR_VP_INDEX:
 	case HV_X64_MSR_REFERENCE_TSC:
 	case HV_X64_MSR_TIME_REF_COUNT:
+	case HV_X64_MSR_TSC_FREQUENCY:
+	case HV_X64_MSR_APIC_FREQUENCY:
 	{
 		err = hyperv_wrmsr(vcpu, msr, v);
 		break;
@@ -992,12 +1050,13 @@ int32_t wrmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 		}
 		break;
 	}
+	case MSR_IA32_PERF_STATUS:
+	{
+		break;
+	}
 	case MSR_IA32_PERF_CTL:
 	{
-		if (validate_pstate(vcpu->vm, v) != 0) {
-			break;
-		}
-		msr_write(msr, v);
+		vcpu_set_guest_msr(vcpu, MSR_IA32_PERF_CTL, v);
 		break;
 	}
 	case MSR_IA32_PAT:

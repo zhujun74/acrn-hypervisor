@@ -1,5 +1,5 @@
 /*
- * Copyright (C)2021 Intel Corporation
+ * Copyright (C)2021-2022 Intel Corporation.
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
@@ -36,6 +36,7 @@
 	GEN_CMD_OBJ(REQ_USER_VM_REBOOT, REQ_USER_VM_REBOOT_ID), \
 	GEN_CMD_OBJ(USER_VM_REBOOT, USER_VM_REBOOT_ID),\
 	GEN_CMD_OBJ(ACK_USER_VM_REBOOT, ACK_USER_VM_REBOOT_ID),\
+	GEN_CMD_OBJ(REQ_SYS_REBOOT, REQ_SYS_REBOOT_ID), \
 
 struct command dm_command_list[CMD_END] = {CMD_OBJS};
 

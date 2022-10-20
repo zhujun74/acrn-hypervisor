@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 Intel Corporation. All rights reserved.
+ * Copyright (C) 2018-2022 Intel Corporation.
  *
  * SPDX-License-Identifier: BSD-3-Clause
  */
@@ -26,11 +26,18 @@ struct shell_cmd {
 
 };
 
+#define MAX_BUFFERED_CMDS 8
+
 /* Shell Control Block */
 struct shell {
-	char input_line[2][SHELL_CMD_MAX_LEN + 1U];	/* current & last */
+	/* a ring buffer to buffer former commands and use one as current active input */
+	char buffered_line[MAX_BUFFERED_CMDS][SHELL_CMD_MAX_LEN + 1U];
 	uint32_t input_line_len;	/* Length of current input line */
-	uint32_t input_line_active;	/* Active input line index */
+	int32_t input_line_active;	/* Active input line index */
+
+	int32_t to_select_index; /* used for up/down key to select former cmds */
+	uint32_t cursor_offset; /* cursor offset position from left input line */
+
 	struct shell_cmd *cmds;	/* cmds supported */
 	uint32_t cmd_count;		/* Count of cmds supported */
 };
