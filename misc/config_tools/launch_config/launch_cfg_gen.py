@@ -260,6 +260,7 @@ def generate_for_one_vm(board_etree, hv_scenario_etree, vm_scenario_etree, vm_id
         script.add_plain_dm_parameter("--windows")
     script.add_vm_descriptor("vm_type", f"'{eval_xpath(vm_scenario_etree, './/vm_type/text()', 'STANDARD_VM')}'")
     script.add_vm_descriptor("scheduler", f"'{eval_xpath(hv_scenario_etree, './/SCHEDULER/text()')}'")
+    script.add_vm_descriptor("own_pcpu", f"'{eval_xpath(vm_scenario_etree, './/own_pcpu/text()')}'")
 
     ###
     # CPU and memory resources
@@ -317,10 +318,13 @@ def generate_for_one_vm(board_etree, hv_scenario_etree, vm_scenario_etree, vm_id
             slot = get_slot_by_vbdf(vbdf)
             script.add_virtual_device("uart", slot, options=f"vuart_idx:{idx}")
 
+    xhci_params = []
     # Mediated PCI devices, including virtio
     for usb_xhci in eval_xpath_all(vm_scenario_etree, ".//usb_xhci/usb_dev[text() != '']/text()"):
         bus_port = usb_xhci.split(' ')[0]
-        script.add_virtual_device("xhci", options=bus_port)
+        xhci_params.append(bus_port)
+    if xhci_params: 
+        script.add_virtual_device("xhci", options=",".join(xhci_params))
 
     for virtio_input_etree in eval_xpath_all(vm_scenario_etree, ".//virtio_devices/input"):
         backend_device_file = eval_xpath(virtio_input_etree, "./backend_device_file[text() != '']/text()")
@@ -373,9 +377,19 @@ def generate_for_one_vm(board_etree, hv_scenario_etree, vm_scenario_etree, vm_id
             script.add_virtual_device("virtio-blk", options=os.path.join(f"${{{var}}}", rootfs_img))
             script.add_deinit_command(f"unmount_partition ${{{var}}}")
 
-    for virtio_gpu in eval_xpath_all(vm_scenario_etree, ".//virtio_devices/gpu[text() != '']/text()"):
-        if virtio_gpu is not None:
-            script.add_virtual_device("virtio-gpu", options=virtio_gpu)
+    for gpu_etree in eval_xpath_all(vm_scenario_etree, ".//virtio_devices/gpu[./display_type]"):
+        display_type = eval_xpath(gpu_etree, "./display_type[text() != '']/text()")
+        params = list()
+        for display_etree in eval_xpath_all(gpu_etree, "./displays/display"):
+            if display_type == "Window":
+                window_resolutions = eval_xpath(display_etree, "./window_resolutions/text()")
+                horizontal_offset = eval_xpath(display_etree, "./horizontal_offset/text()")
+                vertical_offset = eval_xpath(display_etree, "./vertical_offset/text()")
+                params.append(f"geometry={window_resolutions}+{horizontal_offset}+{vertical_offset}")
+            if display_type == "Full screen":
+                monitor_id = eval_xpath(display_etree, "./monitor_id/text()")
+                params.append(f"geometry=fullscreen:{monitor_id}")
+        script.add_virtual_device("virtio-gpu", options=",".join(params))
 
     for vsock in eval_xpath_all(vm_scenario_etree, ".//virtio_devices/vsock[text() != '']/text()"):
         script.add_virtual_device("vhost-vsock", options="cid="+vsock)

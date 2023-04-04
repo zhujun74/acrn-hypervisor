@@ -202,9 +202,11 @@ static void outdate(char *msg)
 static void
 print_version(void)
 {
-	fprintf(stdout, "DM version is: %s-%s (daily tag:%s), build by %s@%s\n",
-			DM_FULL_VERSION,
-			DM_BUILD_VERSION, DM_DAILY_TAG, DM_BUILD_USER, DM_BUILD_TIME);
+	fprintf(stdout, "DM: %s-%s-%s%s%s%s build by %s@%s\n",
+			DM_BRANCH_VERSION, DM_COMMIT_TIME, DM_COMMIT_DIRTY,
+			(sizeof(DM_COMMIT_TAGS) > 1) ? "(tag: " : "", DM_COMMIT_TAGS, 
+			(sizeof(DM_COMMIT_TAGS) > 1) ? ")" : "",
+			DM_BUILD_USER, DM_BUILD_TIME);
 
 	exit(0);
 }
@@ -850,7 +852,7 @@ vm_init_asyncio(struct vmctx *ctx, uint64_t base)
 	sbuf->overrun_cnt = 0;
 	sbuf->head = 0;
 	sbuf->tail = 0;
-	return vm_setup_sbuf(ctx, ACRN_ASYNCIO, base);
+	return vm_setup_asyncio(ctx, base);
 }
 
 int

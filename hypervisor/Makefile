@@ -40,9 +40,6 @@ ARCH_ASFLAGS :=
 ARCH_ARFLAGS :=
 ARCH_LDFLAGS :=
 
-.PHONY: default
-default: all
-
 include scripts/makefile/config.mk
 
 BOARD_INFO_DIR := $(HV_CONFIG_DIR)/boards
@@ -396,11 +393,15 @@ MODULES += $(SYS_INIT_MOD)
 
 DISTCLEAN_OBJS := $(shell find $(BASEDIR) -name '*.o')
 VERSION := $(HV_OBJDIR)/include/version.h
+HEADERS := $(VERSION) $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
 
 PRE_BUILD_DIR := ../misc/hv_prebuild
+PRE_BUILD_CHECKER := $(HV_OBJDIR)/hv_prebuild_check.out
+HV_ACPI_TABLE_TIMESTAMP := $(HV_OBJDIR)/acpi.timestamp
+SERIAL_CONF = $(HV_OBJDIR)/serial.conf
 
 .PHONY: all
-all: env_check pre_build $(HV_OBJDIR)/$(HV_FILE).32.out $(HV_OBJDIR)/$(HV_FILE).bin
+all: env_check $(HV_ACPI_TABLE_TIMESTAMP) $(SERIAL_CONF) $(HV_OBJDIR)/$(HV_FILE).32.out $(HV_OBJDIR)/$(HV_FILE).bin
 
 install: $(HV_OBJDIR)/$(HV_FILE).32.out $(HV_OBJDIR)/$(HV_FILE).bin
 	install -D $(HV_OBJDIR)/$(HV_FILE).32.out $(DESTDIR)$(libdir)/acrn/$(HV_FILE).$(BOARD).$(SCENARIO).32.out
@@ -422,18 +423,19 @@ ifndef ASL_COMPILER
 $(error Please either install "iasl" or provide the path to "iasl" by using the ASL_COMPILER variable)
 endif
 
-.PHONY: pre_build
-pre_build: $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
+$(PRE_BUILD_CHECKER): $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
 	@echo "Start pre-build static check ..."
-	$(MAKE) -C $(PRE_BUILD_DIR) BOARD=$(BOARD) SCENARIO=$(SCENARIO) TARGET_DIR=$(HV_CONFIG_DIR)
-	@$(HV_OBJDIR)/hv_prebuild_check.out
-	@echo "generate the binary of ACPI tables for pre-launched VMs ..."
-	python3 ../misc/config_tools/acpi_gen/bin_gen.py --board $(HV_OBJDIR)/.board.xml --scenario $(HV_OBJDIR)/.scenario.xml --asl $(HV_CONFIG_DIR) --out $(HV_OBJDIR) --iasl_path $(ASL_COMPILER) --iasl_min_ver $(IASL_MIN_VER)
-	@echo "generate the serial configuration file for service VM ..."
-	python3 ../misc/config_tools/service_vm_config/serial_config.py --allocation $(HV_OBJDIR)/configs/allocation.xml --scenario $(HV_OBJDIR)/.scenario.xml --out $(HV_OBJDIR)/serial.conf
+	$(MAKE) -C $(PRE_BUILD_DIR) BOARD=$(BOARD) SCENARIO=$(SCENARIO) CHECKER_OUT=$(PRE_BUILD_CHECKER)
+	@$(PRE_BUILD_CHECKER)
 
-.PHONY: header
-header: $(VERSION) $(HV_CONFIG_H) $(HV_CONFIG_TIMESTAMP)
+$(HV_ACPI_TABLE_TIMESTAMP): $(HV_CONFIG_TIMESTAMP)
+	@echo "generate the binary of ACPI tables for pre-launched VMs ..."
+	python3 ../misc/config_tools/acpi_gen/bin_gen.py --board $(HV_BOARD_XML) --scenario $(HV_SCENARIO_XML) --asl $(HV_CONFIG_DIR) --out $(HV_OBJDIR) --iasl_path $(ASL_COMPILER) --iasl_min_ver $(IASL_MIN_VER)
+	@touch $(HV_ACPI_TABLE_TIMESTAMP)
+
+$(SERIAL_CONF): $(HV_CONFIG_TIMESTAMP) $(HV_ALLOCATION_XML)
+	@echo "generate the serial configuration file for service VM ..."
+	python3 ../misc/config_tools/service_vm_config/serial_config.py --allocation $(HV_ALLOCATION_XML) --scenario $(HV_SCENARIO_XML) --out $(SERIAL_CONF)
 
 .PHONY: lib-mod boot-mod hw-mod vp-base-mod vp-dm-mod vp-trusty-mod vp-x86tee-mod vp-hcall-mod sys-init-mod
 $(LIB_MOD): $(LIB_C_OBJS) $(LIB_S_OBJS)
@@ -483,7 +485,7 @@ sys-init-mod: $(SYS_INIT_MOD)
 
 .PHONY: lib
 
-$(LIB_BUILD): header
+$(LIB_BUILD): $(HEADERS)
 	$(MAKE) -f $(LIB_MK) MKFL_NAME=$(LIB_MK)
 
 lib: $(LIB_BUILD)
@@ -515,15 +517,16 @@ distclean:
 PHONY: (VERSION)
 $(VERSION): $(HV_CONFIG_H)
 	touch $(VERSION)
-	@if [ "$(BUILD_VERSION)"x = x -o "$(BUILD_TAG)"x = x ];then \
+	@if [ "$(BUILD_VERSION)"x = x ];then \
 		COMMIT=`git rev-parse --verify --short HEAD 2>/dev/null`;\
 		DIRTY=`git diff-index --name-only HEAD`;\
 		if [ -n "$$DIRTY" ];then PATCH="$$COMMIT-dirty";else PATCH="$$COMMIT";fi;\
-		DAILY_TAG=`git tag --merged HEAD|grep "acrn"|tail -n 1`;\
 	else \
 		PATCH="$(BUILD_VERSION)"; \
-		DAILY_TAG="$(BUILD_TAG)"; \
 	fi; \
+	COMMIT_TAGS=$$(git tag --points-at HEAD|tr -s "\n" " "); \
+	COMMIT_TAGS=$$(eval echo $$COMMIT_TAGS);\
+	COMMIT_TIME=$$(git log -1 --date=format:"%Y-%m-%d-%T" --format=%cd); \
 	TIME=$$(date -u -d "@$${SOURCE_DATE_EPOCH:-$$(date +%s)}" "+%F %T"); \
 	USER="$${USER:-$$(id -u -n)}"; \
 	if [ x$(CONFIG_RELEASE) = "xy" ];then BUILD_TYPE="REL";else BUILD_TYPE="DBG";fi;\
@@ -533,36 +536,34 @@ $(VERSION): $(HV_CONFIG_H)
 	echo "" >> $(VERSION); \
 	echo "#ifndef VERSION_H" >> $(VERSION); \
 	echo "#define VERSION_H" >> $(VERSION); \
-	echo "#define HV_FULL_VERSION "\"$(FULL_VERSION)\""" >> $(VERSION);\
 	echo "#define HV_API_MAJOR_VERSION $(API_MAJOR_VERSION)U" >> $(VERSION);\
 	echo "#define HV_API_MINOR_VERSION $(API_MINOR_VERSION)U" >> $(VERSION);\
-	echo "#define HV_DAILY_TAG "\""$$DAILY_TAG"\""" >> $(VERSION);\
-	echo "#define HV_BUILD_VERSION "\""$$PATCH"\""" >> $(VERSION);\
+	echo "#define HV_BRANCH_VERSION "\"$(BRANCH_VERSION)\""" >> $(VERSION);\
+	echo "#define HV_COMMIT_DIRTY "\""$$PATCH"\""" >> $(VERSION);\
+	echo "#define HV_COMMIT_TAGS "\"$$COMMIT_TAGS\""" >> $(VERSION);\
+	echo "#define HV_COMMIT_TIME "\"$$COMMIT_TIME\""" >> $(VERSION);\
 	echo "#define HV_BUILD_TYPE "\""$$BUILD_TYPE"\""" >> $(VERSION);\
 	echo "#define HV_BUILD_TIME "\""$$TIME"\""" >> $(VERSION);\
 	echo "#define HV_BUILD_USER "\""$$USER"\""" >> $(VERSION);\
 	echo "#define HV_BUILD_SCENARIO "\"$(SCENARIO)\""" >> $(VERSION);\
 	echo "#define HV_BUILD_BOARD "\"$(BOARD)\""" >> $(VERSION);\
-	if [ "$(CONFIG_XML_ENABLED)" = "true" ]; then \
-		echo "#define HV_CONFIG_TOOL \" with acrn-config\"" >> $(VERSION);\
-	else	\
-		echo "#define HV_CONFIG_TOOL \"\"" >> $(VERSION);\
-	fi;\
 	echo "#endif" >> $(VERSION)
 
 -include $(C_OBJS:.o=.d)
 -include $(S_OBJS:.o=.d)
 
-$(HV_OBJDIR)/%.o: %.c header
+$(HV_OBJDIR)/%.o: %.c $(HEADERS) $(PRE_BUILD_CHECKER)
 	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
 	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@ -MMD -MT $@
 
 $(VM_CFG_C_SRCS): %.c: $(HV_CONFIG_TIMESTAMP)
 
-$(VM_CFG_C_OBJS): %.o: %.c header
+$(VM_CFG_C_OBJS): %.o: %.c $(HEADERS) $(PRE_BUILD_CHECKER)
 	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
 	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. -c $(CFLAGS) $(ARCH_CFLAGS) $< -o $@ -MMD -MT $@
 
-$(HV_OBJDIR)/%.o: %.S header
+$(HV_OBJDIR)/%.o: %.S $(HEADERS) $(PRE_BUILD_CHECKER)
 	[ ! -e $@ ] && mkdir -p $(dir $@) && mkdir -p $(HV_MODDIR); \
 	$(CC) $(patsubst %, -I%, $(INCLUDE_PATH)) -I. $(ASFLAGS) $(ARCH_ASFLAGS) -c $< -o $@ -MMD -MT $@
+
+.DEFAULT_GOAL := all

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 build_dir="$PWD/build"
-cloud_image="${build_dir}/focal-server-cloudimg-amd64.img"
-cloud_image_url=https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img
+cloud_image="${build_dir}/jammy-server-cloudimg-amd64.img"
+cloud_image_url=https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
 hmi_vm_image="${build_dir}/hmi_vm.img"
 rt_vm_image="${build_dir}/rt_vm.img"
 rt_kernel=(linux-libc linux-headers linux-image)
@@ -227,7 +227,7 @@ function cleanup() {
 mount_point=$(pwd)/mnt
 if [[ ${vm_type} == "hmi-vm" ]]; then
     target_image=${hmi_vm_image}
-    size_modifier="+4G"
+    size_modifier="+5G"
 elif [[ ${vm_type} == "rt-vm" ]]; then
     target_image=${rt_vm_image}
     size_modifier="+1G"
@@ -236,7 +236,7 @@ else
     exit 1
 fi
 
-try_step "Download Ubuntu Focal cloud image" download_image ${cloud_image} ${cloud_image_url}
+try_step "Download Ubuntu cloud image" download_image ${cloud_image} ${cloud_image_url}
 if [[ ${vm_type} == "rt-vm" ]]; then
     try_step "Copy the RT kernel to build directory" copy_rt_kernel
     try_step "Check availability of RT kernel image" check_rt_kernel

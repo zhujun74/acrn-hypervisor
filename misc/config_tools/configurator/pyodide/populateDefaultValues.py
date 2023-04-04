@@ -37,6 +37,19 @@ def main(scenario):
             schema_path=scenario_xml_schema_path,
         )
         pipeline.run(obj)
+
+        # Clean up the VM_NAME and/or vm_name which does not exist
+        etree = obj.get("scenario_etree").getroot()
+        vmNames = [name.text for name in etree.findall(".//vm/name")]
+        for name in etree.findall(".//IVSHMEM_VM/VM_NAME") + \
+            etree.findall(".//vuart_connection/endpoint/vm_name"):
+            if name.text not in vmNames:
+                name.text = ""
+
+        own_pcpus = etree.findall(".//vm[vm_type = 'RTVM']/own_pcpu")
+        for o in own_pcpus:
+            o.text = 'y'
+
         result = tostring(obj.get("scenario_etree").getroot())
         result = result.decode()
     result = convert_result({

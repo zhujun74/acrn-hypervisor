@@ -20,7 +20,7 @@ script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(script_dir))
 
 from cpuparser import parse_cpuid, get_online_cpu_ids, get_offline_cpu_ids
-from inspectorlib import validator
+from inspectorlib import external_tools, validator
 
 class AddLLCCATAction(argparse.Action):
     CATInfo = namedtuple("CATInfo", ["capacity_mask_length", "clos_number", "has_CDP"])
@@ -38,37 +38,29 @@ class AddLLCCATAction(argparse.Action):
 
 def check_deps():
     # Check that the required tools are installed on the system
-    BIN_LIST = ['cpuid', 'rdmsr', 'lspci', ' dmidecode', 'blkid', 'stty']
-    cpuid_min_ver = 20170122
-    had_error = False
-    for execute in BIN_LIST:
-        res = subprocess.Popen("which {}".format(execute),
-                               shell=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, close_fds=True)
+    had_error = not external_tools.locate_tools(["cpuid", "rdmsr", "lspci", "dmidecode", "blkid", "stty", "modprobe"])
 
-        line = res.stdout.readline().decode('ascii')
-        if not line:
-            logger.critical("'{}' cannot be found. Please install it and run the Board Inspector again.".format(execute))
+    try:
+        cpuid_min_ver = 20170122
+        res = external_tools.run("cpuid -v")
+        line = res.stdout.readline().decode("ascii")
+        version = line.split()[2]
+        if int(version) < cpuid_min_ver:
+            logger.critical("This tool requires CPUID version >= {}.  Try updating and upgrading the OS" \
+            "on this system and reruning the Board Inspector.  If that fails, install a newer CPUID tool" \
+            "from https://github.com/tycho/cpuid.".format(cpuid_min_ver))
             had_error = True
+    except external_tools.ExecutableNotFound:
+        pass
 
-        if execute == 'cpuid':
-            res = subprocess.Popen("cpuid -v",
-                                   shell=True, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, close_fds=True)
-            line = res.stdout.readline().decode('ascii')
-            version = line.split()[2]
-            if int(version) < cpuid_min_ver:
-                logger.critical("This tool requires CPUID version >= {}.  Try updating and upgrading the OS" \
-                "on this system and reruning the Board Inspector.  If that fails, install a newer CPUID tool" \
-                "from https://github.com/tycho/cpuid.".format(cpuid_min_ver))
-                had_error = True
     if had_error:
         sys.exit(1)
 
     # Try updating pci.ids for latest PCI device descriptions
+    external_tools.locate_tools(["update-pciids"])
     try:
         logger.info("Updating pci.ids for latest PCI device descriptions.")
-        res = subprocess.Popen(["update-pciids", "-q"], stderr=subprocess.DEVNULL)
+        res = external_tools.run("update-pciids -q", stderr=subprocess.DEVNULL)
         if res.wait(timeout=40) != 0:
             logger.warning(f"Failed to invoke update-pciids. No functional impact is foreseen, but descriptions of PCI devices may be inaccurate.")
     except Exception as e:
@@ -83,10 +75,12 @@ def native_check():
         "Only KVM or QEMU is supported. Unexpected results may occur.")
 
 def check_pci_domains():
-    root_buses = filter(lambda x: x.startswith("pci"), os.listdir("/sys/devices"))
-    domain_ids = set(map(lambda x: x.split(":")[0].replace("pci", ""), root_buses))
+    root_buses = os.listdir("/sys/bus/pci/devices/")
+    domain_ids = set(map(lambda x: x.split(":")[0], root_buses))
     if len(domain_ids) > 1:
-        logger.fatal(f"ACRN does not support platforms with multiple PCI domains {domain_ids}. Check if the BIOS has any configuration that consolidates those domains into one.")
+        logger.fatal(f"ACRN does not support platforms with multiple PCI domains {domain_ids}. " \
+        "Check if the BIOS has any configuration that consolidates those domains into one. " \
+        "Known causes of multiple PCI domains include: VMD (Volume Management Device) being enabled.")
         sys.exit(1)
 
 def bring_up_cores():
@@ -134,14 +128,11 @@ def summary_loginfo(board_xml):
             print("\033[1;31m{0}\033[0m".format(critical.strip('\n')))
 
     print("="*length)
-    if len(error_list) != 0 and len(critical_list) == 0:
+    if len(critical_list) == 0:
         print(
             f"\033[1;32mSUCCESS: Board configuration file {board_xml} generated successfully and saved to {os.path.dirname(os.path.abspath(board_xml))}\033[0m\n")
+    if len(error_list) != 0:
         print("\033[1;36mNOTE: Board configuration file lacks important features, which will cause ACRN to fail build or boot. Resolve ERROR messages then run the tool again.\033[0m")
-
-    elif len(warning_list) != 0 and len(error_list) == 0 and len(critical_list) == 0:
-        print(
-            f"\033[1;32mSUCCESS: Board configuration file {board_xml} generated successfully and saved to {os.path.dirname(os.path.abspath(board_xml))}\033[0m\n")
     tmpfile.close()
 
 def main(board_name, board_xml, args):

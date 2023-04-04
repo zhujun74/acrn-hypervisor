@@ -4,6 +4,7 @@
 #
 
 import parser_lib, os
+from inspectorlib import external_tools
 from extractors.helpers import get_bdf_from_realpath
 
 MEM_PATH = ['/proc/iomem', '/proc/meminfo']
@@ -35,7 +36,7 @@ def detected_ttys():
     tty_used_list = []
     for s_inc in range(ttys_cnt):
         cmd = 'stty -F /dev/ttyS{}'.format(s_inc)
-        res = parser_lib.cmd_execute('{}'.format(cmd))
+        res = external_tools.run('{}'.format(cmd))
 
         while True:
             line = res.stdout.readline().decode('ascii')
@@ -94,7 +95,7 @@ def dump_ttys_info(ttys_list, config):
             base = read_ttys_node(base_path)
             try:
                 b = get_bdf_from_realpath(os.path.join(TTY_PATH, ttys_n, 'device'))
-                bdf = f'{b[0]}:{b[1]}.{b[2]}
+                bdf = f'{b[0]}:{b[1]}.{b[2]}'
             except AssertionError:
                 bdf = ''
             if bdf:
