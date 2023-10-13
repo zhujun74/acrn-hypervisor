@@ -86,9 +86,7 @@ void default_idle(__unused struct thread_object *obj)
 		} else if (need_shutdown_vm(pcpu_id)) {
 			shutdown_vm_from_idle(pcpu_id);
 		} else {
-			CPU_IRQ_ENABLE_ON_CONFIG();
 			cpu_do_idle();
-			CPU_IRQ_DISABLE_ON_CONFIG();
 		}
 	}
 }
@@ -97,6 +95,7 @@ void run_idle_thread(void)
 {
 	uint16_t pcpu_id = get_pcpu_id();
 	struct thread_object *idle = &per_cpu(idle, pcpu_id);
+	struct sched_params idle_params = {0};
 	char idle_name[16];
 
 	snprintf(idle_name, 16U, "idle%hu", pcpu_id);
@@ -105,7 +104,8 @@ void run_idle_thread(void)
 	idle->thread_entry = default_idle;
 	idle->switch_out = NULL;
 	idle->switch_in = NULL;
-	idle->priority = PRIO_IDLE;
+	idle_params.prio = PRIO_IDLE;
+	init_thread_data(idle, &idle_params);
 
 	run_thread(idle);
 

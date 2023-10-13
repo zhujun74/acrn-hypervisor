@@ -77,6 +77,15 @@ static uint32_t emulated_guest_msrs[NUM_EMULATED_MSRS] = {
 
 	MSR_TEST_CTL,
 
+	MSR_PLATFORM_INFO,
+
+	MSR_IA32_PM_ENABLE,
+	MSR_IA32_HWP_CAPABILITIES,
+	MSR_IA32_HWP_REQUEST,
+	MSR_IA32_HWP_STATUS,
+	MSR_IA32_MPERF,
+	MSR_IA32_APERF,
+
 	/* VMX: CPUID.01H.ECX[5] */
 #ifdef CONFIG_NVMX_ENABLED
 	LIST_OF_VMX_MSRS,
@@ -258,28 +267,29 @@ static const uint32_t unsupported_msrs[] = {
 	MSR_IA32_PL3_SSP,
 	MSR_IA32_INTERRUPT_SSP_TABLE_ADDR,
 
-	/* HWP disabled:
-	 * CPUID.06H.EAX[7]
-	 * CPUID.06H.EAX[9]
-	 * CPUID.06H:EAX[10]
-	 */
-	MSR_IA32_PM_ENABLE,
-	MSR_IA32_HWP_CAPABILITIES,
-	MSR_IA32_HWP_REQUEST,
-	MSR_IA32_HWP_STATUS,
-	/* HWP_Notification disabled:
-	 * CPUID.06H:EAX[8]
-	 */
-	MSR_IA32_HWP_INTERRUPT,
-	/* HWP_package_level disabled:
-	 * CPUID.06H:EAX[11]
+	/*
+	 * HWP package ctrl disabled:
+	 * CPUID.06H.EAX[11] (MSR_IA32_HWP_REQUEST_PKG)
+	 * CPUID.06H.EAX[22] (MSR_IA32_HWP_CTL)
 	 */
 	MSR_IA32_HWP_REQUEST_PKG,
-	/* Hardware Coordination Feedback Capability disabled:
-	 * CPUID.06H:ECX[0]
+	MSR_IA32_HWP_CTL,
+
+	/*
+	 * HWP interrupt disabled:
+	 * CPUID.06H.EAX[8]
 	 */
-	MSR_IA32_MPERF,
-	MSR_IA32_APERF,
+	MSR_IA32_HWP_INTERRUPT,
+
+	/*
+	 * HFI and IDT registers disabled:
+	 * CPUID.06H.EAX[19]
+	 * CPUID.06H.EAX[23]
+	 */
+	IA32_HW_FEEDBACK_PTR,
+	IA32_HW_FEEDBACK_CONFIG,
+	IA32_THREAD_FEEDBACK_CHAR,
+	IA32_HW_FEEDBACK_THREAD_CONFIG,
 };
 
 /* emulated_guest_msrs[] shares same indexes with array vcpu->arch->guest_msrs[] */
@@ -670,12 +680,30 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 	}
 	case MSR_IA32_PERF_STATUS:
 	{
-		v = get_perf_status();
+		if (is_vhwp_configured(vcpu->vm)) {
+			v = msr_read(msr);
+		} else {
+			v = get_perf_status();
+		}
 		break;
 	}
 	case MSR_IA32_PERF_CTL:
 	{
 		v = vcpu_get_guest_msr(vcpu, MSR_IA32_PERF_CTL);
+		break;
+	}
+	case MSR_IA32_PM_ENABLE:
+	case MSR_IA32_HWP_CAPABILITIES:
+	case MSR_IA32_HWP_REQUEST:
+	case MSR_IA32_HWP_STATUS:
+	case MSR_IA32_MPERF:
+	case MSR_IA32_APERF:
+	{
+		if (is_vhwp_configured(vcpu->vm)) {
+			v = msr_read(msr);
+		} else {
+			err = -EACCES;
+		}
 		break;
 	}
 	case MSR_IA32_PAT:
@@ -767,6 +795,21 @@ int32_t rdmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 			v = vcpu_get_guest_msr(vcpu, MSR_TEST_CTL);
 		} else {
 			vcpu_inject_gp(vcpu, 0U);
+		}
+		break;
+	}
+	case MSR_PLATFORM_INFO:
+	{
+		if (is_service_vm(vcpu->vm)) {
+			v = msr_read(msr);
+			v &= MSR_PLATFORM_INFO_MAX_NON_TURBO_LIM_RATIO_MASK |
+			     MSR_PLATFORM_INFO_MAX_EFFICIENCY_RATIO_MASK |
+			     MSR_PLATFORM_INFO_MIN_OPERATING_RATIO_MASK |
+			     MSR_PLATFORM_INFO_SAMPLE_PART;
+		} else {
+			/* Allow read by non-service vm for compatibility */
+			v = 0UL;
+			pr_warn("%s(): vm%d read MSR_PLATFORM_INFO", __func__, vcpu->vm->vm_id);
 		}
 		break;
 	}
@@ -1044,6 +1087,48 @@ int32_t wrmsr_vmexit_handler(struct acrn_vcpu *vcpu)
 		vcpu_set_guest_msr(vcpu, MSR_IA32_PERF_CTL, v);
 		break;
 	}
+	case MSR_IA32_PM_ENABLE:
+	{
+		if (!is_vhwp_configured(vcpu->vm)) {
+			err = -EACCES;
+		}
+		/* Set by HV. Writing from guests will have no effect */
+		break;
+	}
+	case MSR_IA32_HWP_CAPABILITIES:
+	{
+		/* RO */
+		break;
+	}
+	case MSR_IA32_HWP_REQUEST:
+	{
+		if (is_vhwp_configured(vcpu->vm) &&
+			((v & (MSR_IA32_HWP_REQUEST_RSV_BITS | MSR_IA32_HWP_REQUEST_PKG_CTL)) == 0)) {
+			msr_write(msr, v);
+		} else {
+			err = -EACCES;
+		}
+		break;
+	}
+	case MSR_IA32_HWP_STATUS:
+	{
+		if (is_vhwp_configured(vcpu->vm) && ((v & MSR_IA32_HWP_STATUS_RSV_BITS) == 0)) {
+			msr_write(msr, v);
+		} else {
+			err = -EACCES;
+		}
+		break;
+	}
+	case MSR_IA32_MPERF:
+	case MSR_IA32_APERF:
+	{
+		if (is_vhwp_configured(vcpu->vm)) {
+			msr_write(msr, v);
+		} else {
+			err = -EACCES;
+		}
+		break;
+	}
 	case MSR_IA32_PAT:
 	{
 		err = write_pat_msr(vcpu, v);
@@ -1241,5 +1326,8 @@ void update_msr_bitmap_x2apic_passthru(struct acrn_vcpu *vcpu)
 	enable_msr_interception(msr_bitmap, MSR_IA32_EXT_XAPICID, INTERCEPT_READ);
 	enable_msr_interception(msr_bitmap, MSR_IA32_EXT_APIC_LDR, INTERCEPT_READ);
 	enable_msr_interception(msr_bitmap, MSR_IA32_EXT_APIC_ICR, INTERCEPT_WRITE);
+	if (!is_vtm_configured(vcpu->vm)) {
+		enable_msr_interception(msr_bitmap, MSR_IA32_EXT_APIC_LVT_THERMAL, INTERCEPT_READ_WRITE);
+	}
 	set_tsc_msr_interception(vcpu, exec_vmread64(VMX_TSC_OFFSET_FULL) != 0UL);
 }

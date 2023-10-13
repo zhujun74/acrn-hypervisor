@@ -53,17 +53,35 @@ static struct acrn_vcpu *is_single_destination(struct acrn_vm *vm, const struct 
 
 static uint32_t calculate_logical_dest_mask(uint64_t pdmask)
 {
-	uint32_t dest_mask = 0UL;
+	uint32_t dest_cluster_id = 0U, cluster_id, logical_id_mask = 0U;
 	uint64_t pcpu_mask = pdmask;
 	uint16_t pcpu_id;
 
 	pcpu_id = ffs64(pcpu_mask);
-	while (pcpu_id < MAX_PCPU_NUM) {
-		bitmap_clear_nolock(pcpu_id, &pcpu_mask);
-		dest_mask |= per_cpu(lapic_ldr, pcpu_id);
-		pcpu_id = ffs64(pcpu_mask);
+	if (pcpu_id < MAX_PCPU_NUM) {
+		/* Guests working in xAPIC mode may use 'Flat Model' to select an
+		 * arbitrary list of CPUs. But as the HW is woring in x2APIC mode and can only
+		 * use 'Cluster Model', destination mask can only be assigned to pCPUs within
+		 * one Cluster. So some pCPUs may not be included.
+		 * Here we use the first Cluster of all the requested pCPUs.
+		 */
+		dest_cluster_id = per_cpu(lapic_ldr, pcpu_id) & X2APIC_LDR_CLUSTER_ID_MASK;
+		do {
+			bitmap_clear_nolock(pcpu_id, &pcpu_mask);
+			cluster_id = per_cpu(lapic_ldr, pcpu_id) & X2APIC_LDR_CLUSTER_ID_MASK;
+			if (cluster_id == dest_cluster_id) {
+				logical_id_mask |= (per_cpu(lapic_ldr, pcpu_id) & X2APIC_LDR_LOGICAL_ID_MASK);
+			} else {
+				pr_warn("The cluster ID of pCPU %d is %d which differs from that (%d) of "
+					"the previous cores in the guest logical destination.\n"
+					"Ignore that pCPU in the logical destination for physical interrupts.",
+					pcpu_id, cluster_id >> 16U, dest_cluster_id >> 16U);
+			}
+			pcpu_id = ffs64(pcpu_mask);
+		} while (pcpu_id < MAX_PCPU_NUM);
 	}
-	return dest_mask;
+
+	return (dest_cluster_id | logical_id_mask);
 }
 
 /**
@@ -382,15 +400,9 @@ static struct ptirq_remapping_info *add_intx_remapping(struct acrn_vm *vm, uint3
 			pr_err("INTX re-add vpin %d", virt_gsi);
 		}
 	} else if (entry->vm != vm) {
-		if (is_service_vm(entry->vm)) {
-			entry->vm = vm;
-			entry->virt_sid.value = virt_sid.value;
-			entry->polarity = 0U;
-		} else {
-			pr_err("INTX gsi%d already in vm%d with vgsi%d, not able to add into vm%d with vgsi%d",
-					phys_gsi, entry->vm->vm_id, entry->virt_sid.intx_id.gsi, vm->vm_id, virt_gsi);
-			entry = NULL;
-		}
+		pr_err("INTX gsi%d already in vm%d with vgsi%d, not able to add into vm%d with vgsi%d",
+				phys_gsi, entry->vm->vm_id, entry->virt_sid.intx_id.gsi, vm->vm_id, virt_gsi);
+		entry = NULL;
 	} else {
 		/* The mapping has already been added to the VM. No action
 		 * required.
@@ -410,15 +422,24 @@ static struct ptirq_remapping_info *add_intx_remapping(struct acrn_vm *vm, uint3
 	return entry;
 }
 
-/* deactive & remove mapping entry of vpin for vm */
-static void remove_intx_remapping(const struct acrn_vm *vm, uint32_t virt_gsi, enum intx_ctlr vgsi_ctlr)
+/* deactivate & remove mapping entry of vpin for vm */
+static void remove_intx_remapping(const struct acrn_vm *vm, uint32_t gsi, enum intx_ctlr gsi_ctlr, bool is_phy_gsi)
 {
 	uint32_t phys_irq;
 	struct ptirq_remapping_info *entry;
 	struct intr_source intr_src;
-	DEFINE_INTX_SID(virt_sid, virt_gsi, vgsi_ctlr);
 
-	entry = find_ptirq_entry(PTDEV_INTR_INTX, &virt_sid, vm);
+	if (is_phy_gsi) {
+		DEFINE_INTX_SID(sid, gsi, INTX_CTLR_IOAPIC);
+		entry = find_ptirq_entry(PTDEV_INTR_INTX, &sid, NULL);
+		if ((entry != NULL) && (entry->vm != vm)) {
+			entry = NULL;
+		}
+	} else {
+		DEFINE_INTX_SID(sid, gsi, gsi_ctlr);
+		entry = find_ptirq_entry(PTDEV_INTR_INTX, &sid, vm);
+	}
+
 	if (entry != NULL) {
 		if (is_entry_active(entry)) {
 			phys_irq = entry->allocated_pirq;
@@ -431,11 +452,11 @@ static void remove_intx_remapping(const struct acrn_vm *vm, uint32_t virt_gsi, e
 
 			dmar_free_irte(&intr_src, entry->irte_idx);
 			dev_dbg(DBG_LEVEL_IRQ,
-				"deactive %s intx entry:pgsi=%d, pirq=%d ",
-				(vgsi_ctlr == INTX_CTLR_PIC) ? "vPIC" : "vIOAPIC",
+				"deactivate %s intx entry:pgsi=%d, pirq=%d ",
+				(entry->virt_sid.intx_id.ctlr == INTX_CTLR_PIC) ? "vPIC" : "vIOAPIC",
 				entry->phys_sid.intx_id.gsi, phys_irq);
 			dev_dbg(DBG_LEVEL_IRQ, "from vm%d vgsi=%d\n",
-				entry->vm->vm_id, virt_gsi);
+				entry->vm->vm_id, entry->virt_sid.intx_id.gsi);
 		}
 
 		ptirq_release_entry(entry);
@@ -735,7 +756,7 @@ int32_t ptirq_intx_pin_remap(struct acrn_vm *vm, uint32_t virt_gsi, enum intx_ct
 						uint32_t phys_gsi = virt_gsi;
 
 						remove_intx_remapping(vm, alt_virt_sid.intx_id.gsi,
-							alt_virt_sid.intx_id.ctlr);
+							alt_virt_sid.intx_id.ctlr, false);
 						entry = add_intx_remapping(vm, virt_gsi, phys_gsi, vgsi_ctlr);
 						if (entry == NULL) {
 							pr_err("%s, add intx remapping failed", __func__);
@@ -806,12 +827,12 @@ int32_t ptirq_add_intx_remapping(struct acrn_vm *vm, uint32_t virt_gsi, uint32_t
 /*
  * @pre vm != NULL
  */
-void ptirq_remove_intx_remapping(const struct acrn_vm *vm, uint32_t virt_gsi, bool pic_pin)
+void ptirq_remove_intx_remapping(const struct acrn_vm *vm, uint32_t gsi, bool pic_pin, bool is_phy_gsi)
 {
 	enum intx_ctlr vgsi_ctlr = pic_pin ? INTX_CTLR_PIC : INTX_CTLR_IOAPIC;
 
 	spinlock_obtain(&ptdev_lock);
-	remove_intx_remapping(vm, virt_gsi, vgsi_ctlr);
+	remove_intx_remapping(vm, gsi, vgsi_ctlr, is_phy_gsi);
 	spinlock_release(&ptdev_lock);
 }
 
@@ -839,6 +860,6 @@ void ptirq_remove_configured_intx_remappings(const struct acrn_vm *vm)
 	uint16_t i;
 
 	for (i = 0; i < vm_config->pt_intx_num; i++) {
-		ptirq_remove_intx_remapping(vm, vm_config->pt_intx[i].virt_gsi, false);
+		ptirq_remove_intx_remapping(vm, vm_config->pt_intx[i].virt_gsi, false, false);
 	}
 }

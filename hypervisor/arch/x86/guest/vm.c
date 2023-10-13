@@ -214,6 +214,26 @@ bool is_static_configured_vm(const struct acrn_vm *vm)
 }
 
 /**
+ * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
+ */
+bool is_vhwp_configured(const struct acrn_vm *vm)
+{
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	return ((vm_config->guest_flags & GUEST_FLAG_VHWP) != 0U);
+}
+
+/**
+ * @pre vm != NULL && vm_config != NULL && vm->vmid < CONFIG_MAX_VM_NUM
+ */
+bool is_vtm_configured(const struct acrn_vm *vm)
+{
+	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
+
+	return ((vm_config->guest_flags & GUEST_FLAG_VTM) != 0U);
+}
+
+/**
  * @brief VT-d PI posted mode can possibly be used for PTDEVs assigned
  * to this VM if platform supports VT-d PI AND lapic passthru is not configured
  * for this VM.
@@ -483,9 +503,7 @@ static void prepare_service_vm_memmap(struct acrn_vm *vm)
 		entry = p_e820 + i;
 		pr_dbg("e820 table: %d type: 0x%x", i, entry->type);
 		pr_dbg("BaseAddress: 0x%016lx length: 0x%016lx\n", entry->baseaddr, entry->length);
-		if (entry->type == E820_TYPE_RAM) {
-			service_vm_high64_max_ram = max((entry->baseaddr + entry->length), service_vm_high64_max_ram);
-		}
+		service_vm_high64_max_ram = max((entry->baseaddr + entry->length), service_vm_high64_max_ram);
 	}
 
 	/* create real ept map for [0, service_vm_high64_max_ram) with UC */

@@ -532,8 +532,8 @@ static void vlapic_accept_intr(struct acrn_vlapic *vlapic, uint32_t vector, bool
 	if ((lapic->svr.v & APIC_SVR_ENABLE) == 0U) {
 		dev_dbg(DBG_LEVEL_VLAPIC, "vlapic is software disabled, ignoring interrupt %u", vector);
 	} else {
-		signal_event(&vlapic2vcpu(vlapic)->events[VCPU_EVENT_VIRTUAL_INTERRUPT]);
 		vlapic->ops->accept_intr(vlapic, vector, level);
+		signal_event(&vlapic2vcpu(vlapic)->events[VCPU_EVENT_VIRTUAL_INTERRUPT]);
 	}
 }
 
@@ -547,8 +547,6 @@ static void vlapic_accept_intr(struct acrn_vlapic *vlapic, uint32_t vector, bool
  *
  * @param[in] dest_pcpu_id Target CPU ID.
  * @param[in] anv Activation Notification Vectors (ANV)
- *
- * @return None
  */
 static void apicv_trigger_pi_anv(uint16_t dest_pcpu_id, uint32_t anv)
 {
@@ -862,9 +860,9 @@ vlapic_trigger_lvt(struct acrn_vlapic *vlapic, uint32_t lvt_index)
 {
 	uint32_t lvt;
 	int32_t ret = 0;
+	struct acrn_vcpu *vcpu = vlapic2vcpu(vlapic);
 
 	if (!vlapic_enabled(vlapic)) {
-		struct acrn_vcpu *vcpu = vlapic2vcpu(vlapic);
 		/*
 		 * When the local APIC is global/hardware disabled,
 		 * LINT[1:0] pins are configured as INTR and NMI pins,
@@ -906,7 +904,12 @@ vlapic_trigger_lvt(struct acrn_vlapic *vlapic, uint32_t lvt_index)
 			lvt = vlapic_get_lvt(vlapic, APIC_OFFSET_PERF_LVT);
 			break;
 		case APIC_LVT_THERMAL:
-			lvt = vlapic_get_lvt(vlapic, APIC_OFFSET_THERM_LVT);
+			if (is_vtm_configured(vcpu->vm)) {
+				lvt = vlapic_get_lvt(vlapic, APIC_OFFSET_THERM_LVT);
+			} else {
+				lvt = 0U;
+				ret = -EINVAL;
+			}
 			break;
 		case APIC_LVT_CMCI:
 			lvt = vlapic_get_lvt(vlapic, APIC_OFFSET_CMCI_LVT);
@@ -1257,8 +1260,6 @@ static bool vlapic_find_deliverable_intr(const struct acrn_vlapic *vlapic, uint3
  * @param[in] vlapic Pointer to target vLAPIC data structure
  * @param[in] vector Target virtual interrupt vector
  *
- * @return None
- *
  * @pre vlapic != NULL
  */
 static void vlapic_get_deliverable_intr(struct acrn_vlapic *vlapic, uint32_t vector)
@@ -1530,7 +1531,6 @@ static int32_t vlapic_write(struct acrn_vlapic *vlapic, uint32_t offset, uint64_
 				break;
 			}
 			/* falls through */
-
 		default:
 			ret = -EACCES;
 			/* Read only */
@@ -2123,6 +2123,7 @@ int32_t vlapic_x2apic_read(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t *val)
 			switch (msr) {
 			case MSR_IA32_EXT_APIC_LDR:
 			case MSR_IA32_EXT_XAPICID:
+			case MSR_IA32_EXT_APIC_LVT_THERMAL:
 				offset = x2apic_msr_to_regoff(msr);
 				error = vlapic_read(vlapic, offset, val);
 				break;
@@ -2157,6 +2158,10 @@ int32_t vlapic_x2apic_write(struct acrn_vcpu *vcpu, uint32_t msr, uint64_t val)
 			switch (msr) {
 			case MSR_IA32_EXT_APIC_ICR:
 				error = vlapic_x2apic_pt_icr_access(vcpu, val);
+				break;
+			case MSR_IA32_EXT_APIC_LVT_THERMAL:
+				offset = x2apic_msr_to_regoff(msr);
+				error = vlapic_write(vlapic, offset, val);
 				break;
 			default:
 				pr_err("%s: unexpected MSR[0x%x] write with lapic_pt", __func__, msr);

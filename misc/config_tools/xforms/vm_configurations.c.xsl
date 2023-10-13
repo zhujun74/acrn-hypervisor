@@ -87,6 +87,15 @@
     </xsl:if>
     <xsl:value-of select="$newline"/>
     <xsl:value-of select="$end_of_array_initializer" />
+    <xsl:value-of select="$newline"/>
+    <xsl:choose>
+      <xsl:when test="count(vm[load_order='SERVICE_VM'])">
+        <xsl:value-of select="concat('struct acrn_vm_config *const service_vm_config = &amp;vm_configs[', vm[load_order='SERVICE_VM']/@id, '];')" />
+      </xsl:when>
+      <xsl:otherwise>
+        <xsl:value-of select="concat('struct acrn_vm_config *const service_vm_config =', ' NULL;')" />
+      </xsl:otherwise>
+    </xsl:choose>
   </xsl:template>
 
   <xsl:template match="vm">
@@ -101,7 +110,14 @@
       <xsl:value-of select="acrn:comment('Allow Service VM to reboot the system since it is the highest priority VM.')" />
       <xsl:value-of select="$newline" />
     </xsl:if>
-    <xsl:value-of select="acrn:initializer('vm_prio', priority)" />
+    <xsl:value-of select="acrn:initializer('sched_params', '{', true())" />
+    <xsl:value-of select="acrn:initializer('prio', priority)" />
+    <xsl:value-of select="acrn:initializer('bvt_weight', bvt_weight)" />
+    <xsl:value-of select="acrn:initializer('bvt_warp_value', bvt_warp_value)" />
+    <xsl:value-of select="acrn:initializer('bvt_warp_limit', bvt_warp_limit)" />
+    <xsl:value-of select="acrn:initializer('bvt_unwarp_period', bvt_unwarp_period)" />
+    <xsl:text>},</xsl:text>
+    <xsl:value-of select="$newline" />
     <xsl:value-of select="acrn:initializer('companion_vm_id', concat(companion_vmid, 'U'))" />
     <xsl:call-template name="guest_flags" />
 

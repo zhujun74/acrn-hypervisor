@@ -173,7 +173,8 @@ int socket_req_user_vm_reboot_handler(void *arg, int fd)
 {
 	return req_user_vm_shutdown_reboot(arg, fd, USER_VM_REBOOT, ACK_REQ_USER_VM_REBOOT);
 }
-int socket_req_system_shutdown_user_vm_handler(void *arg, int fd)
+
+int req_system_shutdown_reboot(void *arg, int fd, char *msg, char *ack_msg)
 {
 	int ret;
 	struct channel_dev *c_dev = NULL;
@@ -186,17 +187,27 @@ int socket_req_system_shutdown_user_vm_handler(void *arg, int fd)
 		return 0;
 	}
 
-	ret = send_socket_ack(arg, fd, ACK_REQ_SYS_SHUTDOWN);
+	ret = send_socket_ack(arg, fd, ack_msg);
 	if (ret < 0) {
 		LOG_WRITE("Failed to send ACK by socket\n");
 		return 0;
 	}
-	LOG_WRITE("Foward shutdown req to service VM by UART\n");
-	start_uart_channel_dev_resend(c_dev, REQ_SYS_SHUTDOWN, MIN_RESEND_TIME);
-	ret = send_message_by_uart(c_dev->uart_device, REQ_SYS_SHUTDOWN, strlen(REQ_SYS_SHUTDOWN));
+	LOG_PRINTF("Foward (%s) req to service VM by UART\n", msg);
+	start_uart_channel_dev_resend(c_dev, msg, MIN_RESEND_TIME);
+	ret = send_message_by_uart(c_dev->uart_device, msg, strlen(msg));
 	if (ret < 0)
-		LOG_WRITE("Failed to foward system shutdown request to service VM by UART\n");
+		LOG_PRINTF("Failed to foward (%s) to service VM by UART\n", msg);
 	return ret;
+}
+
+int socket_req_system_reboot_user_vm_handler(void *arg, int fd)
+{
+	return req_system_shutdown_reboot(arg, fd, REQ_SYS_REBOOT, ACK_REQ_SYS_REBOOT);
+	}
+
+int socket_req_system_shutdown_user_vm_handler(void *arg, int fd)
+{
+	return req_system_shutdown_reboot(arg, fd, REQ_SYS_SHUTDOWN, ACK_REQ_SYS_SHUTDOWN);
 }
 
 static int is_allowed_s5_channel_dev(struct life_mngr_config *conf, struct channel_dev *c_dev)
@@ -391,7 +402,7 @@ int acked_sync_handler(void *arg, int fd)
  * @param fd the file directory of the uart which receives message
  * @return indicate this command is handled successful or not
  */
-int acked_req_shutdown_handler(void *arg, int fd)
+int acked_req_shutdown_reboot_handler(void *arg, int fd)
 {
 	struct channel_dev *c_dev = NULL;
 	struct uart_channel *c = (struct uart_channel *)arg;

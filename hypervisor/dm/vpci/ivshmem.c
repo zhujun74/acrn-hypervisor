@@ -66,16 +66,15 @@ struct ivshmem_device {
 	struct ivshmem_shm_region *region;
 };
 
-/* IVSHMEM_SHM_SIZE is provided by offline tool */
-static uint8_t ivshmem_base[IVSHMEM_SHM_SIZE] __aligned(PDE_SIZE);
 static struct ivshmem_device ivshmem_dev[IVSHMEM_DEV_NUM];
 static spinlock_t ivshmem_dev_lock = { .head = 0U, .tail = 0U, };
 
 void init_ivshmem_shared_memory()
 {
 	uint32_t i;
-	uint64_t addr = hva2hpa(&ivshmem_base);
+	uint64_t addr;
 
+	addr = e820_alloc_memory(roundup(IVSHMEM_SHM_SIZE, PDE_SIZE), MEM_SIZE_MAX);
 	for (i = 0U; i < ARRAY_SIZE(mem_regions); i++) {
 		mem_regions[i].hpa = addr;
 		addr += mem_regions[i].size;
@@ -180,6 +179,11 @@ static void create_ivshmem_device(struct pci_vdev *vdev)
 	}
 	spinlock_release(&ivshmem_dev_lock);
 	ASSERT((i < IVSHMEM_DEV_NUM), "failed to find and set ivshmem device");
+	/*
+	 * Clear ivshmem_device mmio to ensure the same initial
+	 * states after VM reboot.
+	 */
+	memset(&ivshmem_dev[i].mmio, 0U, sizeof(uint32_t) * 4);
 }
 
 /*
@@ -193,7 +197,9 @@ static int32_t ivshmem_mmio_handler(struct io_request *io_req, void *data)
 	struct ivshmem_device *ivs_dev = (struct ivshmem_device *) vdev->priv_data;
 	uint64_t offset = mmio->address - vdev->vbars[IVSHMEM_MMIO_BAR].base_gpa;
 
-	if ((mmio->size == 4U) && ((offset & 0x3U) == 0U)) {
+	/* ivshmem spec define the BAR0 offset > 16 are reserved */
+	if ((mmio->size == 4U) && ((offset & 0x3U) == 0U) &&
+		(offset < sizeof(ivs_dev->mmio))) {
 		/*
 		 * IVSHMEM_IRQ_MASK_REG and IVSHMEM_IRQ_STA_REG are R/W registers
 		 * they are useless for ivshmem Rev.1.
@@ -248,13 +254,11 @@ static void ivshmem_vbar_map(struct pci_vdev *vdev, uint32_t idx)
 {
 	struct acrn_vm *vm = vpci2vm(vdev->vpci);
 	struct pci_vbar *vbar = &vdev->vbars[idx];
-	struct ivshmem_device *ivs_dev = (struct ivshmem_device *) vdev->priv_data;
 
 	if ((idx == IVSHMEM_SHM_BAR) && (vbar->base_hpa != INVALID_HPA) && (vbar->base_gpa != 0UL)) {
 		ept_add_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, vbar->base_hpa,
 				vbar->base_gpa, vbar->size, EPT_RD | EPT_WR | EPT_WB | EPT_IGNORE_PAT);
 	} else if ((idx == IVSHMEM_MMIO_BAR) && (vbar->base_gpa != 0UL)) {
-		(void)memset(&ivs_dev->mmio, 0U, sizeof(ivs_dev->mmio));
 		register_mmio_emulation_handler(vm, ivshmem_mmio_handler, vbar->base_gpa,
 				(vbar->base_gpa + vbar->size), vdev, false);
 		ept_del_mr(vm, (uint64_t *)vm->arch_vm.nworld_eptp, vbar->base_gpa, round_page_up(vbar->size));
@@ -332,6 +336,8 @@ static void init_ivshmem_vdev(struct pci_vdev *vdev)
 	pci_vdev_write_vcfg(vdev, PCIR_DEVICE, 2U, IVSHMEM_DEVICE_ID);
 	pci_vdev_write_vcfg(vdev, PCIR_REVID, 1U, IVSHMEM_REV);
 	pci_vdev_write_vcfg(vdev, PCIR_CLASS, 1U, IVSHMEM_CLASS);
+	pci_vdev_write_vcfg(vdev, PCIR_HDRTYPE, 1U,
+		PCIM_HDRTYPE_NORMAL | ((vdev->bdf.bits.f == 0U) ? PCIM_MFDEV : 0U));
 	add_vmsix_capability(vdev, MAX_IVSHMEM_MSIX_TBL_ENTRY_NUM, IVSHMEM_MSIX_BAR);
 
 	/* initialize ivshmem bars */
@@ -352,9 +358,12 @@ static void deinit_ivshmem_vdev(struct pci_vdev *vdev)
 	struct ivshmem_device *ivs_dev = (struct ivshmem_device *) vdev->priv_data;
 
 	ivshmem_server_unbind_peer(vdev);
-	ivs_dev->pcidev = NULL;
+
+	spinlock_obtain(&ivshmem_dev_lock);
 	vdev->priv_data = NULL;
 	vdev->user = NULL;
+	ivs_dev->pcidev = NULL;
+	spinlock_release(&ivshmem_dev_lock);
 }
 
 /**

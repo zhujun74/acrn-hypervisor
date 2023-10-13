@@ -13,8 +13,8 @@
 *                                        @dongyaozu @NanlinXie
 
 Makefile                                 @terryzouhao @NanlinXie
-/hypervisor/                             @dongyaozu @lifeix
-/devicemodel/                            @ywan170
+/hypervisor/                             @dongyaozu @lifeix @junjiemao1
+/devicemodel/                            @ywan170 @chejianj
 /doc/                                    @dbkinder @NanlinXie
 /misc/debug_tools/acrn_crashlog/         @ywan170 @lifeix
 /misc/debug_tools/acrn_log/              @ywan170 @lifeix

@@ -48,6 +48,7 @@
 #include "dm.h"
 #include "passthru.h"
 #include "ptm.h"
+#include "igd_pciids.h"
 
 /* Some audio drivers get topology data from ACPI NHLT table.
  * For such drivers, we need to copy the host NHLT table to make it
@@ -60,8 +61,9 @@
 
 extern uint64_t audio_nhlt_len;
 
-uint32_t gpu_dsm_hpa = 0;
-uint32_t gpu_dsm_gpa = 0;
+uint64_t gpu_dsm_hpa = 0;
+uint64_t gpu_dsm_gpa = 0;
+uint32_t gpu_dsm_size = 0;
 uint32_t gpu_opregion_hpa = 0;
 uint32_t gpu_opregion_gpa = 0;
 
@@ -552,7 +554,62 @@ get_gpu_rsvmem_base_gpa()
 uint32_t
 get_gpu_rsvmem_size()
 {
-	return GPU_OPREGION_SIZE + GPU_DSM_SIZE;
+	return GPU_OPREGION_SIZE + gpu_dsm_size;
+}
+
+static const struct igd_device igd_device_tbl[] = {
+	IGD_RPLP_DEVICE_IDS,
+	IGD_RPLS_DEVICE_IDS,
+	IGD_ADLN_DEVICE_IDS,
+	IGD_ADLP_DEVICE_IDS,
+	IGD_ADLS_DEVICE_IDS,
+	IGD_RKL_DEVICE_IDS,
+	IGD_TGL_DEVICE_IDS,
+	IGD_JSL_DEVICE_IDS,
+	IGD_EHL_DEVICE_IDS,
+	IGD_ICL_DEVICE_IDS,
+	IGD_CFL_DEVICE_IDS,
+	IGD_KBL_DEVICE_IDS,
+	IGD_GLK_DEVICE_IDS,
+	IGD_BXT_DEVICE_IDS,
+	IGD_SKL_DEVICE_IDS,
+	{ 0 }
+};
+
+int igd_gen(uint16_t device) {
+	const struct igd_device *entry;
+
+	for (entry = igd_device_tbl; entry->device != 0; entry++) {
+		if (entry->device == device) {
+			return entry->gen;
+		}
+	}
+	return 0;
+}
+
+uint32_t igd_dsm_region_size(struct pci_device *igddev)
+{
+	uint16_t ggc;
+	uint8_t gms;
+
+	ggc = read_config(igddev, PCIR_GGC, 2);
+	gms = ggc >> PCIR_GGC_GMS_SHIFT;
+
+	switch (gms) {
+		case 0x00 ... 0x10:
+			return gms * 32 * MB;
+		case 0x20:
+			return 1024 * MB;
+		case 0x30:
+			return 1536 * MB;
+		case 0x40:
+			return 2048 * MB;
+		case 0xf0 ... 0xfe:
+			return (gms - 0xf0 + 1) * 4 * MB;
+	}
+
+	pr_err("%s: Invalid GMS value in GGC register. GGC = %04x\n", __func__, ggc);
+	return 0;	/* Should never reach here */
 }
 
 /*
@@ -563,59 +620,26 @@ passthru_gpu_dsm_opregion(struct vmctx *ctx, struct passthru_dev *ptdev,
 			struct acrn_pcidev *pcidev, uint16_t device)
 {
 	uint32_t opregion_phys, dsm_mask_val;
+	int gen;
 
 	/* get opregion hpa */
 	opregion_phys = read_config(ptdev->phys_dev, PCIR_ASLS_CTL, 4);
 	gpu_opregion_hpa = opregion_phys & PCIM_ASLS_OPREGION_MASK;
 
-	switch (device) {
-	/* ElkhartLake */
-	case 0x4500:
-	case 0x4541:
-	case 0x4551:
-	case 0x4571:
-	/* TigerLake */
-	case 0x9a40:
-	case 0x9a49:
-	case 0x9a59:
-	case 0x9a60:
-	case 0x9a68:
-	case 0x9a70:
-	case 0x9a78:
-	case 0x9ac0:
-	case 0x9ac9:
-	case 0x9ad9:
-	case 0x9af8:
-	/* AlderLake */
-	case 0x4680:
-	case 0x4681:
-	case 0x4682:
-	case 0x4683:
-	case 0x4690:
-	case 0x4691:
-	case 0x4692:
-	case 0x4693:
-	case 0x4698:
-	case 0x4699:
-	/* ADL-P GT graphics */
-	case 0x4626:
-	case 0x4628:
-	case 0x462a:
-	case 0x46a0:
-	case 0x46a1:
-	case 0x46a2:
-	case 0x46a3:
-	case 0x46a6:
-	case 0x46a8:
-	case 0x46aa:
-	case 0x46b0:
-	case 0x46b1:
-	case 0x46b2:
-	case 0x46b3:
-	case 0x46c0:
-	case 0x46c1:
-	case 0x46c2:
-	case 0x46c3:
+	gen = igd_gen(device);
+	if (!gen) {
+		pr_warn("Device 8086:%04x is not an igd device in allowlist, assuming it is gen 11+. " \
+			"GVT-d may not working properly\n", device);
+		gen = 11;
+	}
+
+	gpu_dsm_size = igd_dsm_region_size(ptdev->phys_dev);
+	if (!gpu_dsm_size) {
+		pr_err("Invalid igd dsm region size, check DVMT Pre-Allocated option in BIOS\n");
+		return;
+	}
+
+	if (gen >= 11) {
 		/* BDSM register has 64 bits.
 		 * bits 63:20 contains the base address of stolen memory
 		 */
@@ -634,9 +658,7 @@ passthru_gpu_dsm_opregion(struct vmctx *ctx, struct passthru_dev *ptdev,
 		pci_set_cfgdata32(ptdev->dev, PCIR_GEN11_BDSM_DW1, 0);
 
 		ptdev->has_virt_pcicfg_regs = &has_virt_pcicfg_regs_on_ehl_gpu;
-		break;
-	/* If on default platforms, such as KBL,WHL  */
-	default:
+	} else {
 		/* bits 31:20 contains the base address of stolen memory */
 		gpu_dsm_hpa = read_config(ptdev->phys_dev, PCIR_BDSM, 4);
 		dsm_mask_val = gpu_dsm_hpa & ~PCIM_BDSM_MASK;
@@ -646,15 +668,14 @@ passthru_gpu_dsm_opregion(struct vmctx *ctx, struct passthru_dev *ptdev,
 		pci_set_cfgdata32(ptdev->dev, PCIR_BDSM, gpu_dsm_gpa | dsm_mask_val);
 
 		ptdev->has_virt_pcicfg_regs = &has_virt_pcicfg_regs_on_def_gpu;
-		break;
 	}
 
 	gpu_opregion_gpa = gpu_dsm_gpa - GPU_OPREGION_SIZE;
 	pci_set_cfgdata32(ptdev->dev, PCIR_ASLS_CTL, gpu_opregion_gpa | (opregion_phys & ~PCIM_ASLS_OPREGION_MASK));
 
 	/* initialize the EPT mapping for passthrough GPU dsm region */
-	vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
-	vm_map_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
+	vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, gpu_dsm_size, gpu_dsm_hpa);
+	vm_map_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, gpu_dsm_size, gpu_dsm_hpa);
 
 	/* initialize the EPT mapping for passthrough GPU opregion */
 	vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_opregion_gpa, GPU_OPREGION_SIZE, gpu_opregion_hpa);
@@ -744,7 +765,11 @@ passthru_init(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		} else if (!strncmp(opt, "romfile=", 8)) {
 			need_rombar = true;
 			opt += 8;
-			strcpy(rom_file, opt);
+			if (strnlen(opt, PATH_MAX) >= sizeof(rom_file)) {
+				pr_err("romfile path too long, max supported path length is 255");
+				return -EINVAL;
+			}
+			strncpy(rom_file, opt, sizeof(rom_file));
 		} else
 			pr_warn("Invalid passthru options:%s", opt);
 	}
@@ -946,7 +971,7 @@ passthru_deinit(struct vmctx *ctx, struct pci_vdev *dev, char *opts)
 		phys_bdf = ptdev->phys_bdf;
 
 	if (is_intel_graphics_dev(dev)) {
-		vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, GPU_DSM_SIZE, gpu_dsm_hpa);
+		vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_dsm_gpa, gpu_dsm_size, gpu_dsm_hpa);
 		vm_unmap_ptdev_mmio(ctx, 0, 2, 0, gpu_opregion_gpa, GPU_OPREGION_SIZE, gpu_opregion_hpa);
 	}
 
