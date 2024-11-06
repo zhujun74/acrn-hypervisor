@@ -116,6 +116,7 @@ static void init_ptm(struct pci_vdev *vdev, struct vrp_config *vrp_config)
 
 int32_t create_vrp(struct acrn_vm *vm, struct acrn_vdev *dev)
 {
+	int32_t ret = 0;
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 	struct acrn_vm_pci_dev_config *dev_config = NULL;
 	struct pci_vdev *vdev;
@@ -139,7 +140,14 @@ int32_t create_vrp(struct acrn_vm *vm, struct acrn_vdev *dev)
 			dev_config->vrp_max_payload = vrp_config->max_payload;
 			dev_config->vdev_ops = &vrp_ops;
 
+			spinlock_obtain(&vm->vpci.lock);
 			vdev = vpci_init_vdev(&vm->vpci, dev_config, NULL);
+			spinlock_release(&vm->vpci.lock);
+			if (vdev == NULL) {
+				pr_err("%s: failed to create virtual root port\n", __func__);
+				ret = -EFAULT;
+				break;
+			}
 
 			init_ptm(vdev, vrp_config);
 
@@ -147,11 +155,17 @@ int32_t create_vrp(struct acrn_vm *vm, struct acrn_vdev *dev)
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
-int32_t destroy_vrp(__unused struct pci_vdev *vdev)
+int32_t destroy_vrp(struct pci_vdev *vdev)
 {
+	struct acrn_vpci *vpci = vdev->vpci;
+
+	spinlock_obtain(&vpci->lock);
+	vpci_deinit_vdev(vdev);
+	spinlock_release(&vpci->lock);
+
 	return 0;
 }
 

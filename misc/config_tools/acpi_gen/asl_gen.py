@@ -394,11 +394,12 @@ def gen_root_pci_bus(path, prt_packages):
     resources.append(res)
 
     # The PCI hole above 4G
+    qword_address_space_cls = rdt.LargeResourceItemQWordAddressSpace_factory()
     res = create_object(
-        dword_address_space_cls,
+        qword_address_space_cls,
         type   = 1,    # Large type
-        name   = rdt.LARGE_RESOURCE_ITEM_ADDRESS_SPACE_RESOURCE,
-        length = ctypes.sizeof(dword_address_space_cls) - 3,
+        name   = rdt.LARGE_RESOURCE_ITEM_QWORD_ADDRESS_SPACE,
+        length = ctypes.sizeof(qword_address_space_cls) - 3,
         _TYP   = 0,    # Memory range
         _DEC   = 0,    # Positive decoding
         _MIF   = 1,    # Minimum address fixed
@@ -918,13 +919,6 @@ def main(args):
     kern_args = acrn_config_utilities.get_leaf_tag_map(scenario, "os_config", "bootargs")
     kern_type = acrn_config_utilities.get_leaf_tag_map(scenario, "os_config", "kern_type")
     for vm_id, passthru_devices in dict_passthru_devices.items():
-        bootargs_node= get_node(f"//vm[@id='{vm_id}']/os_config/bootargs", scenario_etree)
-        if bootargs_node is not None and kern_args[int(vm_id)].find('reboot=acpi') == -1 and kern_type[int(vm_id)] in ['KERNEL_BZIMAGE']:
-            emsg = "you need to specify 'reboot=acpi' in scenario file's bootargs for VM{}".format(vm_id)
-            print(emsg)
-            err_dic['vm,bootargs'] = emsg
-            break
-
         print('start to generate ACPI ASL code for VM{}'.format(vm_id))
         dest_vm_acpi_path = os.path.join(DEST_ACPI_PATH, 'ACPI_VM'+vm_id)
         if not os.path.isdir(dest_vm_acpi_path):

@@ -71,6 +71,7 @@
 #include "cmd_monitor.h"
 #include "vdisplay.h"
 #include "iothread.h"
+#include "vm_event.h"
 
 #define	VM_MAXCPU		16	/* maximum virtual cpus */
 
@@ -101,6 +102,7 @@ bool vtpm2;
 bool is_winvm;
 bool skip_pci_mem64bar_workaround = false;
 bool gfx_ui = false;
+bool ovmf_loaded = false;
 
 static int guest_ncpus;
 static int virtio_msix = 1;
@@ -232,12 +234,76 @@ virtio_uses_msix(void)
 	return virtio_msix;
 }
 
+int
+guest_cpu_num(void)
+{
+	return guest_ncpus;
+}
+
 size_t
 high_bios_size(void)
 {
 	size_t size = ovmf_image_size();
 
 	return roundup2(size, 2 * MB);
+}
+
+/*
+ * set nice value of current pthread
+ * input range: [-20, 19]
+ * Lower priorities cause more favorable scheduling.
+ */
+void
+set_thread_priority(int priority, bool reset_on_fork)
+{
+	int ret, policy;
+	char tname[MAXCOMLEN + 1];
+	struct sched_param sp = { .sched_priority = 0 };
+
+	memset(tname, 0, sizeof(tname));
+	pthread_getname_np(pthread_self(), tname, sizeof(tname));
+
+	policy = sched_getscheduler(0);
+	if (policy == -1) {
+		pr_err("%s(%s), sched_getscheduler failed, errno = %d\n",
+			__func__, tname, errno);
+	}
+
+	if ((policy & SCHED_RESET_ON_FORK) && !reset_on_fork)
+		policy &= ~SCHED_RESET_ON_FORK;
+	else if (((policy & SCHED_RESET_ON_FORK) == 0) && reset_on_fork)
+		policy |= SCHED_RESET_ON_FORK;
+
+	ret = sched_setscheduler(0, policy, &sp);
+	if (ret == -1) {
+		pr_err("%s(%s), sched_setscheduler failed, errno = %d\n",
+			__func__, tname, errno);
+	}
+
+	errno = 0;
+	ret = getpriority(PRIO_PROCESS, 0);
+	if (errno && (ret == -1)) {
+		pr_err("%s(%s), getpriority failed, errno = %d\n",
+			__func__, tname, errno);
+	} else {
+		pr_info("%s(%s), orig prio = %d\n",
+			__func__, tname, ret);
+	}
+
+	ret = setpriority(PRIO_PROCESS, 0, priority);
+	if (ret) {
+		pr_err("%s(%s), setpriority failed, errno = %d\n",
+			__func__, tname, errno);
+	}
+
+	ret = getpriority(PRIO_PROCESS, 0);
+	if (ret != priority) {
+		pr_err("%s(%s), getpriority(%d) != setpriority(%d)\n",
+			__func__, tname, ret, priority);
+	} else {
+		pr_info("%s(%s), new priority = %d\n",
+			__func__, tname, ret);
+	}
 }
 
 static void *
@@ -609,6 +675,8 @@ vm_reset_vdevs(struct vmctx *ctx)
 	pci_irq_deinit(ctx);
 	ioapic_deinit();
 
+	iothread_deinit();
+
 	pci_irq_init(ctx);
 	atkbdc_init(ctx);
 	vrtc_init(ctx);
@@ -674,6 +742,7 @@ vm_system_reset(struct vmctx *ctx)
 static void
 vm_suspend_resume(struct vmctx *ctx)
 {
+	struct acrn_vcpu_regs bsp_regs;
 	/*
 	 * If we get warm reboot request, we don't want to exit the
 	 * vcpu_loop/vm_loop/mevent_loop. So we do:
@@ -685,6 +754,8 @@ vm_suspend_resume(struct vmctx *ctx)
 	 *   6. hypercall restart vm
 	 */
 	vm_pause(ctx);
+	if (ovmf_loaded)
+		vrtc_suspend(ctx);
 
 	vm_clear_ioreq(ctx);
 	vm_stop_watchdog(ctx);
@@ -694,8 +765,32 @@ vm_suspend_resume(struct vmctx *ctx)
 	vm_reset_watchdog(ctx);
 	vm_reset(ctx);
 
+	bsp_regs = ctx->bsp_regs;
+	/* for bzImage or elf */
+	if (!ovmf_loaded) {
+		uint32_t *guest_wakeup_vec32;
+		/* 64BIT_WAKE_SUPPORTED_F is not set */
+		guest_wakeup_vec32 = paddr_guest2host(ctx,
+						      get_acpi_wakingvector_offset(),
+						      get_acpi_wakingvector_length());
+		/* set the BSP waking vector */
+		bsp_regs.vcpu_regs.cs_sel = (uint16_t)((*guest_wakeup_vec32 >> 4U) & 0xFFFFU);
+		bsp_regs.vcpu_regs.cs_base = bsp_regs.vcpu_regs.cs_sel << 4U;
+		/* real mode code segment */
+		bsp_regs.vcpu_regs.cs_ar = 0x009FU;
+		bsp_regs.vcpu_regs.cs_limit = 0xFFFFU;
+		bsp_regs.vcpu_regs.rip = 0x0U;
+		/* CR0_ET | CR0_NE */
+		bsp_regs.vcpu_regs.cr0 = 0x30;
+		/* real mode gdt */
+		bsp_regs.vcpu_regs.gdt.limit = 0xFFFFU;
+		bsp_regs.vcpu_regs.gdt.base = 0UL;
+		/* real mode idt */
+		bsp_regs.vcpu_regs.idt.limit = 0xFFFFU;
+		bsp_regs.vcpu_regs.idt.base = 0UL;
+	}
 	/* set the BSP init state */
-	vm_set_vcpu_regs(ctx, &ctx->bsp_regs);
+	vm_set_vcpu_regs(ctx, &bsp_regs);
 	vm_run(ctx);
 }
 
@@ -735,8 +830,7 @@ vm_loop(struct vmctx *ctx)
 			break;
 		}
 
-		/* RTVM can't be reset */
-		if ((VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) && (!is_rtvm)) {
+		if (VM_SUSPEND_SYSTEM_RESET == vm_get_suspend_mode()) {
 			vm_system_reset(ctx);
 		}
 
@@ -949,6 +1043,7 @@ main(int argc, char *argv[])
 		case CMD_OPT_OVMF:
 			if (!vsbl_file_name && acrn_parse_ovmf(optarg) != 0)
 				errx(EX_USAGE, "invalid ovmf param %s", optarg);
+			ovmf_loaded = true;
 			skip_pci_mem64bar_workaround = true;
 			break;
 		case CMD_OPT_IASL:
@@ -1132,16 +1227,16 @@ main(int argc, char *argv[])
 			goto mevent_fail;
 		}
 
-		error = iothread_init();
-		if (error) {
-			pr_err("Unable to initialize iothread (%d)\n", errno);
-			goto iothread_fail;
-		}
-
 		pr_notice("vm_init_vdevs\n");
 		if (vm_init_vdevs(ctx) < 0) {
 			pr_err("Unable to init vdev (%d)\n", errno);
 			goto dev_fail;
+		}
+
+		pr_notice("vm setup vm event\n");
+		error = vm_event_init(ctx);
+		if (error) {
+			pr_warn("VM_EVENT is not supported by kernel or hyperviosr!\n");
 		}
 
 		/*
@@ -1198,6 +1293,7 @@ main(int argc, char *argv[])
 			break;
 		}
 
+		vm_event_deinit();
 		vm_deinit_vdevs(ctx);
 		mevent_deinit();
 		iothread_deinit();
@@ -1210,13 +1306,14 @@ main(int argc, char *argv[])
 	}
 
 vm_fail:
+	vm_event_deinit();
+
 	vm_deinit_vdevs(ctx);
 	if (ssram)
 		clean_vssram_configs();
 
 dev_fail:
 	iothread_deinit();
-iothread_fail:
 	mevent_deinit();
 mevent_fail:
 	vm_unsetup_memory(ctx);

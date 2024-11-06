@@ -10,6 +10,7 @@
 #include <logmsg.h>
 #include <asm/per_cpu.h>
 #include <asm/guest/vm_reset.h>
+#include <vm_event.h>
 
 /**
  * @pre vm != NULL
@@ -17,6 +18,7 @@
 void triple_fault_shutdown_vm(struct acrn_vcpu *vcpu)
 {
 	struct acrn_vm *vm = vcpu->vm;
+	struct vm_event trp_event;
 
 	if (is_postlaunched_vm(vm)) {
 		struct io_request *io_req = &vcpu->req;
@@ -27,6 +29,10 @@ void triple_fault_shutdown_vm(struct acrn_vcpu *vcpu)
 		io_req->reqs.pio_request.address = VIRTUAL_PM1A_CNT_ADDR;
 		io_req->reqs.pio_request.size = 2UL;
 		io_req->reqs.pio_request.value = (VIRTUAL_PM1A_SLP_EN | (5U << 10U));
+
+		/* Send the tripple fault event to DM. */
+		trp_event.type = VM_EVENT_TRIPLE_FAULT;
+		(void)send_vm_event(vcpu->vm, &trp_event);
 
 		/* Inject pm1a S5 request to Service VM to shut down the guest */
 		(void)emulate_io(vcpu, io_req);
@@ -67,16 +73,13 @@ static bool handle_reset_reg_read(struct acrn_vcpu *vcpu, __unused uint16_t addr
 		__unused size_t bytes)
 {
 	bool ret = true;
+	struct acrn_vm *vm = vcpu->vm;
 
-	if (is_postlaunched_vm(vcpu->vm)) {
+	if (is_postlaunched_vm(vm)) {
 		/* re-inject to DM */
 		ret = false;
 	} else {
-		/*
-		 * - reset control register 0xcf9: hide this from guests for now.
-		 * - FADT reset register: the read behavior is not defined in spec, keep it simple to return all '1'.
-		 */
-		vcpu->req.reqs.pio_request.value = ~0U;
+		vcpu->req.reqs.pio_request.value = vm->reset_control;
 	}
 
 	return ret;
@@ -85,7 +88,7 @@ static bool handle_reset_reg_read(struct acrn_vcpu *vcpu, __unused uint16_t addr
 /**
  * @pre vm != NULL
  */
-static bool handle_common_reset_reg_write(struct acrn_vcpu *vcpu, bool reset)
+static bool handle_common_reset_reg_write(struct acrn_vcpu *vcpu, bool reset, bool warm)
 {
 	struct acrn_vm *vm = vcpu->vm;
 	bool ret = true;
@@ -95,7 +98,7 @@ static bool handle_common_reset_reg_write(struct acrn_vcpu *vcpu, bool reset)
 		poweroff_if_rt_vm(vm);
 
 		if (get_highest_severity_vm(true) == vm) {
-			reset_host();
+			reset_host(warm);
 		} else if (is_postlaunched_vm(vm)) {
 			/* re-inject to DM */
 			ret = false;
@@ -132,7 +135,7 @@ static bool handle_common_reset_reg_write(struct acrn_vcpu *vcpu, bool reset)
 static bool handle_kb_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, size_t bytes, uint32_t val)
 {
 	/* ignore commands other than system reset */
-	return handle_common_reset_reg_write(vcpu, ((bytes == 1U) && (val == 0xfeU)));
+	return handle_common_reset_reg_write(vcpu, ((bytes == 1U) && (val == 0xfeU)), false);
 }
 
 static bool handle_kb_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t bytes)
@@ -162,9 +165,12 @@ static bool handle_kb_read(struct acrn_vcpu *vcpu, uint16_t addr, size_t bytes)
  */
 static bool handle_cf9_write(struct acrn_vcpu *vcpu, __unused uint16_t addr, size_t bytes, uint32_t val)
 {
-	/* We don't differentiate among hard/soft/warm/cold reset */
+	struct acrn_vm *vm = vcpu->vm;
+
+	vm->reset_control = val & 0xeU;
 	return handle_common_reset_reg_write(vcpu,
-			((bytes == 1U) && ((val & 0x4U) == 0x4U) && ((val & 0xaU) != 0U)));
+			((bytes == 1U) && ((val & 0x4U) == 0x4U) && ((val & 0xaU) != 0U)),
+			((val & 0x8U) == 0U));
 }
 
 /**
@@ -179,7 +185,7 @@ static bool handle_reset_reg_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t
 		struct acpi_reset_reg *reset_reg = get_host_reset_reg_data();
 
 		if (val == reset_reg->val) {
-			ret = handle_common_reset_reg_write(vcpu, true);
+			ret = handle_common_reset_reg_write(vcpu, true, false);
 		} else {
 			/*
 			 * ACPI defines the reset value but doesn't specify the meaning of other values.

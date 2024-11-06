@@ -22,8 +22,9 @@ struct hv_timer console_timer;
 
 #define CONSOLE_KICK_TIMER_TIMEOUT  40UL /* timeout is 40ms*/
 /* Switching key combinations for shell and uart console */
-#define GUEST_CONSOLE_TO_HV_SWITCH_KEY      0       /* CTRL + SPACE */
-uint16_t console_vmid = ACRN_INVALID_VMID;
+#define GUEST_CONSOLE_ESCAPE_KEY	0x0 /* the "break", put twice to send "break" to guest */
+#define GUEST_CONSOLE_TO_HV_SWITCH_KEY  'e' /* escape + e to switch back to hv console */
+uint16_t console_vmid = CONFIG_CONSOLE_DEFAULT_VM;
 
 /* if use INIT to kick pcpu only, if not notification IPI still is used for sharing CPU */
 static bool use_init_ipi = false;
@@ -104,20 +105,46 @@ struct acrn_vuart *vm_console_vuart(struct acrn_vm *vm)
 static void vuart_console_rx_chars(struct acrn_vuart *vu)
 {
 	char ch = -1;
+	bool recv = false;
 
-	/* Get data from physical uart */
-	ch = uart16550_getc();
+	while (1) {
+		/* Get data from physical uart */
+		ch = uart16550_getc();
+		if (ch == -1)
+			break;
 
-	if (ch == GUEST_CONSOLE_TO_HV_SWITCH_KEY) {
-		/* Switch the console */
-		console_vmid = ACRN_INVALID_VMID;
-		printf("\r\n\r\n ---Entering ACRN SHELL---\r\n");
+		if (vu->escaping) {
+			vu->escaping = false;
+			switch (ch) {
+				case GUEST_CONSOLE_ESCAPE_KEY:
+					vuart_putchar(vu, ch);
+					vu->lsr |= LSR_BI;
+					recv = true;
+					break;
+				case GUEST_CONSOLE_TO_HV_SWITCH_KEY:
+					/* Switch the console */
+					console_vmid = ACRN_INVALID_VMID;
+					printf("\r\n\r\n ---Entering ACRN SHELL---\r\n");
+					/* following inputs are for hv, don't handle in this loop */
+					goto exit;
+				default:
+					printf("Unknown escaping key: '%c'\r\n", ch);
+					break;
+			}
+		} else {
+			if (ch == GUEST_CONSOLE_ESCAPE_KEY) {
+				vu->escaping = true;
+			} else {
+				vuart_putchar(vu, ch);
+				recv = true;
+			}
+		}
 	}
-	if (ch != -1) {
-		vuart_putchar(vu, ch);
+
+exit:
+	if (recv) {
 		vuart_toggle_intr(vu);
 	}
-
 }
 
 /**
@@ -184,7 +211,7 @@ void console_setup_timer(void)
 }
 
 /* When lapic-pt is enabled for a vcpu working on the pcpu hosting
- * console timer (currently BSP), we utilize vm-exits to drive the console.
+ * console timer, we utilize vm-exits to drive the console.
  *
  * Note that currently this approach will result in a laggy shell when
  * the number of VM-exits/second is low (which is mostly true when lapic-pt is
@@ -195,8 +222,7 @@ void console_vmexit_callback(struct acrn_vcpu *vcpu)
 	static uint64_t prev_tsc = 0;
 	uint64_t tsc;
 
-	/* console_setup_timer is called on BSP only. */
-	if ((pcpuid_from_vcpu(vcpu) == BSP_CPU_ID) && (is_lapic_pt_enabled(vcpu))) {
+	if ((pcpuid_from_vcpu(vcpu) == VUART_TIMER_CPU) && (is_lapic_pt_enabled(vcpu))) {
 		tsc = cpu_ticks();
 		if (tsc - prev_tsc > (TICKS_PER_MS * CONSOLE_KICK_TIMER_TIMEOUT)) {
 			console_timer_callback(NULL);
@@ -207,10 +233,14 @@ void console_vmexit_callback(struct acrn_vcpu *vcpu)
 
 void suspend_console(void)
 {
-	del_timer(&console_timer);
+	if (VUART_TIMER_CPU == BSP_CPU_ID) {
+		del_timer(&console_timer);
+	}
 }
 
 void resume_console(void)
 {
-	console_setup_timer();
+	if (VUART_TIMER_CPU == BSP_CPU_ID) {
+		console_setup_timer();
+	}
 }

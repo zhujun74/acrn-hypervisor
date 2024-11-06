@@ -74,6 +74,8 @@
 #define CPUID_EDX_TM1           (1U<<29U)
 #define CPUID_EDX_IA64          (1U<<30U)
 #define CPUID_EDX_PBE           (1U<<31U)
+/* CPUID.06H:EAX.ECMD */
+#define CPUID_EAX_ECMD          (1U<<5U)
 /* CPUID.06H:EAX.HWP */
 #define CPUID_EAX_HWP           (1U<<7U)
 /* CPUID.06H:EAX.HWP_Notification */
@@ -109,7 +111,7 @@
 /* CPUID.07H:ECX.PKE */
 #define CPUID_ECX_PKE		(1U<<3U)
 /* CPUID.07H:ECX.WAITPKG */
-#define CPUID_ECX_WAITPKG		(1U<<5U)
+#define CPUID_ECX_WAITPKG	(1U<<5U)
 /* CPUID.07H:ECX.CET_SS */
 #define CPUID_ECX_CET_SS        (1U<<7U)
 /* CPUID.07H:ECX.LA57 */
@@ -118,6 +120,8 @@
 #define CPUID_ECX_SGX_LC        (1U<<30U)
 /* CPUID.07H:ECX.PKS*/
 #define CPUID_ECX_PKS           (1U<<31U)
+/* CPUID.07H:EDX.Hybrid */
+#define CPUID_EDX_HYBRID        (1U<<15U)
 /* CPUID.07H:EDX.CET_IBT */
 #define CPUID_EDX_CET_IBT       (1U<<20U)
 /* CPUID.07H:EDX.IBRS_IBPB*/
@@ -164,14 +168,29 @@
 #define CPUID_FEATURES          1U
 #define CPUID_TLB               2U
 #define CPUID_SERIALNUM         3U
+#define CPUID_CACHE             4U
+#define CPUID_THERMAL_POWER     6U
 #define CPUID_EXTEND_FEATURE    7U
+#define CPUID_ARCH_PERF_MON    0xAU
+#define CPUID_EXTEND_TOPOLOGY  0xBU
 #define CPUID_XSAVE_FEATURES   0xDU
+#define CPUID_RDT_MONITOR      0xFU
 #define CPUID_RDT_ALLOCATION   0x10U
+#define CPUID_SGX_CAP          0x12U
+#define CPUID_TRACE            0x14U
+#define CPUID_FREQ             0x16U
+#define CPUID_ADDR_TRANS       0x18U
+#define CPUID_KEY_LOCKER       0x19U
+#define CPUID_MODEL_ID         0x1AU
+#define CPUID_PCONFIG          0x1BU
+#define CPUID_LAST_BRANCH_RECORD     0x1CU
+#define CPUID_V2_EXTEND_TOPOLOGY     0x1FU
 #define CPUID_MAX_EXTENDED_FUNCTION  0x80000000U
 #define CPUID_EXTEND_FUNCTION_1      0x80000001U
 #define CPUID_EXTEND_FUNCTION_2      0x80000002U
 #define CPUID_EXTEND_FUNCTION_3      0x80000003U
 #define CPUID_EXTEND_FUNCTION_4      0x80000004U
+#define CPUID_EXTEND_CACHE           0x80000006U
 #define CPUID_EXTEND_INVA_TSC        0x80000007U
 #define CPUID_EXTEND_ADDRESS_SIZE    0x80000008U
 

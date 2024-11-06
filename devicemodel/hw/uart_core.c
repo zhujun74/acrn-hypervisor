@@ -29,6 +29,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -52,6 +53,12 @@
 #define COM1_IRQ	4
 #define	COM2_BASE	0x2F8
 #define COM2_IRQ	3
+#define COM3_BASE	0x3E8
+#define COM3_IRQ	6
+#define COM4_BASE	0x2E8
+#define COM4_IRQ	7
+#define COM5_BASE       0x9000   /*for S5 connection*/
+#define COM5_IRQ        10
 
 #define	DEFAULT_RCLK	1843200
 #define	DEFAULT_BAUD	9600
@@ -83,7 +90,12 @@ static struct {
 } uart_lres[] = {
 	{ COM1_BASE, COM1_IRQ, false},
 	{ COM2_BASE, COM2_IRQ, false},
+	{ COM3_BASE, COM3_IRQ, false},
+	{ COM4_BASE, COM4_IRQ, false},
+	{ COM5_BASE, COM5_IRQ, false},
 };
+
+static bool stdio_ctrl_a_pressed = false;
 
 #define	UART_NLDEVS	(ARRAY_SIZE(uart_lres))
 
@@ -618,6 +630,18 @@ uart_legacy_alloc(int which, int *baseaddr, int *irq)
 	return 0;
 }
 
+int 
+uart_legacy_reinit_res(int which, int baseaddr, int irq)
+{
+	if (which < 0 || which >= UART_NLDEVS || uart_lres[which].inuse)
+		return -1;
+
+	uart_lres[which].baseaddr = baseaddr;
+	uart_lres[which].irq = irq;
+
+	return 0;
+}
+
 void
 uart_legacy_dealloc(int which)
 {
@@ -696,6 +720,18 @@ uart_backend_read(struct uart_backend *be)
 
 	switch (be->be_type) {
 	case UART_BE_STDIO:
+		rc = read(be->fd, &rb, 1);
+		if (rb == 0x01) {  // Ctrl-a
+			DPRINTF(("%s: Got Ctrl-a\n", __func__));
+			stdio_ctrl_a_pressed = true;
+		} else if (stdio_ctrl_a_pressed) {
+			if (rb == 'x') {
+				DPRINTF(("%s: Got Ctrl-a x\n", __func__));
+				kill(getpid(), SIGINT);
+			}
+			stdio_ctrl_a_pressed = false;
+		}
+		break;
 	case UART_BE_TTY:
 		/* fd is used to read */
 		rc = read(be->fd, &rb, 1);

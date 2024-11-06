@@ -99,6 +99,8 @@ struct acpi_madt_local_apic {
 void acpi_table_enable(int num);
 uint32_t get_acpi_base(void);
 uint32_t get_acpi_table_length(void);
+uint32_t get_acpi_wakingvector_offset(void);
+uint32_t get_acpi_wakingvector_length(void);
 
 struct vmctx;
 
@@ -124,5 +126,7 @@ int parse_madt(void);
 int acrn_parse_iasl(char *arg);
 int get_iasl_compiler(void);
 int check_iasl_version(void);
+
+void osc_write_ospm_dsdt(struct vmctx *ctx, int ncpu);
 
 #endif /* _ACPI_H_ */

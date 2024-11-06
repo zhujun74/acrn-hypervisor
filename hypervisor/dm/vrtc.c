@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014, Neel Natu (neel@freebsd.org)
- * Copyright (c) 2022 Intel Corporation.
+ * Copyright (c) 2024 Intel Corporation.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -30,8 +30,23 @@
 #include <asm/tsc.h>
 #include <vrtc.h>
 #include <logmsg.h>
+#include <vm_event.h>
 
 #include "mc146818rtc.h"
+
+/**
+ * @addtogroup vp-dm_vperipheral
+ *
+ * @{
+ */
+
+/**
+ * @file
+ * @brief Implementation of virtual RTC device.
+ *
+ * This file provides the implementation of the virtual RTC device. The virtual RTC device is used to provide the RTC
+ * service to the guest VMs. It is a part of the virtual peripheral devices.
+ */
 
 /* #define DEBUG_RTC */
 #ifdef DEBUG_RTC
@@ -454,10 +469,6 @@ static void cmos_set_reg_val(uint8_t addr, uint8_t value)
 
 #define TRIGGER_ALARM	(RTCIR_ALARM | RTCIR_INT)
 #define RTC_DELTA	1	/* For RTC and system time may out of sync for no more than 1s */
-static inline bool rtc_halted(struct acrn_vrtc *rtc)
-{
-        return ((rtc->rtcdev.reg_b & RTCSB_HALT) != 0U);
-}
 
 static uint8_t vrtc_get_reg_c(struct acrn_vrtc *vrtc)
 {
@@ -492,8 +503,34 @@ static void vrtc_set_reg_b(struct acrn_vrtc *vrtc, uint8_t newval)
 }
 
 /**
+ * @brief Read from the virtual RTC device.
+ *
+ * This function reads the value from the RTC register specified by the address port. To read from the virtual RTC
+ * device, the guest writes the register index to the RTC address port and then reads the register value from the RTC
+ * data port. This function is used to simulate the behavior of reading in a virtualized environment.
+ *
+ * - If the accessed port is CMOS_ADDR_PORT, it will set the value as index cached in last write (0 by default) and
+ *   return.
+ * - If the accessed port is CMOS_DATA_PORT,
+ *   - For Service VM, it will directly read the value from the physical CMOS register.
+ *   - For a non-Service VM, it will return false indicating the read operation failed if the address is greater than
+ *     RTC_CENTURY. Otherwise, the read operation will be emulated.
+ *
+ * @param[inout] vcpu Pointer to the virtual CPU that is reading from the virtual RTC. The value read from the virtual
+ *                    RTC will be stored in the PIO request.
+ * @param[in] addr The address port to read from.
+ * @param[in] width The width of the data to be read. This is not used in this function.
+ *
+ * @return A boolean value indicating whether the read operation is successful.
+ *
+ * @retval true Successfully read from the virtual RTC device.
+ * @retval false Failed to read from the virtual RTC device.
+ *
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
+ * @pre addr == 0x70U || addr == 0x71U
+ *
+ * @post N/A
  */
 static bool vrtc_read(struct acrn_vcpu *vcpu, uint16_t addr, __unused size_t width)
 {
@@ -539,8 +576,39 @@ static inline bool vrtc_is_time_register(uint32_t offset)
 }
 
 /**
+ * @brief Write a value to the virtual RTC.
+ *
+ * This function writes a specified value to the virtual RTC at a given offset. To write to the virtual RTC, the guest
+ * writes the register index to the RTC address port and then writes the register value to the RTC data port. This
+ * function is used to simulate the behavior of writing in a virtualized environment.
+ *
+ * - If the accessed port is CMOS_ADDR_PORT and the width is 1 byte, it will store the value as the index and return.
+ * - If the accessed port is CMOS_DATA_PORT,
+ *   - For Service VM, it will directly write the value to the physical CMOS register. If the physical date/time is
+ *     changed, for RT VMs and pre-launched VMs, the RTC/TSC snapshots will be updated. Those snapshots are used to
+ *     emulate the virtual date/time for non-Service VM.
+ *   - For a non-Service VM, it will ignore the write to the RTC_STATUSA, RTC_INTR and RTC_STATUSD. Otherwise, it will
+ *     update the virtual register value and RTC time. And for Post-launched VM, it will send a VM event to notify the
+ *     VM of the change in the RTC time if the address port is in the range of the time registers.
+ *
+ * @param[inout] vcpu Pointer to the virtual CPU that is writing to the virtual RTC.
+ * @param[in] addr The address port to write to.
+ * @param[in] width Width of the value to be written to the virtual RTC.
+ * @param[in] value Value to be written to the virtual RTC.
+ *
+ * @return A boolean value indicating whether the write operation is handled successfully, which is always true in
+ *         current design. It either updates the physical registers, updates the virtual registers, or ignores the
+ *         write.
+ *
+ * @retval true The write operation is handled successfully.
+ *
  * @pre vcpu != NULL
  * @pre vcpu->vm != NULL
+ * @pre addr == 0x70U || addr == 0x71U
+ *
+ * @post N/A
+ *
+ * @remark N/A
  */
 static bool vrtc_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
 			uint32_t value)
@@ -549,6 +617,8 @@ static bool vrtc_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
 	struct acrn_vrtc *vrtc = &vcpu->vm->vrtc;
 	struct acrn_vrtc temp_vrtc;
 	uint8_t mask = 0xFFU;
+	struct vm_event rtc_chg_event;
+	struct rtc_change_event_data *edata = (struct rtc_change_event_data *)rtc_chg_event.event_data;
 
 	if ((width == 1U) && (addr == CMOS_ADDR_PORT)) {
 		vrtc->addr = (uint8_t)(value & 0x7FU);
@@ -595,6 +665,12 @@ static bool vrtc_write(struct acrn_vcpu *vcpu, uint16_t addr, size_t width,
 				vrtc->offset_rtctime += after - current;
 				vrtc->last_rtctime = VRTC_BROKEN_TIME;
 				spinlock_release(&vrtc_rebase_lock);
+				if (is_postlaunched_vm(vcpu->vm) && vrtc_is_time_register(vrtc->addr)) {
+					rtc_chg_event.type = VM_EVENT_RTC_CHG;
+					edata->delta_time = after - current;
+					edata->last_time = current;
+					send_vm_event(vcpu->vm, &rtc_chg_event);
+				}
 				break;
 			}
 		}
@@ -690,6 +766,41 @@ static void vrtc_set_basetime(struct acrn_vrtc *vrtc)
 	spinlock_release(&vrtc_rebase_lock);
 }
 
+void suspend_vrtc(void)
+{
+	/* For service vm */
+	del_timer(&calibrate_timer);
+}
+
+void resume_vrtc(void)
+{
+	/* For service vm */
+	calibrate_setup_timer();
+}
+
+/**
+ * @brief Initialize the virtual RTC.
+ *
+ * This function initializes the virtual RTC (Real-Time Clock) device for the given virtual machine. It sets up the
+ * necessary data structures and state required for the RTC to function correctly. This function should be called during
+ * the initialization phase of the virtual machine.
+ *
+ * - When Service VM's vRTC device is initialized, a periodic timer (every 3 hours) is set up to calibrate the virtual
+ *   date/time of other VMs. When the calibration timer is triggered, for RT VMs and pre-launched VMs, the TSC/RTC
+ *   snapshots are updated to reflect the physical TSC/RTC-time at that moment.
+ * - When non-Service VM's vRTC device is initialized, the TSC/RTC snapshots are initialized to reflect the physical
+ *   TSC/RTC-time at the moment.
+ *
+ * @param[inout] vm The virtual machine that contains the virtual RTC to be initialized.
+ *
+ * @return None
+ *
+ * @pre vm != NULL
+ *
+ * @post N/A
+ *
+ * @remark N/A
+ */
 void vrtc_init(struct acrn_vm *vm)
 {
 	struct vm_io_range range = {
@@ -708,3 +819,7 @@ void vrtc_init(struct acrn_vm *vm)
 		vm->vrtc.base_tsc = cpu_ticks();
 	}
 }
+
+/**
+ * @}
+ */

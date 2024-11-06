@@ -93,6 +93,10 @@
 #define RTCT_OFFSET		0xF00
 #define DSDT_OFFSET		0x1100
 
+/* Define the byte offset and byte length in FACS table */
+#define WAKING_VECTOR_OFFSET   12
+#define WAKING_VECTOR_LEN      4
+
 #define	ASL_TEMPLATE	"dm.XXXXXXX"
 #define ASL_SUFFIX	".aml"
 
@@ -879,6 +883,7 @@ basl_fwrite_dsdt(FILE *fp, struct vmctx *ctx)
 
 	acpi_dev_write_dsdt(ctx);
 
+	osc_write_ospm_dsdt(ctx, basl_ncpu);
 	pm_write_dsdt(ctx, basl_ncpu);
 
 	dsdt_line("}");
@@ -1110,6 +1115,18 @@ uint32_t
 get_acpi_table_length(void)
 {
 	return ACPI_LENGTH;
+}
+
+uint32_t
+get_acpi_wakingvector_offset(void)
+{
+	return basl_acpi_base + FACS_OFFSET + WAKING_VECTOR_OFFSET;
+}
+
+uint32_t
+get_acpi_wakingvector_length(void)
+{
+	return WAKING_VECTOR_LEN;
 }
 
 int

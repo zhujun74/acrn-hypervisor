@@ -34,6 +34,11 @@
         <xs:documentation>Select the default log level for log messages written to the serial console. Log messages with the selected value or lower are displayed.</xs:documentation>
       </xs:annotation>
     </xs:element>
+    <xs:element name="CONSOLE_VM" type="xs:integer" default="65535">
+      <xs:annotation acrn:title="Default VM in hypervisor console output" acrn:views="basic">
+        <xs:documentation>Select the default VM in hypervisor console output. Default is hypervisor console.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
   </xs:all>
 </xs:complexType>
 
@@ -58,6 +63,11 @@
         <xs:documentation>Enable multiboot2 protocol support (with multiboot1 downward compatibility). If multiboot1 meets your requirements, disable this feature to reduce hypervisor code size.</xs:documentation>
       </xs:annotation>
     </xs:element>
+   <xs:element name="SERVICE_VM_SUPERVISOR_ENABLED" type="Boolean" default="n">
+      <xs:annotation acrn:title="Enable Service VM supervisor role" acrn:views="advanced">
+        <xs:documentation>Enable Service VM to play the supervisor role. If Enabled, the severity level of Service VM is higher than RTVM.</xs:documentation>
+      </xs:annotation>
+    </xs:element> 
     <xs:element name="SPLIT_LOCK_DETECTION_ENABLED" type="Boolean" default="n">
       <xs:annotation acrn:title="Enable split lock detection" acrn:views="advanced">
         <xs:documentation>Enable detection of split locks. A split lock can negatively affect an application's real-time performance. If a lock is detected, an alignment check exception #AC occurs.</xs:documentation>
@@ -114,6 +124,46 @@ If your VM is not a security VM, leave this option unchecked. </xs:documentation
         <xs:documentation>Enable the software workaround for Machine Check Error on Page Size Change (erratum in some processor families).  For more information about this workaround and affected processors, see this `MCE Avoidance on Page Size Change White Paper &lt;https://www.intel.com/content/www/us/en/developer/articles/troubleshooting/software-security-guidance/technical-documentation/machine-check-error-avoidance-page-size-change.html&gt;`_.</xs:documentation>
       </xs:annotation>
     </xs:element>
+    <xs:element name="VUART_RX_BUF_SIZE" default="256">
+      <xs:annotation acrn:title="vuart rx buffer size (bytes)" acrn:views="advanced"
+                     acrn:errormsg="'required': 'must config the max rx buffer size of vuart in byte'">
+        <xs:documentation>Specify the maximum rx buffer size of vuart.</xs:documentation>
+      </xs:annotation>
+      <xs:simpleType>
+         <xs:annotation>
+           <xs:documentation>Integer from 256 to 2560.</xs:documentation>
+         </xs:annotation>
+        <xs:restriction base="xs:integer">
+          <xs:minInclusive value="256" />
+          <xs:maxInclusive value="2560" />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:element>
+    <xs:element name="VUART_TX_BUF_SIZE" default="8192">
+      <xs:annotation acrn:title="vuart tx buffer size" acrn:views="advanced"
+                     acrn:errormsg="'required': 'must config the max tx buffer size of vuart in byte'">
+        <xs:documentation>Specify the maximum tx buffer size of vuart.</xs:documentation>
+      </xs:annotation>
+      <xs:simpleType>
+         <xs:annotation>
+           <xs:documentation>Integer from 8192 to 81920.</xs:documentation>
+         </xs:annotation>
+        <xs:restriction base="xs:integer">
+          <xs:minInclusive value="8192" />
+          <xs:maxInclusive value="81920" />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:element>
+    <xs:element name="VUART_TIMER_PCPU" type="xs:integer" default="0">
+      <xs:annotation acrn:title="vUART timer pCPU ID" acrn:views="advanced"
+                     acrn:options="//processors//thread/cpu_id/text()"
+                     acrn:option-names="if (count(distinct-values(//processors//thread/core_type)) &gt; 1)
+                                        then (for $thread in //processors//thread return concat($thread/cpu_id, ' (', if ($thread/core_type = 'Core') then 'P-Core' else 'E-Core', ')'))
+                                        else //processors//thread/cpu_id/text()"
+                     acrn:options-sorted-by="int">
+        <xs:documentation>pCPU ID of the vUART timer is allowed to pin to.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
     <xs:element name="RDT" type="RDTType">
       <xs:annotation acrn:title="Intel Resource Director Tech" acrn:views="">
         <xs:documentation>Intel Resource Director Technology (RDT) provides cache and memory bandwidth allocation features. The features can be used to improve an application's real-time performance.</xs:documentation>
@@ -166,7 +216,7 @@ If your VM is not a security VM, leave this option unchecked. </xs:documentation
         <xs:documentation>Maximum number of User VMs allowed.</xs:documentation>
       </xs:annotation>
     </xs:element>
-    <xs:element name="MAX_IOAPIC_NUM" default="1">
+    <xs:element name="MAX_IOAPIC_NUM" minOccurs="0">
       <xs:annotation acrn:views="">
         <xs:documentation>Maximum number of IOAPICs.</xs:documentation>
       </xs:annotation>
@@ -200,7 +250,7 @@ If your VM is not a security VM, leave this option unchecked. </xs:documentation
         </xs:restriction>
       </xs:simpleType>
     </xs:element>
-    <xs:element name="MAX_IOAPIC_LINES" default="120">
+    <xs:element name="MAX_IOAPIC_LINES" minOccurs="0">
       <xs:annotation acrn:views="">
         <xs:documentation>Maximum number of interrupt lines per IOAPIC.</xs:documentation>
       </xs:annotation>
@@ -404,6 +454,11 @@ These settings can only be changed at build time.</xs:documentation>
         <xs:documentation>Enable virtualization of the Cache Allocation Technology (CAT) feature in RDT. CAT enables you to allocate cache to VMs, providing isolation to avoid performance interference from other VMs.</xs:documentation>
       </xs:annotation>
     </xs:element>
+    <xs:element name="virtual_thermal_monitor" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation acrn:title="Virtual Thermal Monitor" acrn:applicable-vms="pre-launched, post-launched, service-vm" acrn:views="advanced">
+        <xs:documentation>Enable virtualization of the Thermal Monitor feature for this VM. This feature enables VM to retrieve SOC temperature and thermal irq. And this VM can implement cooling stategies based on these information.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
     <xs:element name="virtual_cat_number" default="0" minOccurs="0">
       <xs:annotation acrn:title="Maximum virtual CLOS" acrn:applicable-vms="pre-launched, post-launched" acrn:views="advanced">
         <xs:documentation>Max number of virtual CLOS MASK</xs:documentation>
@@ -430,6 +485,11 @@ These settings can only be changed at build time.</xs:documentation>
     <xs:element name="security_vm" type="Boolean" default="n" minOccurs="0">
       <xs:annotation acrn:views="">
         <xs:documentation>Specify TPM2 FIXUP for VM.</xs:documentation>
+      </xs:annotation>
+    </xs:element>
+    <xs:element name="stateless" type="Boolean" default="n" minOccurs="0">
+      <xs:annotation acrn:title="Stateless VM" acrn:applicable-vms="pre-launched" acrn:views="advanced">
+        <xs:documentation>Indicate the VM is running a stateless operating system and it can be shutdown forcefully with no data loss.</xs:documentation>
       </xs:annotation>
     </xs:element>
     <xs:element name="epc_section" type="EPCSection" minOccurs="0">

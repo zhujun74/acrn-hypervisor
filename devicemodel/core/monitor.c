@@ -124,10 +124,10 @@ static void *intr_storm_monitor_thread(void *arg)
 		}
 
 		/*
-		 * calc the delta of the two times count of interrupt;
-		 * compare the IRQ num first, if not same just drop it,
-		 * for it just happens rarelly when devices dynamically
-		 * allocation in Service VM or User VM, it can be calc next time
+		 * calculate the delta of the two times count of interrupt;
+		 * compare the IRQ number first, if not same just drop it,
+		 * for it just happens rarely when devices dynamically
+		 * allocation in Service VM or User VM, it can be calculated next time
 		 */
 		for (i = 0; i < hdr->buf_cnt; i += 2) {
 			if (hdr->buffer[i] != intr_cnt_buf[i])
@@ -350,7 +350,7 @@ static void handle_stop(struct mngr_msg *msg, int client_fd, void *param)
 	ack.msgid = msg->msgid;
 	ack.timestamp = msg->timestamp;
 
-	if (msg->data.acrnd_stop.force && !is_rtvm) {
+	if (msg->data.acrnd_stop.force) {
 		pr_info("%s: setting VM state to %s\n", __func__, vm_state_to_str(VM_SUSPEND_POWEROFF));
 		vm_set_suspend_mode(VM_SUSPEND_POWEROFF);
 		ack.data.err = 0;

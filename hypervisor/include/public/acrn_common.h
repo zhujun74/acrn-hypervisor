@@ -65,6 +65,7 @@
 #define GUEST_FLAG_PMU_PASSTHROUGH	(1UL << 11U)    /* Whether PMU is passed through */
 #define GUEST_FLAG_VHWP				(1UL << 12U)    /* Whether the VM supports vHWP */
 #define GUEST_FLAG_VTM				(1UL << 13U)    /* Whether the VM supports virtual thermal monitor */
+#define GUEST_FLAG_STATELESS			(1UL << 14U)	/* Whether the VM is stateless (can be forcefully shutdown with no data loss) */
 
 /* TODO: We may need to get this addr from guest ACPI instead of hardcode here */
 #define VIRTUAL_SLEEP_CTL_ADDR		0x400U /* Pre-launched VM uses ACPI reduced HW mode and sleep control register */
@@ -346,8 +347,10 @@ struct acrn_io_request_buffer {
 
 struct acrn_asyncio_info {
 	uint32_t type;
+	uint32_t match_data;
 	uint64_t addr;
 	uint64_t fd;
+	uint64_t data;
 };
 
 /**
@@ -776,6 +779,7 @@ enum {
 	/* The sbuf with above ids are created each pcpu */
 	ACRN_SBUF_PER_PCPU_ID_MAX,
 	ACRN_ASYNCIO = 64,
+	ACRN_VM_EVENT,
 };
 
 /* Make sure sizeof(struct shared_buf) == SBUF_HEAD_SIZE */
@@ -792,6 +796,65 @@ struct shared_buf {
 	uint32_t padding[6];
 };
 
+/**
+ * VM event architecture:
+ * +------------------------------------------------------+
+ * |    Service VM                                        |
+ * | +----------------------------+                       |
+ * | | DM  +--------------------+ |                       |
+ * | |     | [ event source ]   | |                       |
+ * | |     +-+------------+-----+ |                       |
+ * | |       | (eventfd)  |(sbuf) |                       |
+ * | |       v            v       |                       |
+ * | | +------------------------+ | (socket)  +---------+ |
+ * | | |  [event deliver logic] |-+---------->| Libvirt | |
+ * | | +------------------------+ |           +---------+ |
+ * | |       ^            ^       |                       |
+ * | +-------|------------|-------+                       |
+ * |         | (eventfd)  | (sbuf)                        |
+ * +---------|------------|-------------------------------+
+ * +---------|------------|-------------------------------+
+ * | kernel [HSM]         |                               |
+ * |         ^            |                               |
+ * +---------|------------|-------------------------------+
+ *           |upcall      |
+ * +---------+------------+-------------------------------+
+ * | HV     [ event source ]                              |
+ * +------------------------------------------------------+
+ *
+ * For event sources in HV
+ *  - HV puts the event in the shared ring sbuf.
+ *  - The hypervisor notifies the service VM via upcall.
+ *  - HSM in the service VM notifies device model via eventfd.
+ *  - The device model fetches and handles events from the shared ring sbuf.
+ * For event sources in DM
+ *  - DM puts the event in the DM event ring sbuf.
+ *  - DM notifies event delivery logic via eventfd.
+ *  - The event delivery logic fetches and handles events from the DM event ring sbuf.
+ */
+#define VM_EVENT_RTC_CHG	0U
+#define VM_EVENT_POWEROFF	1U
+#define VM_EVENT_TRIPLE_FAULT	2U
+
+#define VM_EVENT_COUNT		3U
+
+#define VM_EVENT_DATA_LEN	28U
+
+struct vm_event {
+    uint32_t type;
+    uint8_t event_data[VM_EVENT_DATA_LEN];
+};
+
+struct rtc_change_event_data {
+	int64_t	last_time; /* time(in secs) of the RTC defore been set */
+	int64_t delta_time; /* delta of time(in secs) the RTC has been changed */
+};
+
+/* DM vrtc's reference time is besed on sys time, while the HV vrtc is based on pRTC.
+ * When the delta time is sent to users, they need to know what it is relative to.
+ */
+#define RTC_CHG_RELATIVE_PHYSICAL_RTC		0
+#define RTC_CHG_RELATIVE_SERVICE_VM_SYS_TIME	1
 /**
  * @}
  */

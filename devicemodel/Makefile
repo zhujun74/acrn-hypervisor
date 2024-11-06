@@ -80,6 +80,7 @@ LDFLAGS += -L$(TOOLS_OUT)/services
 LIBS = -lrt
 LIBS += -lpthread
 LIBS += -lcrypto
+LIBS += -luring
 LIBS += -lpciaccess
 LIBS += -lusb-1.0
 LIBS += -lacrn-mngr
@@ -187,6 +188,8 @@ SRCS += core/cmd_monitor/socket.c
 SRCS += core/cmd_monitor/command.c
 SRCS += core/cmd_monitor/command_handler.c
 SRCS += core/cmd_monitor/cmd_monitor.c
+SRCS += core/sbuf.c
+SRCS += core/vm_event.c
 
 # arch
 SRCS += arch/x86/pm.c

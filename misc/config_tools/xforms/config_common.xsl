@@ -18,12 +18,12 @@
     <xsl:call-template name="integer-by-key-value">
       <xsl:with-param name="key" select="'MAX_IOAPIC_NUM'" />
       <xsl:with-param name="value" select="//config-data//MAX_IOAPIC_NUM/text()" />
-      <xsl:with-param name="default" select="count(.//ioapic)" />
+      <xsl:with-param name="default" select="acrn:max(1, count(.//ioapic))" />
     </xsl:call-template>
     <xsl:call-template name="integer-by-key-value">
       <xsl:with-param name="key" select="'MAX_IOAPIC_LINES'" />
       <xsl:with-param name="value" select="//config-data//MAX_IOAPIC_LINES/text()" />
-      <xsl:with-param name="default" select="math:max(.//ioapic/gsi_number/text() | exslt:node-set(0))" />
+      <xsl:with-param name="default" select="math:max(.//ioapic/gsi_number/text() | exslt:node-set(48))" />
     </xsl:call-template>
     <xsl:call-template name="msi-msix-max" />
   </xsl:template>
@@ -63,6 +63,13 @@
       <xsl:with-param name="value" select="CONSOLE_LOGLEVEL" />
     </xsl:call-template>
 
+    <xsl:call-template name="integer-by-key-value">
+      <xsl:with-param name="key" select="'CONSOLE_DEFAULT_VM'" />
+      <xsl:with-param name="value" select="CONSOLE_VM" />
+      <!-- Default is HV console, ACRN_INVALID_VMID -->
+      <xsl:with-param name="default" select="'0xffff'" />
+    </xsl:call-template>
+
     <xsl:apply-templates select="SERIAL_CONSOLE" />
   </xsl:template>
 
@@ -70,6 +77,10 @@
     <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="SCHEDULER" />
       <xsl:with-param name="value" select="'y'" />
+    </xsl:call-template>
+
+    <xsl:call-template name="boolean-by-key">
+      <xsl:with-param name="key" select="'SERVICE_VM_SUPERVISOR_ENABLED'" />
     </xsl:call-template>
 
     <xsl:call-template name="boolean-by-key">
@@ -146,6 +157,18 @@
     <xsl:call-template name="boolean-by-key-value">
       <xsl:with-param name="key" select="'IVSHMEM_ENABLED'" />
       <xsl:with-param name="value" select="count(//hv//IVSHMEM/IVSHMEM_REGION[PROVIDED_BY = 'Hypervisor']) > 0" />
+    </xsl:call-template>
+
+    <xsl:call-template name="integer-by-key">
+      <xsl:with-param name="key" select="'VUART_RX_BUF_SIZE'" />
+    </xsl:call-template>
+
+    <xsl:call-template name="integer-by-key">
+      <xsl:with-param name="key" select="'VUART_TX_BUF_SIZE'" />
+    </xsl:call-template>
+
+    <xsl:call-template name="integer-by-key">
+        <xsl:with-param name="key" select="'VUART_TIMER_PCPU'" />
     </xsl:call-template>
   </xsl:template>
 

@@ -18,6 +18,11 @@
 #include <asm/rdt.h>
 #include <asm/guest/vcat.h>
 
+static struct percpu_cpuids {
+	uint32_t leaf_nr;
+	uint32_t leaves[MAX_VM_VCPUID_ENTRIES];
+} pcpu_cpuids;
+
 static inline const struct vcpuid_entry *local_find_vcpuid_entry(const struct acrn_vcpu *vcpu,
 					uint32_t leaf, uint32_t subleaf)
 {
@@ -115,73 +120,6 @@ static void init_vcpuid_entry(uint32_t leaf, uint32_t subleaf,
 	entry->flags = flags;
 
 	switch (leaf) {
-	case 0x06U:
-		cpuid_subleaf(leaf, subleaf, &entry->eax, &entry->ebx, &entry->ecx, &entry->edx);
-		/* Always hide package level HWP controls and HWP interrupt*/
-		entry->eax &= ~(CPUID_EAX_HWP_CTL | CPUID_EAX_HWP_PLR | CPUID_EAX_HWP_N);
-		entry->eax &= ~(CPUID_EAX_HFI | CPUID_EAX_ITD);
-		break;
-
-	case 0x07U:
-		if (subleaf == 0U) {
-			uint64_t cr4_reserved_mask = get_cr4_reserved_bits();
-
-			cpuid_subleaf(leaf, subleaf, &entry->eax, &entry->ebx, &entry->ecx, &entry->edx);
-
-			entry->ebx &= ~(CPUID_EBX_PQM | CPUID_EBX_PQE);
-
-			/* mask LA57 */
-			entry->ecx &= ~CPUID_ECX_LA57;
-
-			/* mask SGX and SGX_LC */
-			entry->ebx &= ~CPUID_EBX_SGX;
-			entry->ecx &= ~CPUID_ECX_SGX_LC;
-
-			/* mask MPX */
-			entry->ebx &= ~CPUID_EBX_MPX;
-
-			/* mask Intel Processor Trace, since 14h is disabled */
-			entry->ebx &= ~CPUID_EBX_PROC_TRC;
-
-			/* mask CET shadow stack and indirect branch tracking */
-			entry->ecx &= ~CPUID_ECX_CET_SS;
-			entry->edx &= ~CPUID_EDX_CET_IBT;
-
-			if ((cr4_reserved_mask & CR4_FSGSBASE) != 0UL) {
-				entry->ebx &= ~CPUID_EBX_FSGSBASE;
-			}
-
-			if ((cr4_reserved_mask & CR4_SMEP) != 0UL) {
-				entry->ebx &= ~CPUID_EBX_SMEP;
-			}
-
-			if ((cr4_reserved_mask & CR4_SMAP) != 0UL) {
-				entry->ebx &= ~CPUID_EBX_SMAP;
-			}
-
-			if ((cr4_reserved_mask & CR4_UMIP) != 0UL) {
-				entry->ecx &= ~CPUID_ECX_UMIP;
-			}
-
-			if ((cr4_reserved_mask & CR4_PKE) != 0UL) {
-				entry->ecx &= ~CPUID_ECX_PKE;
-			}
-
-			if ((cr4_reserved_mask & CR4_LA57) != 0UL) {
-				entry->ecx &= ~CPUID_ECX_LA57;
-			}
-
-			if ((cr4_reserved_mask & CR4_PKS) != 0UL) {
-				entry->ecx &= ~CPUID_ECX_PKS;
-			}
-		} else {
-			entry->eax = 0U;
-			entry->ebx = 0U;
-			entry->ecx = 0U;
-			entry->edx = 0U;
-		}
-		break;
-
 	case 0x16U:
 		cpu_info = get_pcpu_info();
 		if (cpu_info->cpuid_level >= 0x16U) {
@@ -438,6 +376,165 @@ static int32_t set_vcpuid_vcat_10h(struct acrn_vm *vm)
 }
 #endif
 
+static void guest_cpuid_04h(__unused struct acrn_vm *vm, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+	struct vcpuid_entry entry;
+
+	cpuid_subleaf(CPUID_CACHE, *ecx, &entry.eax, &entry.ebx, &entry.ecx, &entry.edx);
+	if (entry.eax != 0U) {
+#ifdef CONFIG_VCAT_ENABLED
+		if (is_vcat_configured(vm)) {
+			/* set_vcpuid_vcat_04h will not change entry.eax */
+			result = set_vcpuid_vcat_04h(vm, &entry);
+		}
+#endif
+	}
+	*eax = entry.eax;
+	*ebx = entry.ebx;
+	*ecx = entry.ecx;
+	*edx = entry.edx;
+}
+
+static int32_t set_vcpuid_cache(struct acrn_vm *vm)
+{
+	int32_t result = 0;
+	struct vcpuid_entry entry;
+	uint32_t i;
+
+	entry.leaf = CPUID_CACHE;
+	entry.flags = CPUID_CHECK_SUBLEAF;
+	for (i = 0U; ; i++) {
+		entry.subleaf = i;
+		entry.ecx = i;
+		guest_cpuid_04h(vm, &entry.eax, &entry.ebx, &entry.ecx, &entry.edx);
+		if (entry.eax == 0U) {
+			break;
+		}
+
+		result = set_vcpuid_entry(vm, &entry);
+		if (result != 0) {
+			/* wants to break out of switch */
+			break;
+		}
+	}
+	return result;
+}
+
+static int32_t set_vcpuid_extfeat(struct acrn_vm *vm)
+{
+	uint64_t cr4_reserved_mask = get_cr4_reserved_bits();
+	int32_t result = 0;
+	struct vcpuid_entry entry;
+	uint32_t i, sub_leaves;
+
+	/* cpuid.07h.0h */
+	cpuid_subleaf(CPUID_EXTEND_FEATURE, 0U, &entry.eax, &entry.ebx, &entry.ecx, &entry.edx);
+
+	entry.ebx &= ~(CPUID_EBX_PQM | CPUID_EBX_PQE);
+	if (is_vsgx_supported(vm->vm_id)) {
+		entry.ebx |= CPUID_EBX_SGX;
+	}
+
+#ifdef CONFIG_VCAT_ENABLED
+	if (is_vcat_configured(vm)) {
+		/* Bit 15: Supports Intel Resource Director Technology (Intel RDT) Allocation capability if 1 */
+		entry.ebx |= CPUID_EBX_PQE;
+	}
+#endif
+	/* mask LA57 */
+	entry.ecx &= ~CPUID_ECX_LA57;
+
+	/* mask SGX and SGX_LC */
+	entry.ebx &= ~CPUID_EBX_SGX;
+	entry.ecx &= ~CPUID_ECX_SGX_LC;
+
+	/* mask MPX */
+	entry.ebx &= ~CPUID_EBX_MPX;
+
+	/* mask Intel Processor Trace, since 14h is disabled */
+	entry.ebx &= ~CPUID_EBX_PROC_TRC;
+
+	/* mask CET shadow stack and indirect branch tracking */
+	entry.ecx &= ~CPUID_ECX_CET_SS;
+	entry.edx &= ~CPUID_EDX_CET_IBT;
+
+	/* mask WAITPKG */
+	entry.ecx &= ~CPUID_ECX_WAITPKG;
+
+	if ((cr4_reserved_mask & CR4_FSGSBASE) != 0UL) {
+		entry.ebx &= ~CPUID_EBX_FSGSBASE;
+	}
+
+	if ((cr4_reserved_mask & CR4_SMEP) != 0UL) {
+		entry.ebx &= ~CPUID_EBX_SMEP;
+	}
+
+	if ((cr4_reserved_mask & CR4_SMAP) != 0UL) {
+		entry.ebx &= ~CPUID_EBX_SMAP;
+	}
+
+	if ((cr4_reserved_mask & CR4_UMIP) != 0UL) {
+		entry.ecx &= ~CPUID_ECX_UMIP;
+	}
+
+	if ((cr4_reserved_mask & CR4_PKE) != 0UL) {
+		entry.ecx &= ~CPUID_ECX_PKE;
+	}
+
+	if ((cr4_reserved_mask & CR4_LA57) != 0UL) {
+		entry.ecx &= ~CPUID_ECX_LA57;
+	}
+
+	if ((cr4_reserved_mask & CR4_PKS) != 0UL) {
+		entry.ecx &= ~CPUID_ECX_PKS;
+	}
+
+	entry.leaf = CPUID_EXTEND_FEATURE;
+	entry.subleaf = 0U;
+	entry.flags = CPUID_CHECK_SUBLEAF;
+	result = set_vcpuid_entry(vm, &entry);
+	if (result == 0) {
+		sub_leaves = entry.eax;
+		for (i = 1U; i <= sub_leaves; i++) {
+			cpuid_subleaf(CPUID_EXTEND_FEATURE, i, &entry.eax, &entry.ebx, &entry.ecx, &entry.edx);
+			entry.subleaf = i;
+			result = set_vcpuid_entry(vm, &entry);
+			if (result != 0) {
+				break;
+			}
+		}
+	}
+	return result;
+}
+
+static void guest_cpuid_06h(struct acrn_vm *vm, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+	cpuid_subleaf(CPUID_THERMAL_POWER, *ecx, eax, ebx, ecx, edx);
+
+	/* Always hide package level HWP controls and HWP interrupt*/
+	*eax &= ~(CPUID_EAX_HWP_CTL | CPUID_EAX_HWP_PLR | CPUID_EAX_HWP_N);
+	*eax &= ~(CPUID_EAX_HFI | CPUID_EAX_ITD);
+	/* Since HFI is hidden, hide the edx too */
+	*edx = 0U;
+	if (!is_vhwp_configured(vm)) {
+		*eax &= ~(CPUID_EAX_HWP | CPUID_EAX_HWP_AW | CPUID_EAX_HWP_EPP);
+		*ecx &= ~CPUID_ECX_HCFC;
+	}
+}
+
+static int32_t set_vcpuid_thermal_power(struct acrn_vm *vm)
+{
+	struct vcpuid_entry entry;
+
+	entry.leaf = CPUID_THERMAL_POWER;
+	entry.subleaf = 0;
+	entry.ecx = 0;
+	entry.flags = CPUID_CHECK_SUBLEAF;
+	guest_cpuid_06h(vm, &entry.eax, &entry.ebx, &entry.ecx, &entry.edx);
+
+	return set_vcpuid_entry(vm, &entry);
+}
+
 static int32_t set_vcpuid_extended_function(struct acrn_vm *vm)
 {
 	uint32_t i, limit;
@@ -499,7 +596,40 @@ static int32_t set_vcpuid_extended_function(struct acrn_vm *vm)
 
 static inline bool is_percpu_related(uint32_t leaf)
 {
-	return ((leaf == 0x1U) || (leaf == 0xbU) || (leaf == 0xdU) || (leaf == 0x19U) || (leaf == 0x80000001U) || (leaf == 0x2U) || (leaf == 0x1aU));
+	uint32_t i;
+	bool ret = false;
+
+	for (i = 0; i < pcpu_cpuids.leaf_nr; i++) {
+		if (leaf == pcpu_cpuids.leaves[i]) {
+			ret = true;
+			break;
+		}
+	}
+	return ret;
+}
+
+static inline void percpu_cpuid_init(void)
+{
+	/* 0x1U, 0xBU, 0xDU, 0x19U, 0x1FU, 0x80000001U */
+	uint32_t percpu_leaves[] = {CPUID_FEATURES, CPUID_EXTEND_TOPOLOGY,
+		CPUID_XSAVE_FEATURES, CPUID_KEY_LOCKER,
+		CPUID_V2_EXTEND_TOPOLOGY, CPUID_EXTEND_FUNCTION_1};
+
+	pcpu_cpuids.leaf_nr = sizeof(percpu_leaves)/sizeof(uint32_t);
+	memcpy_s(pcpu_cpuids.leaves, sizeof(percpu_leaves),
+		 percpu_leaves, sizeof(percpu_leaves));
+
+	/* hybrid related percpu leaves*/
+	if (pcpu_has_cap(X86_FEATURE_HYBRID)) {
+		/* 0x2U, 0x4U, 0x6U, 0x14U, 0x16U, 0x18U, 0x1A, 0x1C, 0x80000006U */
+		uint32_t hybrid_leaves[] = {CPUID_TLB, CPUID_CACHE,
+			CPUID_THERMAL_POWER, CPUID_TRACE, CPUID_FREQ,
+			CPUID_ADDR_TRANS, CPUID_MODEL_ID, CPUID_LAST_BRANCH_RECORD,
+			CPUID_EXTEND_CACHE};
+		memcpy_s(pcpu_cpuids.leaves + pcpu_cpuids.leaf_nr,
+			 sizeof(hybrid_leaves), hybrid_leaves, sizeof(hybrid_leaves));
+		pcpu_cpuids.leaf_nr += sizeof(hybrid_leaves)/sizeof(uint32_t);
+	}
 }
 
 int32_t set_vcpuid_entries(struct acrn_vm *vm)
@@ -507,7 +637,7 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 	int32_t result;
 	struct vcpuid_entry entry;
 	uint32_t limit;
-	uint32_t i, j;
+	uint32_t i;
 	struct cpuinfo_x86 *cpu_info = get_pcpu_info();
 
 	init_vcpuid_entry(0U, 0U, 0U, &entry);
@@ -517,6 +647,8 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 	}
 	result = set_vcpuid_entry(vm, &entry);
 	if (result == 0) {
+		percpu_cpuid_init();
+
 		limit = entry.eax;
 		vm->vcpuid_level = limit;
 
@@ -526,73 +658,40 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 			}
 
 			switch (i) {
-			case 0x04U:
-				for (j = 0U; ; j++) {
-					init_vcpuid_entry(i, j, CPUID_CHECK_SUBLEAF, &entry);
-					if (entry.eax == 0U) {
-						break;
-					}
-
-#ifdef CONFIG_VCAT_ENABLED
-					if (is_vcat_configured(vm)) {
-						result = set_vcpuid_vcat_04h(vm, &entry);
-					}
-#endif
-					result = set_vcpuid_entry(vm, &entry);
-					if (result != 0) {
-						/* wants to break out of switch */
-						break;
-					}
-				}
+			/* 0x4U */
+			case CPUID_CACHE:
+				result = set_vcpuid_cache(vm);
 				break;
 			/* MONITOR/MWAIT */
 			case 0x05U:
 				break;
-			case 0x06U:
-				init_vcpuid_entry(i, 0U, CPUID_CHECK_SUBLEAF, &entry);
-				/* For VMs without vhwp, HWP and HCFC are always hidden. */
-				if (!is_vhwp_configured(vm)) {
-					entry.eax &= ~(CPUID_EAX_HWP | CPUID_EAX_HWP_AW | CPUID_EAX_HWP_EPP);
-					entry.ecx &= ~CPUID_ECX_HCFC;
-				}
-				result = set_vcpuid_entry(vm, &entry);
+			/* 0x06U */
+			case CPUID_THERMAL_POWER:
+				result = set_vcpuid_thermal_power(vm);
 				break;
-			case 0x07U:
-				init_vcpuid_entry(i, 0U, CPUID_CHECK_SUBLEAF, &entry);
-				if (entry.eax != 0U) {
-					pr_warn("vcpuid: only support subleaf 0 for cpu leaf 07h");
-					entry.eax = 0U;
-				}
-				if (is_vsgx_supported(vm->vm_id)) {
-					entry.ebx |= CPUID_EBX_SGX;
-				}
-				entry.ecx &= ~CPUID_ECX_WAITPKG;
-
-#ifdef CONFIG_VCAT_ENABLED
-				if (is_vcat_configured(vm)) {
-					/* Bit 15: Supports Intel Resource Director Technology (Intel RDT) Allocation capability if 1 */
-					entry.ebx |= CPUID_EBX_PQE;
-				}
-#endif
-				result = set_vcpuid_entry(vm, &entry);
+			 /* 0x07U */
+			case CPUID_EXTEND_FEATURE:
+				result = set_vcpuid_extfeat(vm);
 				break;
-			case 0x12U:
+			/* 0x12U */
+			case CPUID_SGX_CAP:
 				result = set_vcpuid_sgx(vm);
 				break;
 			/* These features are disabled */
 			/* PMU is not supported except for core partition VM, like RTVM */
-			case 0x0aU:
+			/* 0x0aU */
+			case CPUID_ARCH_PERF_MON:
 				if (is_pmu_pt_configured(vm)) {
 					init_vcpuid_entry(i, 0U, 0U, &entry);
 					result = set_vcpuid_entry(vm, &entry);
 				}
 				break;
 
-			/* Intel RDT */
-			case 0x0fU:
+			/* 0xFU, Intel RDT */
+			case CPUID_RDT_MONITOR:
 				break;
-			/* Intel RDT */
-			case 0x10U:
+			/* 0x10U, Intel RDT */
+			case CPUID_RDT_ALLOCATION:
 #ifdef CONFIG_VCAT_ENABLED
 				if (is_vcat_configured(vm)) {
 					result = set_vcpuid_vcat_10h(vm);
@@ -600,12 +699,10 @@ int32_t set_vcpuid_entries(struct acrn_vm *vm)
 #endif
 				break;
 
-			/* Intel Processor Trace */
-			case 0x14U:
-			/* PCONFIG */
-			case 0x1bU:
-			/* V2 Extended Topology Enumeration Leaf */
-			case 0x1fU:
+			/* 0x14U, Intel Processor Trace */
+			case CPUID_TRACE:
+			/* 0x1BU, PCONFIG */
+			case CPUID_PCONFIG:
 				break;
 			default:
 				init_vcpuid_entry(i, 0U, 0U, &entry);
@@ -776,6 +873,14 @@ static void guest_cpuid_19h(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx
 	}
 }
 
+static void guest_cpuid_1fh(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
+{
+	cpuid_subleaf(0x1fU, *ecx, eax, ebx, ecx, edx);
+
+	/* Patching X2APIC */
+	*edx = vlapic_get_apicid(vcpu_vlapic(vcpu));
+}
+
 static void guest_cpuid_80000001h(const struct acrn_vcpu *vcpu,
 	uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
 {
@@ -843,29 +948,56 @@ void guest_cpuid(struct acrn_vcpu *vcpu, uint32_t *eax, uint32_t *ebx, uint32_t 
 	} else {
 		/* percpu related */
 		switch (leaf) {
-		case 0x01U:
+		/* 0x01U */
+		case CPUID_FEATURES:
 			guest_cpuid_01h(vcpu, eax, ebx, ecx, edx);
 			break;
 
-		case 0x0bU:
+		/* 0x04U for hybrid arch */
+		case CPUID_CACHE:
+			guest_cpuid_04h(vcpu->vm, eax, ebx, ecx, edx);
+			break;
+
+		/* 0x06U for hybrid arch */
+		case CPUID_THERMAL_POWER:
+			guest_cpuid_06h(vcpu->vm, eax, ebx, ecx, edx);
+			break;
+
+		/* 0x0BU */
+		case CPUID_EXTEND_TOPOLOGY:
 			guest_cpuid_0bh(vcpu, eax, ebx, ecx, edx);
 			break;
 
-		case 0x0dU:
+		/* 0x0dU */
+		case CPUID_XSAVE_FEATURES:
 			guest_cpuid_0dh(vcpu, eax, ebx, ecx, edx);
 			break;
 
-		case 0x19U:
+		/* 0x14U for hybrid arch */
+		case CPUID_TRACE:
+			*eax = 0U;
+			*ebx = 0U;
+			*ecx = 0U;
+			*edx = 0U;
+			break;
+		/* 0x19U */
+		case CPUID_KEY_LOCKER:
 			guest_cpuid_19h(vcpu, eax, ebx, ecx, edx);
 			break;
 
-		case 0x80000001U:
+		/* 0x1fU */
+		case CPUID_V2_EXTEND_TOPOLOGY:
+			guest_cpuid_1fh(vcpu, eax, ebx, ecx, edx);
+			break;
+
+		/* 0x80000001U */
+		case CPUID_EXTEND_FUNCTION_1:
 			guest_cpuid_80000001h(vcpu, eax, ebx, ecx, edx);
 			break;
 
 		default:
 			/*
-			 * In this switch statement, leaf 0x01/0x0b/0x0d/0x19/0x80000001
+			 * In this switch statement, leaf 0x01/0x04/0x06/0x0b/0x0d/0x19/0x1f/0x80000001
 			 * shall be handled specifically. All the other cases
 			 * just return physical value.
 			 */

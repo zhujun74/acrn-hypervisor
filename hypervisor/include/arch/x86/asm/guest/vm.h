@@ -39,6 +39,7 @@ enum reset_mode {
 	WARM_RESET,		/* behavior slightly differ from cold reset, that some MSRs might be retained. */
 	INIT_RESET,		/* reset by INIT */
 	SOFTWARE_RESET,		/* reset by software disable<->enable */
+	RESUME_FROM_S3,		/* reset core states after resuming from S3 */
 };
 
 struct vm_hw_info {
@@ -71,6 +72,7 @@ struct vm_sw_info {
 	/* HVA to IO shared page */
 	void *io_shared_page;
 	void *asyncio_sbuf;
+	void *vm_event_sbuf;
 	/* If enable IO completion polling mode */
 	bool is_polling_ioreq;
 };
@@ -146,6 +148,7 @@ struct acrn_vm {
 	struct asyncio_desc	aio_desc[ACRN_ASYNCIO_MAX];
 	struct list_head aiodesc_queue;
 	spinlock_t asyncio_lock; /* Spin-lock used to protect asyncio add/remove for a VM */
+	spinlock_t vm_event_lock;
 
 	enum vpic_wire_mode wire_mode;
 	struct iommu_domain *iommu;	/* iommu domain of this VM */
@@ -178,6 +181,7 @@ struct acrn_vm {
 	struct acrn_vrtc vrtc;
 
 	uint64_t intr_inject_delay_delta; /* delay of intr injection */
+	uint32_t reset_control;
 } __aligned(PAGE_SIZE);
 
 /*
@@ -230,6 +234,11 @@ static inline uint16_t vmid_2_rel_vmid(uint16_t service_vmid, uint16_t vmid) {
 	return (vmid - service_vmid);
 }
 
+static inline bool is_severity_pass(uint16_t target_vmid)
+{
+	return SEVERITY_SERVICE_VM >= get_vm_severity(target_vmid);
+}
+
 void make_shutdown_vm_request(uint16_t pcpu_id);
 bool need_shutdown_vm(uint16_t pcpu_id);
 int32_t shutdown_vm(struct acrn_vm *vm);
@@ -237,7 +246,7 @@ void poweroff_if_rt_vm(struct acrn_vm *vm);
 void pause_vm(struct acrn_vm *vm);
 void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec);
 void start_vm(struct acrn_vm *vm);
-int32_t reset_vm(struct acrn_vm *vm);
+int32_t reset_vm(struct acrn_vm *vm, enum reset_mode mode);
 int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *vm_config, struct acrn_vm **rtn_vm);
 int32_t prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config);
 void launch_vms(uint16_t pcpu_id);
@@ -258,6 +267,8 @@ uint64_t find_space_from_ve820(struct acrn_vm *vm, uint32_t size, uint64_t min_a
 
 int32_t prepare_os_image(struct acrn_vm *vm);
 
+void suspend_vrtc(void);
+void resume_vrtc(void);
 void vrtc_init(struct acrn_vm *vm);
 
 bool is_lapic_pt_configured(const struct acrn_vm *vm);

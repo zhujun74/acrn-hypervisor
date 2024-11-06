@@ -207,6 +207,8 @@ void host_enter_s3(const struct pm_s_state_data *sstate_data, uint32_t pm1a_cnt_
 	vmx_off();
 
 	suspend_console();
+	suspend_vrtc();
+	suspend_sched();
 	suspend_ioapic();
 	suspend_iommu();
 	suspend_lapic();
@@ -216,6 +218,7 @@ void host_enter_s3(const struct pm_s_state_data *sstate_data, uint32_t pm1a_cnt_
 	resume_lapic();
 	resume_iommu();
 	resume_ioapic();
+	init_frequency_policy();
 
 	vmx_on();
 	CPU_IRQ_ENABLE_ON_CONFIG();
@@ -236,13 +239,15 @@ void host_enter_s3(const struct pm_s_state_data *sstate_data, uint32_t pm1a_cnt_
 	smp_call_function(get_active_pcpu_bitmap(), resume_tsc, NULL);
 
 	/* console must be resumed after TSC restored since it will setup timer base on TSC */
+	resume_sched();
+	resume_vrtc();
 	resume_console();
 }
 
-void reset_host(void)
+void reset_host(bool warm)
 {
 	struct acrn_acpi_generic_address *gas = &(host_reset_reg.reg);
-
+	uint8_t reboot_code = warm ? CF9_RESET_WARM : CF9_RESET_COLD;
 
 	/* TODO: gracefully shut down all guests before doing host reset. */
 
@@ -251,11 +256,6 @@ void reset_host(void)
 	 * The platform we are running must support at least one of reset method:
 	 *   - ACPI reset
 	 *   - 0xcf9 reset
-	 *
-	 * UEFI more likely sets the reset value as 0x6 (not 0xe) for 0xcf9 port.
-	 * This asserts PLTRST# to reset devices on the platform, but not the
-	 * SLP_S3#/4#/5# signals, which power down the systems. This might not be
-	 * enough for us.
 	 */
 	if ((gas->space_id == SPACE_SYSTEM_IO) &&
 		(gas->bit_width == 8U) && (gas->bit_offset == 0U) &&
@@ -265,7 +265,8 @@ void reset_host(void)
 		/* making sure bit 2 (RST_CPU) is '0', when the reset command is issued. */
 		pio_write8(0x2U, 0xcf9U);
 		udelay(50U);
-		pio_write8(0xeU, 0xcf9U);
+		pio_write8(reboot_code, 0xcf9U);
+		udelay(50U);
 	}
 
 	pr_fatal("%s(): can't reset host.", __func__);
@@ -302,7 +303,7 @@ void init_frequency_policy(void)
  * This Function is to be called by each pcpu after init_cpufreq().
  * It applies the frequency policy, which can be specified from boot parameters.
  *   - cpu_perf_policy=Performance: HWP autonomous selection, between highest HWP level and
- *     lowest HWP level. If HWP is not avaliable, the frequency is fixed to highest p-state.
+ *     lowest HWP level. If HWP is not available, the frequency is fixed to highest p-state.
  *   - cpu_perf_policy=Nominal: frequency is fixed to guaranteed HWP level or nominal p-state.
  * The default policy is 'Performance'.
  *
@@ -317,7 +318,7 @@ void apply_frequency_policy(void)
 
 	cpuid_subleaf(0x6U, 0U, &cpuid_06_eax, &unused, &unused, &unused);
 	cpuid_subleaf(0x1U, 0U, &unused, &unused, &cpuid_01_ecx, &unused);
-	/* Both HWP and ACPI p-state are supported. HWP is the first choise. */
+	/* Both HWP and ACPI p-state are supported. HWP is the first choice. */
 	if ((cpuid_06_eax & CPUID_EAX_HWP) != 0U) {
 		/*
 		 * For Performance policy(default): CPU frequency will be autonomously selected between highest and lowest
@@ -342,7 +343,7 @@ void apply_frequency_policy(void)
 			pstate_req = limits->nominal_pstate;
 		}
 
-		/* PX info might be missing on some platforms (px_cnt equels 0). Do nothing if so. */
+		/* PX info might be missing on some platforms (px_cnt equals 0). Do nothing if so. */
 		if (pm_s_state_data->px_cnt != 0) {
 			if (pstate_req < pm_s_state_data->px_cnt) {
 				msr_write(MSR_IA32_PERF_CTL, pm_s_state_data->px_data[pstate_req].control);

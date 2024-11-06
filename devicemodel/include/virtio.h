@@ -427,6 +427,7 @@ struct virtio_iothread {
 	int idx;
 	int kick_fd;
 	bool	ioevent_started;
+	struct iothread_ctx *ioctx;
 	struct iothread_mevent iomvt;
 	void (*iothread_run)(void *, struct virtio_vq_info *);
 };
@@ -439,6 +440,7 @@ struct virtio_vq_info {
 	struct virtio_base *base;
 				/**< backpointer to virtio_base */
 	uint16_t num;		/**< the num'th queue in the virtio_base */
+	pthread_mutex_t mtx;	/**< per queue mutex */
 
 	uint16_t flags;		/**< flags (see above) */
 	uint16_t last_avail;	/**< a recent value of avail->idx */

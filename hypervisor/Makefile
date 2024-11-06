@@ -219,6 +219,7 @@ HW_C_SRCS += arch/x86/exception.c
 HW_C_SRCS += arch/x86/irq.c
 HW_C_SRCS += arch/x86/tsc.c
 HW_C_SRCS += arch/x86/tsc_deadline_timer.c
+HW_C_SRCS += arch/x86/hw_thermal.c
 HW_C_SRCS += arch/x86/vmx.c
 HW_C_SRCS += arch/x86/cpu_state_tbl.c
 HW_C_SRCS += arch/x86/pm.c
@@ -230,12 +231,14 @@ HW_C_SRCS += arch/x86/sgx.c
 HW_C_SRCS += common/ticks.c
 HW_C_SRCS += common/delay.c
 HW_C_SRCS += common/timer.c
+HW_C_SRCS += common/thermal.c
 HW_C_SRCS += common/irq.c
 HW_C_SRCS += common/softirq.c
 HW_C_SRCS += common/schedule.c
 HW_C_SRCS += common/event.c
 HW_C_SRCS += common/efi_mmap.c
 HW_C_SRCS += common/sbuf.c
+HW_C_SRCS += common/vm_event.c
 ifeq ($(CONFIG_SCHED_NOOP),y)
 HW_C_SRCS += common/sched_noop.c
 endif

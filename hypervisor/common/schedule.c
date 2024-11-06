@@ -13,6 +13,7 @@
 #include <schedule.h>
 #include <sprintf.h>
 #include <asm/irq.h>
+#include <trace.h>
 
 bool is_idle_thread(const struct thread_object *obj)
 {
@@ -98,6 +99,24 @@ void deinit_sched(uint16_t pcpu_id)
 	}
 }
 
+void suspend_sched(void)
+{
+	struct sched_control *ctl = &per_cpu(sched_ctl, BSP_CPU_ID);
+
+	if (ctl->scheduler->suspend != NULL) {
+		ctl->scheduler->suspend(ctl);
+	}
+}
+
+void resume_sched(void)
+{
+	struct sched_control *ctl = &per_cpu(sched_ctl, BSP_CPU_ID);
+
+	if (ctl->scheduler->resume != NULL) {
+		ctl->scheduler->resume(ctl);
+	}
+}
+
 void init_thread_data(struct thread_object *obj, struct sched_params *params)
 {
 	struct acrn_scheduler *scheduler = get_scheduler(obj->pcpu_id);
@@ -154,6 +173,7 @@ void schedule(void)
 	struct thread_object *next = &per_cpu(idle, pcpu_id);
 	struct thread_object *prev = ctl->curr_obj;
 	uint64_t rflag;
+	char name[16];
 
 	obtain_schedule_lock(pcpu_id, &rflag);
 	if (ctl->scheduler->pick_next != NULL) {
@@ -164,6 +184,10 @@ void schedule(void)
 	/* If we picked different sched object, switch context */
 	if (prev != next) {
 		if (prev != NULL) {
+			memcpy_erms(name, prev->name, 4);
+			memcpy_erms(name + 4, next->name, 4);
+			memset(name + 8, 0, sizeof(name) - 8);
+			TRACE_16STR(TRACE_SCHED_NEXT, name);
 			if (prev->switch_out != NULL) {
 				prev->switch_out(prev);
 			}

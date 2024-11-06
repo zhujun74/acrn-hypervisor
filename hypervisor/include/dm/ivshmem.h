@@ -9,6 +9,7 @@
 
 #define	IVSHMEM_VENDOR_ID	0x1af4U
 #define	IVSHMEM_DEVICE_ID	0x1110U
+#define	IVSHMEM_INTEL_SUBVENDOR_ID	0x8086U
 #ifdef CONFIG_IVSHMEM_ENABLED
 
 /*
@@ -21,6 +22,8 @@
 #define MAX_IVSHMEM_MSIX_TBL_ENTRY_NUM 8U
 struct ivshmem_shm_region {
 	char name[32];
+	uint16_t region_id;
+	uint8_t reserved[6];
 	uint64_t hpa;
 	uint64_t size;
 	struct ivshmem_device *doorbell_peers[MAX_IVSHMEM_PEER_NUM];

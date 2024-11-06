@@ -1,6 +1,6 @@
 /*-
  * Copyright (c) 2011 NetApp, Inc.
- * Copyright (c) 2017-2022 Intel Corporation.
+ * Copyright (c) 2017-2024 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -41,6 +41,11 @@
 
 static uint64_t hv_ram_size;
 static void *ppt_mmu_pml4_addr;
+/**
+ * @brief The sanitized page
+ *
+ * The sanitized page is used to mitigate l1tf.
+ */
 static uint8_t sanitized_page[PAGE_SIZE] __aligned(PAGE_SIZE);
 
 /* PPT VA and PA are identical mapping */
@@ -233,14 +238,17 @@ void set_paging_x(uint64_t base, uint64_t size)
 
 void allocate_ppt_pages(void)
 {
-       uint64_t page_base;
+	uint64_t page_base;
+	uint64_t bitmap_size = get_ppt_page_num() / 8;
 
-       page_base = e820_alloc_memory(sizeof(struct page) * get_ppt_page_num(), MEM_4G);
-       ppt_page_pool.bitmap = (uint64_t *)e820_alloc_memory(get_ppt_page_num()/8, MEM_4G);
+	page_base = e820_alloc_memory(sizeof(struct page) * get_ppt_page_num(), MEM_4G);
+	ppt_page_pool.bitmap = (uint64_t *)e820_alloc_memory(bitmap_size, MEM_4G);
 
-       ppt_page_pool.start_page = (struct page *)(void *)page_base;
-       ppt_page_pool.bitmap_size = get_ppt_page_num() / 64;
-       ppt_page_pool.dummy_page = NULL;
+	ppt_page_pool.start_page = (struct page *)(void *)page_base;
+	ppt_page_pool.bitmap_size = bitmap_size / sizeof(uint64_t);
+	ppt_page_pool.dummy_page = NULL;
+
+	memset(ppt_page_pool.bitmap, 0, bitmap_size);
 }
 
 void init_paging(void)
@@ -298,7 +306,7 @@ void init_paging(void)
 	}
 
 	/*
-	 * set the paging-structure entries' U/S flag to supervisor-mode for hypervisor owned memroy.
+	 * set the paging-structure entries' U/S flag to supervisor-mode for hypervisor owned memory.
 	 * (exclude the memory reserve for trusty)
 	 *
 	 * Before the new PML4 take effect in enable_paging(), HPA->HVA is always 1:1 mapping,

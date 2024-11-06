@@ -14,6 +14,7 @@
 #include <asm/lapic.h>
 #include <asm/guest/assign.h>
 #include <asm/guest/ept.h>
+#include <asm/guest/vm.h>
 #include <asm/mmu.h>
 #include <hypercall.h>
 #include <errno.h>
@@ -67,11 +68,6 @@ bool is_hypercall_from_ring0(void)
 	}
 
 	return ret;
-}
-
-inline static bool is_severity_pass(uint16_t target_vmid)
-{
-	return SEVERITY_SERVICE_VM >= get_vm_severity(target_vmid);
 }
 
 /**
@@ -348,7 +344,7 @@ int32_t hcall_reset_vm(__unused struct acrn_vcpu *vcpu, struct acrn_vm *target_v
 
 	if (is_paused_vm(target_vm)) {
 		/* TODO: check target_vm guest_flags */
-		ret = reset_vm(target_vm);
+		ret = reset_vm(target_vm, COLD_RESET);
 	}
 	return ret;
 }
@@ -553,7 +549,7 @@ int32_t hcall_asyncio_assign(__unused struct acrn_vcpu *vcpu, struct acrn_vm *ta
 	int ret = -1;
 
 	if (copy_from_gpa(vm, &asyncio_info, param2, sizeof(asyncio_info)) == 0) {
-		add_asyncio(target_vm, asyncio_info.type, asyncio_info.addr, asyncio_info.fd);
+		add_asyncio(target_vm, &asyncio_info);
 		ret = 0;
 	}
 	return ret;
@@ -567,7 +563,7 @@ int32_t hcall_asyncio_deassign(__unused struct acrn_vcpu *vcpu, struct acrn_vm *
 	int ret = -1;
 
 	if (copy_from_gpa(vm, &asyncio_info, param2, sizeof(asyncio_info)) == 0) {
-		remove_asyncio(target_vm, asyncio_info.type, asyncio_info.addr, asyncio_info.fd);
+		remove_asyncio(target_vm, &asyncio_info);
 		ret = 0;
 	}
 	return ret;
@@ -1106,7 +1102,7 @@ int32_t hcall_get_cpu_pm_state(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm
 	int32_t ret = -1;
 	uint64_t cmd = param1;
 
-	if (is_created_vm(target_vm)) {
+	if (is_created_vm(target_vm) || is_paused_vm(target_vm)) {
 		switch (cmd & PMCMD_TYPE_MASK) {
 		case ACRN_PMCMD_GET_PX_CNT: {
 			uint8_t px_cnt;
@@ -1208,6 +1204,8 @@ int32_t hcall_vm_intr_monitor(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm,
 			intr_hdr = (struct acrn_intr_monitor *)hpa2hva(hpa);
 			stac();
 			if (intr_hdr->buf_cnt <= (MAX_PTDEV_NUM * 2U)) {
+				status = 0;
+
 				switch (intr_hdr->cmd) {
 				case INTR_CMD_GET_DATA:
 					intr_hdr->buf_cnt = ptirq_get_intr_data(target_vm,
@@ -1222,10 +1220,9 @@ int32_t hcall_vm_intr_monitor(struct acrn_vcpu *vcpu, struct acrn_vm *target_vm,
 
 				default:
 					/* if cmd wrong it goes here should not happen */
+					status = -EINVAL;
 					break;
 				}
-
-				status = 0;
 			}
 			clac();
 		}

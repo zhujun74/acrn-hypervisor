@@ -5,9 +5,74 @@
  */
 
 #include <asm/guest/vm.h>
+#include <asm/guest/ept.h>
+#include <asm/mmu.h>
 #include <vboot.h>
 #include <elf.h>
 #include <logmsg.h>
+#include <vacpi.h>
+
+/* Define a memory block to store ELF format VM load params in guest address space
+ * The params including:
+ *	MISC info: 1KB
+ *		including: Init GDT(40 bytes),ACRN ELF loader name(20 bytes), ACPI RSDP table(36 bytes).
+ *	Multiboot info : 4KB
+ *	Boot cmdline : 2KB
+ *	memory map : 20KB (enough to put memory entries for multiboot 0.6.96 or multiboot 2.0)
+ * Each param should keep 8byte aligned and the total region should be able to put below MEM_1M.
+ * The total params size is:
+ * (MEM_1K + MEM_4K + MEM_2K + 20K) = 27KB
+ */
+
+struct elf_boot_para {
+	char init_gdt[40];
+	char loader_name[20];
+	struct acpi_table_rsdp rsdp;
+	struct multiboot_info mb_info;
+	char cmdline[MEM_2K];
+	char mmap[MEM_4K * 5U];
+} __aligned(8);
+
+int32_t prepare_elf_cmdline(struct acrn_vm *vm, uint64_t param_cmd_gpa)
+{
+	return copy_to_gpa(vm, vm->sw.bootargs_info.src_addr, param_cmd_gpa,
+		           vm->sw.bootargs_info.size);
+}
+
+uint32_t prepare_multiboot_mmap(struct acrn_vm *vm, uint64_t param_mmap_gpa)
+{
+	uint32_t i, mmap_length = 0U;
+	struct multiboot_mmap mmap_entry;
+	uint64_t mmap_gpa = param_mmap_gpa;
+
+	for (i = 0U; i < vm->e820_entry_num; i++) {
+		mmap_entry.size = 20U;
+		mmap_entry.baseaddr = vm->e820_entries[i].baseaddr;
+		mmap_entry.length = vm->e820_entries[i].length;
+		mmap_entry.type = vm->e820_entries[i].type;
+		if (mmap_entry.type > MULTIBOOT_MEMORY_BADRAM) {
+			mmap_entry.type = MULTIBOOT_MEMORY_RESERVED;
+		}
+
+		if (copy_to_gpa(vm, &mmap_entry, mmap_gpa,
+			sizeof(struct multiboot_mmap)) != 0U) {
+			mmap_length = 0U;
+			break;
+		}
+		mmap_gpa += sizeof(struct multiboot_mmap);
+		mmap_length += sizeof(struct multiboot_mmap);
+	}
+
+	return mmap_length;
+}
+
+uint32_t prepare_loader_name(struct acrn_vm *vm, uint64_t param_ldrname_gpa)
+{
+	char loader_name[MAX_LOADER_NAME_SIZE] = "ACRN ELF LOADER";
+
+	return (copy_to_gpa(vm, (void *)loader_name, param_ldrname_gpa,
+		MAX_LOADER_NAME_SIZE));
+}
 
 /**
  * @pre vm != NULL
@@ -108,7 +173,7 @@ static void *do_load_elf32(struct acrn_vm *vm)
 				 * We assume that the guest elf can put segments to valid gpa.
 				 */
 				(void)copy_to_gpa(vm, p_elf_img + p_prg_tbl_head32->p_offset,
-					p_prg_tbl_head32->p_paddr, p_prg_tbl_head32->p_memsz);
+					p_prg_tbl_head32->p_paddr, p_prg_tbl_head32->p_filesz);
 				/* copy_to_gpa has it's stac/clac inside. So call stac again here. */
 				stac();
 			}
@@ -174,19 +239,110 @@ static int32_t load_elf(struct acrn_vm *vm)
 	return ret;
 }
 
+struct multiboot_header *find_img_multiboot_header(struct acrn_vm *vm)
+{
+	uint16_t i, j;
+	struct multiboot_header *ret = NULL;
+	uint32_t *p = (uint32_t *)vm->sw.kernel_info.kernel_src_addr;
+
+	/* Scan the first 8k to detect whether the elf needs multboot info prepared. */
+	for (i = 0U; i <= (((MEM_4K * 2U) / sizeof(uint32_t)) - 3U); i++) {
+		if (p[i] == MULTIBOOT_HEADER_MAGIC) {
+			uint32_t sum = 0U;
+
+			/* According to multiboot spec 0.6.96 sec 3.1.2.
+			 * There are three u32:
+			 *  offset   field
+			 *    0      multiboot_header_magic
+			 *    4      flags
+			 *    8      checksum
+			 * The sum of these three u32 should be u32 zero.
+			 */
+			for (j = 0U; j < 3U; j++) {
+				sum += p[j + i];
+			}
+
+			if (0U == sum) {
+				ret = (struct multiboot_header *)(p + i);
+				break;
+			}
+		}
+	}
+	return ret;
+}
+
 int32_t elf_loader(struct acrn_vm *vm)
 {
-	uint64_t vgdt_gpa = 0x800;
-
+	int32_t ret = 0;
+	struct multiboot_header *mb_hdr;
+	/* Get primary vcpu */
+	struct acrn_vcpu *vcpu = vcpu_from_vid(vm, BSP_CPU_ID);
 	/*
-	 * TODO:
-	 *    - We need to initialize the guest BSP(boot strap processor) registers according to
-	 *	guest boot mode (real mode vs protect mode)
-	 *    - The memory layout usage is unclear, only GDT might be needed as its boot param.
-	 *	currently we only support Zephyr which has no needs on cmdline/e820/efimmap/etc.
-	 *	hardcode the vGDT GPA to 0x800 where is not used by Zephyr so far;
+	 * Assuming the guest elf would not load content to GPA space under
+	 * VIRT_RSDP_ADDR, and guest gpa load space is sure under address
+	 * we prepared in ve820.c. In the future, need to check each
+	 * ELF load entry according to ve820 if relocation is not supported.
 	 */
-	init_vcpu_protect_mode_regs(vcpu_from_vid(vm, BSP_CPU_ID), vgdt_gpa);
+	uint64_t load_params_gpa = find_space_from_ve820(vm, sizeof(struct elf_boot_para),
+				   MEM_4K, VIRT_RSDP_ADDR);
 
-	return load_elf(vm);
+	if (load_params_gpa != INVALID_GPA) {
+		/* We boot ELF Image from protected mode directly */
+		init_vcpu_protect_mode_regs(vcpu, load_params_gpa +
+					    offsetof(struct elf_boot_para, init_gdt));
+		stac();
+		mb_hdr = find_img_multiboot_header(vm);
+		clac();
+		if (mb_hdr != NULL) {
+			uint32_t mmap_length = 0U;
+			struct multiboot_info mb_info;
+
+			stac();
+			if ((mb_hdr->flags & MULTIBOOT_HEADER_NEED_MEMINFO) != 0U) {
+				mmap_length = prepare_multiboot_mmap(vm, load_params_gpa +
+						offsetof(struct elf_boot_para, mmap));
+			}
+
+			if (mmap_length != 0U) {
+				mb_info.mi_flags |= MULTIBOOT_INFO_HAS_MMAP;
+				mb_info.mi_mmap_addr = (uint32_t)(load_params_gpa +
+						offsetof(struct elf_boot_para, mmap));
+				mb_info.mi_mmap_length = mmap_length;
+			}
+			ret = prepare_elf_cmdline(vm, load_params_gpa +
+						offsetof(struct elf_boot_para, cmdline));
+			if (ret == 0) {
+				mb_info.mi_flags |= MULTIBOOT_INFO_HAS_CMDLINE;
+				mb_info.mi_cmdline = load_params_gpa +
+						offsetof(struct elf_boot_para, cmdline);
+				ret = prepare_loader_name(vm, load_params_gpa +
+						offsetof(struct elf_boot_para, loader_name));
+			}
+
+			if (ret == 0) {
+				mb_info.mi_flags |= MULTIBOOT_INFO_HAS_LOADER_NAME;
+				mb_info.mi_loader_name = load_params_gpa +
+						offsetof(struct elf_boot_para, loader_name);
+				ret = copy_to_gpa(vm, (void *)&mb_info, load_params_gpa +
+						offsetof(struct elf_boot_para, mb_info),
+						sizeof(struct multiboot_info));
+			}
+
+			if (ret == 0) {
+				vcpu_set_gpreg(vcpu, CPU_REG_RAX, MULTIBOOT_INFO_MAGIC);
+				vcpu_set_gpreg(vcpu, CPU_REG_RBX, load_params_gpa +
+						offsetof(struct elf_boot_para, mb_info));
+				/* other vcpu regs should have satisfied multiboot requirement already. */
+			}
+			clac();
+		}
+		/*
+		 * elf_loader need support non-multiboot header image
+		 * at the same time.
+		 */
+		if (ret == 0) {
+			ret = load_elf(vm);
+		}
+	}
+	return ret;
 }

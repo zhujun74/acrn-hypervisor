@@ -177,10 +177,8 @@ bool is_stateful_vm(const struct acrn_vm *vm)
 {
 	struct acrn_vm_config *vm_config = get_vm_config(vm->vm_id);
 
-	/* TEE VM doesn't has its own state. The TAs will do the content
-	 * flush by themselves, HV and OS doesn't need to care about the state.
-	 */
-	return ((vm_config->guest_flags & GUEST_FLAG_TEE) == 0U);
+	/* TEE VM has GUEST_FLAG_STATELESS set implicitly */
+	return ((vm_config->guest_flags & GUEST_FLAG_STATELESS) == 0U);
 }
 
 /**
@@ -787,6 +785,8 @@ int32_t create_vm(uint16_t vm_id, uint64_t pcpu_bitmap, struct acrn_vm_config *v
 		passthrough_smbios(vm, get_acrn_boot_info());
 #endif
 
+		vm->sw.vm_event_sbuf = NULL;
+
 		status = init_vpci(vm);
 		if (status == 0) {
 			enable_iommu();
@@ -993,7 +993,7 @@ void start_vm(struct acrn_vm *vm)
  * @pre vm != NULL
  * @pre vm->state == VM_PAUSED
  */
-int32_t reset_vm(struct acrn_vm *vm)
+int32_t reset_vm(struct acrn_vm *vm, enum reset_mode mode)
 {
 	uint16_t i;
 	uint64_t mask;
@@ -1014,7 +1014,7 @@ int32_t reset_vm(struct acrn_vm *vm)
 	 */
 	vm->arch_vm.vlapic_mode = VM_VLAPIC_XAPIC;
 
-	if (is_service_vm(vm)) {
+	if ((mode == POWER_ON_RESET) && is_service_vm(vm)) {
 		(void)prepare_os_image(vm);
 	}
 
@@ -1046,9 +1046,8 @@ void pause_vm(struct acrn_vm *vm)
 	uint16_t i;
 	struct acrn_vcpu *vcpu = NULL;
 
-	/* For RTVM, we can only pause its vCPUs when it is powering off by itself */
-	if (((!is_rt_vm(vm)) && (vm->state == VM_RUNNING)) ||
-			((is_rt_vm(vm)) && (vm->state == VM_READY_TO_POWEROFF)) ||
+	if (((is_severity_pass(vm->vm_id)) && (vm->state == VM_RUNNING)) ||
+			(vm->state == VM_READY_TO_POWEROFF) ||
 			(vm->state == VM_CREATED)) {
 		foreach_vcpu(i, vm, vcpu) {
 			zombie_vcpu(vcpu, VCPU_ZOMBIE);
@@ -1076,20 +1075,16 @@ void resume_vm_from_s3(struct acrn_vm *vm, uint32_t wakeup_vec)
 {
 	struct acrn_vcpu *bsp = vcpu_from_vid(vm, BSP_CPU_ID);
 
-	vm->state = VM_RUNNING;
-
-	reset_vcpu(bsp, POWER_ON_RESET);
+	reset_vm(vm, RESUME_FROM_S3);
 
 	/* When Service VM resume from S3, it will return to real mode
 	 * with entry set to wakeup_vec.
 	 */
 	set_vcpu_startup_entry(bsp, wakeup_vec);
 
-	init_vmcs(bsp);
-	launch_vcpu(bsp);
+	start_vm(vm);
 }
 
-static uint8_t loaded_pre_vm_nr = 0U;
 /**
  * Prepare to create vm/vcpu for vm
  *
@@ -1097,7 +1092,7 @@ static uint8_t loaded_pre_vm_nr = 0U;
  */
 int32_t prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 {
-	int32_t err = 0;
+	int32_t err = -1;
 	struct acrn_vm *vm = NULL;
 
 #ifdef CONFIG_SECURITY_VM_FIXUP
@@ -1105,41 +1100,15 @@ int32_t prepare_vm(uint16_t vm_id, struct acrn_vm_config *vm_config)
 #endif
 	if (get_vmid_by_name(vm_config->name) != vm_id) {
 		pr_err("Invalid VM name: %s", vm_config->name);
-		err = -1;
 	} else {
 		/* Service VM and pre-launched VMs launch on all pCPUs defined in vm_config->cpu_affinity */
 		err = create_vm(vm_id, vm_config->cpu_affinity, vm_config, &vm);
-	}
-
-	if (err == 0) {
-		if (is_prelaunched_vm(vm)) {
-			build_vrsdp(vm);
-		}
-
-		if (is_service_vm(vm)) {
-			/* We need to ensure all modules of pre-launched VMs have been loaded already
-			 * before loading Service VM modules, otherwise the module of pre-launched VMs could
-			 * be corrupted because Service VM kernel might pick any usable RAM to extract kernel
-			 * when KASLR enabled.
-			 * In case the pre-launched VMs aren't loaded successfuly that cause deadlock here,
-			 * use a 10000ms timer to break the waiting loop.
-			 */
-			uint64_t start_tick = cpu_ticks();
-
-			while (loaded_pre_vm_nr != PRE_VM_NUM) {
-				uint64_t timeout = ticks_to_ms(cpu_ticks() - start_tick);
-
-				if (timeout > 10000U) {
-					pr_err("Loading pre-launched VMs timeout!");
-					break;
-				}
+		if (err == 0) {
+			if (is_prelaunched_vm(vm)) {
+				build_vrsdp(vm);
 			}
-		}
 
-		err = prepare_os_image(vm);
-
-		if (is_prelaunched_vm(vm)) {
-			loaded_pre_vm_nr++;
+			err = prepare_os_image(vm);
 		}
 	}
 
