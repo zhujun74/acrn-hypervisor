@@ -61,7 +61,7 @@ static void *get_initrd_load_addr(struct acrn_vm *vm, uint64_t kernel_start)
 	kernel_init_size = zeropage->hdr.init_size;
 	kernel_align = zeropage->hdr.kernel_alignment;
 	initrd_addr_max = zeropage->hdr.initrd_addr_max;
-	stac();
+	clac();
 	kernel_end = roundup(kernel_start, kernel_align) + kernel_init_size;
 
 	if (initrd_addr_max != 0U) {
@@ -274,7 +274,7 @@ static uint64_t create_zero_page(struct acrn_vm *vm, uint64_t load_params_gpa)
 
 	stac();
 	/* clear the zeropage */
-	(void)memset(zeropage, 0U, MEM_2K);
+	(void)memset(zeropage, 0U, MEM_4K);
 
 #ifdef CONFIG_MULTIBOOT2
 	if (is_service_vm(vm)) {
